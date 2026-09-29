@@ -4,4 +4,4 @@
 # `lib/client.js` as `/plugins/dsh-model-think-level/client.js`.
 - insert:
     - id: dsh-model-think-level
-      name: dsh-model-think-level
+      name: 模型思考等级配置

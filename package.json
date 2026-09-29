@@ -26,6 +26,13 @@
     "llm-settings"
   ],
   "type": "module",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@google/genai",
+      "esbuild",
+      "protobufjs"
+    ]
+  },
   "main": "lib/index.js",
   "types": "./lib/index.d.ts",
   "exports": {

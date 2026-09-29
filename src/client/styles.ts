@@ -233,7 +233,7 @@ export const STYLES = `
   /* The replicated popover body. The official menu shell carries padding: 4px
      (ModelSelect.module.css), so pull the replica flush to the box. overflow
      stays VISIBLE: an open list is laid out inside the body, so nothing ever
-     has to escape it and a clip could only cut the card's own border. */
+     has to escape it, and the rows' own hover radius needs no clipping. */
   overflow: visible;
   margin: -4px;
   padding: 8px;
@@ -251,16 +251,20 @@ export const STYLES = `
 /* ---- Model / reasoning-level rows ----
    Presentation follows dsh-tauri-model-config's settings rows
    (src/client/models/styles.ts: .zGbnIq_rowCard / .zGbnIq_rowHead /
-   .zGbnIq_iconButton): one bordered card, hairline separators between rows, and
-   a list opening under the row it belongs to. Re-prefixed bre- and routed
-   through the tokens this file already uses. */
+   .zGbnIq_iconButton): hairline separators between rows and a list opening
+   under the row it belongs to. Re-prefixed bre- and routed through the tokens
+   this file already uses. */
+/* Layout only — it deliberately paints NO background, border, radius or
+   overflow clip. The replica is mounted inside the OFFICIAL menu, and that
+   shell already draws its own surface (MenuSurface: a [data-menu-material]
+   panel whose .material child paints --dsw-menu-surface-fill, i.e.
+   --dsw-specific-menu, under backdrop-filter: var(--dsw-menu-backdrop-filter),
+   rounded by --dsw-radius-lg and outlined by --dsw-elevation-prominent).
+   A second opaque card in here shows that official surface as a grey frame
+   around it — two stacked surfaces where every other menu in the app has one. */
 .bre-card {
   display: flex;
   flex-direction: column;
-  border: 0.5px solid var(--dsw-alias-border-l4);
-  border-radius: 14px;
-  overflow: hidden;
-  background: var(--dsw-alias-bg-layer-1, transparent);
 }
 .bre-row-control {
   appearance: none;
@@ -272,6 +276,11 @@ export const STYLES = `
   min-height: 38px;
   padding: 0 10px;
   border: 0;
+  /* Matches the official menu cells (.u91W7W_cell / .u91W7W_option use
+     --dsw-radius-md, 8px here) and the .bre-option rows below, now that the
+     surface behind the rows is the menu's own and hover is no longer clipped
+     by a card. */
+  border-radius: 8px;
   background: transparent;
   color: inherit;
   font: inherit;
