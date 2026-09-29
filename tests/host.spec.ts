@@ -1,0 +1,942 @@
+/**
+ * Host apply() integration tests against a fake settings service shaped like
+ * the 0.1.7 SettingsForms service: describe() returns one descriptor per
+ * active profile entry, and there is deliberately no get().
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+type HostCtx = Parameters<typeof import('../src/index.js').apply>[0]
+
+/** A settings service with the real provider's face (narrowed to what apply uses). */
+function fakeSettings(providers: Record<string, unknown> | undefined) {
+  let revision = 3
+  let current = providers
+  let describeCalls = 0
+  const updates: Array<{ patch: object; expectedRevision: number | undefined }> = []
+  return {
+    describe(): Array<{ ns: string; revision: number; value?: unknown; user?: unknown }> {
+      describeCalls += 1
+      // Registered namespaces only: before llm-pi-ai registers, the list is empty.
+      // The descriptor carries the raw USER layer too — the autofill builds its
+      // patch from it, never from the resolved view.
+      return current === undefined
+        ? []
+        : [{ ns: 'llm-pi-ai', revision, value: { providers: current }, user: { providers: current } }]
+    },
+    async update(ns: string, patch: object, expectedRevision?: number): Promise<void> {
+      if (expectedRevision !== undefined && expectedRevision !== revision) {
+        throw new Error(`settings namespace "${String(ns)}" changed since it was read (expected ${expectedRevision}, now ${revision})`)
+      }
+      updates.push({ patch, expectedRevision })
+      revision += 1
+    },
+    updates,
+    describeCalls: () => describeCalls,
+    register(namespace: string, next?: Record<string, unknown>): void {
+      void namespace
+      if (next !== undefined) current = next
+    },
+  }
+}
+
+/** Disposers collected from every fakeHost effect(), run after each test. */
+const hostCleanups: Array<() => void> = []
+
+/** Minimal cordis context face capturing what apply() touches. */
+function fakeHost(
+  settings: ReturnType<typeof fakeSettings>,
+  options?: { credentials?: { resolve(ref: string): Promise<{ value?: string } | undefined> }; llm?: unknown },
+): {
+  ctx: HostCtx
+  emitUpdated: (ns: unknown) => void
+  routes: Map<string, (req: unknown, res: unknown) => Promise<void>>
+  dispose: () => void
+} {
+  const listeners: Array<(ns: unknown) => void> = []
+  const routes = new Map<string, (req: unknown, res: unknown) => Promise<void>>()
+  const disposers: Array<() => void> = []
+  const ctx = {
+    // apply reads the settings service directly (module-level inject already
+    // guarantees it); the inner inject remains for webServer only.
+    settings,
+    inject(deps: string[], cb: (injected: Record<string, unknown>) => void): void {
+      const injected: Record<string, unknown> = {}
+      if (deps.includes('settings')) injected['settings'] = settings
+      if (deps.includes('llm') && options?.llm !== undefined) injected['llm'] = options.llm
+      if (deps.includes('webServer')) {
+        injected['webServer'] = {
+          register(route: { path: string; handler: (req: unknown, res: unknown) => Promise<void> }): () => void {
+            routes.set(route.path, route.handler)
+            return () => { routes.delete(route.path) }
+          },
+        }
+      }
+      cb(injected)
+    },
+    effect(setup: () => () => void, _name?: string): void {
+      // Collect the disposer like the real cordis fiber does: the boot-fill
+      // retry timers must be cleared with the test instead of firing into the
+      // next test's world (previously the cleanup was silently dropped).
+      const disposer = setup()
+      if (typeof disposer === 'function') {
+        hostCleanups.push(disposer)
+        disposers.push(disposer)
+      }
+    },
+    on(event: string, cb: (ns: unknown) => void): void {
+      if (event === 'settings/document-updated') listeners.push(cb)
+    },
+    get(name: string): unknown {
+      return name === 'credentials' ? options?.credentials : undefined
+    },
+  } as unknown as HostCtx
+  // dispose() is idempotent with the afterEach drain (restores assign the
+  // same originals twice); it lets one test assert the uninstall-clean
+  // contract without waiting for teardown.
+  const dispose = (): void => {
+    for (const disposer of disposers.splice(0)) disposer()
+  }
+  return { ctx, emitUpdated: (ns) => { for (const listener of listeners) listener(ns) }, routes, dispose }
+}
+
+const PROVIDERS = {
+  aliyun: {
+    displayName: 'Aliyun',
+    api: 'openai-completions',
+    models: [{ id: 'qwen-max', name: 'Qwen Max' }],
+  },
+}
+
+beforeEach(() => {
+  vi.restoreAllMocks()
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  for (const cleanup of hostCleanups.splice(0)) cleanup()
+})
+
+describe('apply() autofill', () => {
+  it('writes the fill through the real service shape, with the optimistic lock', async () => {
+    const settings = fakeSettings(PROVIDERS)
+    const { ctx } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    await vi.waitFor(() => { expect(settings.updates).toHaveLength(1) })
+    const routes = (settings.updates[0]!.patch as { providers: Record<string, { models: Array<Record<string, unknown>> }> }).providers
+    expect(routes.aliyun.models[0]!['reasoningEfforts']).toEqual({ off: null, high: 'high' })
+    // The lock carried the revision read at describe() time.
+    expect(settings.updates[0]!.expectedRevision).toBe(3)
+  })
+
+  it('does nothing when every model already declares efforts and modalities', async () => {
+    const declared = {
+      aliyun: { api: 'openai-completions', models: [{ id: 'qwen-max', reasoningEfforts: false, input: ['text'] }] },
+    }
+    const settings = fakeSettings(declared)
+    const { ctx } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(settings.updates).toHaveLength(0)
+  })
+
+  it('never re-fills on a settings/document-updated commit: the running fill is the browser half\'s', async () => {
+    // Issue #7: a fill the moment a commit lands rides the official card's own
+    // frozen revision baseline, so the user's NEXT save in that card is refused
+    // with `settings/conflict` and their edit reads as lost. The browser half
+    // owns the running complement now (it writes on its idle pass, once no card
+    // is open); the host fills at boot only.
+    const settings = fakeSettings({ aliyun: { api: 'openai-completions', models: [] } })
+    const { ctx, emitUpdated } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(settings.updates).toHaveLength(0)
+    // A user edit lands, adding an undeclared model: no host write may follow.
+    settings.register('llm-pi-ai', PROVIDERS)
+    emitUpdated('llm-pi-ai')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(settings.updates).toHaveLength(0)
+    // Another namespace never triggers a fill either.
+    emitUpdated('some-other-ns')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(settings.updates).toHaveLength(0)
+  })
+
+  it('does not refill a declaration the user deliberately unset', async () => {
+    const settings = fakeSettings(PROVIDERS)
+    const { ctx, emitUpdated } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    // The boot fill declares the model.
+    await vi.waitFor(() => { expect(settings.updates).toHaveLength(1) })
+    // The editor's unset flow lands: the field is gone, the durable marker
+    // records the absence as a decision.
+    settings.register('llm-pi-ai', {
+      aliyun: {
+        displayName: 'Aliyun',
+        api: 'openai-completions',
+        models: [{ id: 'qwen-max', name: 'Qwen Max', reasoningEffortsUnset: true, inputUnset: true }],
+      },
+    })
+    emitUpdated('llm-pi-ai')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    // No second write: the unsets survive the very next autofill pass (and,
+    // being persisted in the document, every later boot).
+    expect(settings.updates).toHaveLength(1)
+  })
+
+  it('fills every undeclared model in the one boot pass, and only there', async () => {
+    // The running complement moved to the browser half (issue #7 -- see the
+    // "never re-fills on a settings/document-updated commit" case above). What stays
+    // here: one boot write carries the whole document, and a deliberate unset
+    // is still respected.
+    const settings = fakeSettings({
+      aliyun: {
+        displayName: 'Aliyun',
+        api: 'openai-completions',
+        models: [
+          { id: 'qwen-max', name: 'Qwen Max', reasoningEffortsUnset: true },
+          { id: 'qwen-turbo' },
+        ],
+      },
+    })
+    const { ctx, emitUpdated } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    await vi.waitFor(() => { expect(settings.updates).toHaveLength(1) })
+    const models = (settings.updates[0]!.patch as { providers: Record<string, { models: Array<Record<string, unknown>> }> })
+      .providers.aliyun.models
+    // The deliberately-unset row stays untouched; the undeclared one is filled.
+    expect(models.find(model => model['id'] === 'qwen-max')!['reasoningEfforts']).toBeUndefined()
+    expect(models.find(model => model['id'] === 'qwen-turbo')!['reasoningEfforts']).toBeDefined()
+    // A later commit adds nothing.
+    emitUpdated('llm-pi-ai')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(settings.updates).toHaveLength(1)
+  })
+
+  it('survives a conflicting write without throwing', async () => {
+    const settings = fakeSettings(PROVIDERS)
+    // Force the optimistic lock to refuse.
+    settings.updates.length = 0
+    const { ctx } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    // Bump the revision between describe and update by wrapping update.
+    const originalUpdate = settings.update.bind(settings)
+    let described = false
+    Object.defineProperty(settings, 'update', {
+      value: async (ns: string, patch: object, expectedRevision?: number) => {
+        if (!described && expectedRevision !== undefined) {
+          described = true
+          throw new Error(`settings namespace "llm-pi-ai" changed since it was read (expected ${expectedRevision}, now 99)`)
+        }
+        return originalUpdate(ns, patch, expectedRevision)
+      },
+    })
+    apply(ctx)
+    await vi.waitFor(() => { expect(errorSpy).toHaveBeenCalled() })
+    expect(errorSpy.mock.calls[0]![0]).toContain('changed since it was read')
+  })
+
+  it('retries the boot fill on a bounded schedule while llm-pi-ai is unregistered', async () => {
+    vi.useFakeTimers()
+    const settings = fakeSettings(undefined)
+    const { ctx } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    // The namespace is still missing after the first pass and several retries.
+    await vi.advanceTimersByTimeAsync(2500)
+    expect(settings.updates).toHaveLength(0)
+    // llm-pi-ai registers; the next scheduled retry fills.
+    settings.register('llm-pi-ai', PROVIDERS)
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(settings.updates).toHaveLength(1)
+    // The schedule is bounded: no further writes fire.
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(settings.updates).toHaveLength(1)
+  })
+
+  it('honors an autofill: false configuration by never writing', async () => {
+    const settings = fakeSettings(PROVIDERS)
+    const { ctx, emitUpdated } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(settings.updates).toHaveLength(0)
+    emitUpdated('llm-pi-ai')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(settings.updates).toHaveLength(0)
+  })
+
+  it('honors a configured boot retry schedule', async () => {
+    vi.useFakeTimers()
+    const settings = fakeSettings(undefined)
+    const { ctx } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { bootRetryDelaysMs: [5, 5] })
+    // The namespace registers after the first (failed) pass; the retry
+    // scheduled on the CONFIGURED 5ms delay fills it.
+    settings.register('llm-pi-ai', PROVIDERS)
+    await vi.advanceTimersByTimeAsync(6)
+    expect(settings.updates).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(settings.updates).toHaveLength(1)
+  })
+})
+
+describe('apply() probe route', () => {
+  const PROBE_PATH = '/dsh-model-think-level/raw-models'
+
+  function fakeRes(): { res: unknown; out: () => { status: number; body: Record<string, unknown> } } {
+    let status = 0
+    let raw = ''
+    const res = {
+      set statusCode(value: number) { status = value },
+      get statusCode(): number { return status },
+      setHeader(_key: string, _value: string): void {},
+      end(body?: string): void { raw = body ?? '' },
+    }
+    return {
+      res,
+      out: () => ({ status, body: JSON.parse(raw.length > 0 ? raw : '{}') as Record<string, unknown> }),
+    }
+  }
+
+  function fakeReq(overrides?: { method?: string; url?: string; headers?: Record<string, string> }): unknown {
+    return {
+      method: 'GET',
+      url: `?route=aliyun`,
+      headers: { host: '127.0.0.1:3080' },
+      ...overrides,
+    }
+  }
+
+  it('proxies the raw listing with the stored credential, never echoing it', async () => {
+    const settings = fakeSettings({
+      aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', apiKeyEnv: 'ALIYUN_KEY', models: [] },
+    })
+    const credentials = { resolve: async (ref: string) => ({ value: ref === 'ALIYUN_KEY' ? 'sk-secret' : undefined }) }
+    const { ctx, routes } = fakeHost(settings, { credentials })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)
+    expect(handler).toBeDefined()
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => null },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ data: [{ id: 'qwen-max', supported_parameters: ['reasoning'] }] })))
+          controller.close()
+        },
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { res, out } = fakeRes()
+    await handler!(fakeReq(), res)
+    const reply = out()
+    expect(reply.status).toBe(200)
+    expect(reply.body['ok']).toBe(true)
+    expect((reply.body['data'] as unknown[]).length).toBe(1)
+    // The credential went upstream as a bearer token and nowhere else.
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, { headers: Record<string, string> }]
+    expect(url).toBe('https://gw.example.com/v1/models')
+    expect(init.headers['authorization']).toBe('Bearer sk-secret')
+    expect(JSON.stringify(reply.body)).not.toContain('sk-secret')
+    vi.unstubAllGlobals()
+  })
+
+  it('refuses to follow a redirect away from the authority the profile names', async () => {
+    const settings = fakeSettings({
+      aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', apiKeyEnv: 'ALIYUN_KEY', models: [] },
+    })
+    const credentials = { resolve: async () => ({ value: 'sk-secret' }) }
+    const { ctx, routes } = fakeHost(settings, { credentials })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => null },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ data: [{ id: 'qwen-max' }] })))
+          controller.close()
+        },
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { res, out } = fakeRes()
+    await handler!(fakeReq(), res)
+    expect(out().status).toBe(200)
+    // Fetch follows a cross-origin redirect by default while keeping the
+    // probe's own credential headers attached, so refusing the hop is what
+    // keeps the credential bound to the configured authority.
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, { redirect?: string }]
+    expect(init.redirect).toBe('error')
+    vi.unstubAllGlobals()
+  })
+
+  it('probes an Anthropic Messages route through /v1/models with x-api-key', async () => {
+    const settings = fakeSettings({
+      anthropic: { api: 'anthropic-messages', baseURL: 'https://api.anthropic.com/v1', apiKeyEnv: 'ANTHROPIC_KEY', models: [] },
+    })
+    const credentials = { resolve: async (ref: string) => ({ value: ref === 'ANTHROPIC_KEY' ? 'sk-ant-secret' : undefined }) }
+    const { ctx, routes } = fakeHost(settings, { credentials })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => null },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ data: [{ id: 'claude-opus-5', capabilities: { thinking: { supported: true }, image_input: { supported: true } } }] })))
+          controller.close()
+        },
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler!(fakeReq({ url: '?route=anthropic' }), res)
+    const reply = out()
+    expect(reply.status).toBe(200)
+    expect((reply.body['data'] as unknown[]).length).toBe(1)
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, { headers: Record<string, string> }]
+    // The trailing /v1 is normalized away and reattached on the native route.
+    expect(url).toBe('https://api.anthropic.com/v1/models?limit=1000')
+    expect(init.headers['x-api-key']).toBe('sk-ant-secret')
+    expect(init.headers['anthropic-version']).toBe('2023-06-01')
+    expect(init.headers['authorization']).toBeUndefined()
+    expect(JSON.stringify(reply.body)).not.toContain('sk-ant-secret')
+    vi.unstubAllGlobals()
+  })
+
+  it('refuses a protocol whose listing this mirror cannot read', async () => {
+    const settings = fakeSettings({ azure: { api: 'azure', baseURL: 'https://azure.example.com', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler!(fakeReq({ url: '?route=azure' }), res)
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('cannot be interrogated')
+    expect(fetchMock).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('accepts the enriched models-map listing, keying entries by map key', async () => {
+    const settings = fakeSettings({ aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => null },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({
+            models: {
+              'qwen-max': { id: 'inner-canonical', name: 'Qwen Max', reasoning: true },
+              'meta-field': 'not a model',
+            },
+          })))
+          controller.close()
+        },
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler!(fakeReq({ url: '?route=aliyun' }), res)
+    const reply = out()
+    expect(reply.status).toBe(200)
+    const entries = reply.body['data'] as Array<Record<string, unknown>>
+    expect(entries).toHaveLength(1)
+    // The map key is the endpoint-facing id; a nested canonical id is
+    // overridden exactly as the official parser does.
+    expect(entries[0]!['id']).toBe('qwen-max')
+    expect(entries[0]!['reasoning']).toBe(true)
+    vi.unstubAllGlobals()
+  })
+
+  it('reports a listing that answers neither shape', async () => {
+    const settings = fakeSettings({ aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => null },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ ok: true })))
+          controller.close()
+        },
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler!(fakeReq({ url: '?route=aliyun' }), res)
+    expect(out().status).toBe(502)
+    expect(String(out().body['error'])).toContain('neither a "data" array nor a "models" object')
+    vi.unstubAllGlobals()
+  })
+
+  it('refuses a listing that declares more than the byte ceiling', async () => {
+    const settings = fakeSettings({ aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => String(5 * 1024 * 1024) },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('x'.repeat(1024)))
+          controller.close()
+        },
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler!(fakeReq({ url: '?route=aliyun' }), res)
+    expect(out().status).toBe(502)
+    expect(String(out().body['error'])).toContain('overshoots')
+    vi.unstubAllGlobals()
+  })
+  it('rejects cross-site callers before touching anything', async () => {
+    const settings = fakeSettings({ aliyun: { baseURL: 'https://gw.example.com', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ headers: { host: '10.0.0.5:3080', 'sec-fetch-site': 'cross-site' } }), res)
+    expect(out().status).toBe(403)
+    expect(fetchMock).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('rejects an Origin that does not match the Host (DNS-rebinding shape)', async () => {
+    const settings = fakeSettings({ aliyun: { baseURL: 'https://gw.example.com', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    // A rebinding page resolves its own origin's host to this server: the
+    // Origin header still names the attacker's site and must be refused.
+    await handler(fakeReq({
+      headers: { host: '127.0.0.1:3080', origin: 'http://evil.example:4080' },
+    }), res)
+    expect(out().status).toBe(403)
+    expect(fetchMock).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('admits an IP-literal LAN Host with no browser trust signal (core parity)', async () => {
+    // Core parity: a deployment serving on 0.0.0.0 trusts its derived LAN IP
+    // literals; a browser cannot produce an IP Host via DNS rebinding, so the
+    // fence admits it and the request fails later on the missing route.
+    const settings = fakeSettings({})
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler(fakeReq({
+      headers: { host: '10.0.0.5:3080' },
+      url: '?route=missing',
+    }), res)
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('no llm-pi-ai provider route')
+    vi.unstubAllGlobals()
+  })
+
+  it('refuses a domain-named non-loopback Host outright', async () => {
+    // The Host fence is THE rebinding defense: a rebound page always names
+    // the attacker's domain here even though the socket lands on this
+    // server. Unlike loopback/IP-literal hosts, named hosts are never
+    // answered — there is no trustedHosts escape hatch yet.
+    const settings = fakeSettings({ aliyun: { baseURL: 'https://gw.example.com', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    // Plain curl against a LAN hostname.
+    await handler(fakeReq({ headers: { host: 'harness.lan:3080' } }), res)
+    expect(out().status).toBe(403)
+    expect(fetchMock).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('refuses a TRUE rebound host whose Origin matches and markers look same-origin', async () => {
+    // The real rebinding shape: evil.example re-resolves to this server, so
+    // Origin == Host == evil.example and sec-fetch-site is same-origin —
+    // every string comparison passes. Only the Host fence stops it.
+    const settings = fakeSettings({ aliyun: { baseURL: 'https://gw.example.com/v1', apiKeyEnv: 'ALIYUN_KEY', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler(fakeReq({
+      headers: {
+        host: 'evil.example:3080',
+        origin: 'http://evil.example:3080',
+        'sec-fetch-site': 'same-origin',
+      },
+    }), res)
+    expect(out().status).toBe(403)
+    expect(fetchMock).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('admits a same-origin browser caller on a non-loopback Host', async () => {
+    const settings = fakeSettings({})
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const { res, out } = fakeRes()
+    // Positive control: a real browser tab served from this very server.
+    // The fence passes it; the request then fails on the missing route,
+    // which proves the rejection above is the fence and not the route table.
+    await handler(fakeReq({
+      headers: { host: '10.0.0.5:3080', 'sec-fetch-site': 'same-origin' },
+      url: '?route=missing',
+    }), res)
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('no llm-pi-ai provider route')
+  })
+
+  it('admits a same-site browser caller on an IP-literal LAN Host', async () => {
+    // Same-site (sibling-port) tabs are legitimate GUI deployments too.
+    const settings = fakeSettings({})
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const { res, out } = fakeRes()
+    await handler(fakeReq({
+      headers: { host: '10.0.0.5:3080', 'sec-fetch-site': 'same-site' },
+      url: '?route=missing',
+    }), res)
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('no llm-pi-ai provider route')
+  })
+
+  it('refuses an opaque "null" Origin (sandboxed iframe / file: page)', async () => {
+    const settings = fakeSettings(PROVIDERS)
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler(fakeReq({
+      headers: { host: '127.0.0.1:3080', origin: 'null' },
+    }), res)
+    expect(out().status).toBe(403)
+    expect(fetchMock).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('answers only GET', async () => {
+    const settings = fakeSettings(PROVIDERS)
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST' }), res)
+    expect(out().status).toBe(405)
+    expect(fetchMock).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('reports upstream auth failures with a key hint instead of throwing', async () => {
+    const settings = fakeSettings({ aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401 })))
+    const { res, out } = fakeRes()
+    await handler(fakeReq(), res)
+    const reply = out()
+    // An upstream failure is a bad-gateway answer, not a silent 200.
+    expect(reply.status).toBe(502)
+    expect(reply.body['ok']).toBe(false)
+    expect(String(reply.body['error'])).toContain('check the API key')
+    vi.unstubAllGlobals()
+  })
+
+  it('never echoes baseURL credentials in failure responses', async () => {
+    const settings = fakeSettings({ aliyun: { api: 'openai-completions', baseURL: 'https://user:sekrit@gw.example.com/v1', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('boom') }))
+    const { res, out } = fakeRes()
+    await handler(fakeReq(), res)
+    const reply = out()
+    expect(reply.status).toBe(502)
+    const text = JSON.stringify(reply.body)
+    expect(text).not.toContain('sekrit')
+    expect(text).not.toContain('user:')
+    expect(text).toContain('gw.example.com')
+    vi.unstubAllGlobals()
+  })
+
+  it('probes unauthenticated when no credential resolves', async () => {
+    const settings = fakeSettings({ aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', models: [] } })
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(PROBE_PATH)!
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => null },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ data: [] })))
+          controller.close()
+        },
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await handler(fakeReq(), res)
+    expect(out().body['ok']).toBe(true)
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, { headers: Record<string, string> }]
+    expect(init.headers['authorization']).toBeUndefined()
+    vi.unstubAllGlobals()
+  })
+
+  describe('modality autofill', () => {
+    it('fills only the missing modality for an effort-declared model', async () => {
+      const settings = fakeSettings({
+        aliyun: { api: 'openai-completions', models: [{ id: 'qwen-max', reasoningEfforts: false }] },
+      })
+      const { ctx } = fakeHost(settings)
+      const { apply } = await import('../src/index.js')
+      apply(ctx)
+      await vi.waitFor(() => { expect(settings.updates).toHaveLength(1) })
+      const patch = settings.updates[0].patch as {
+        providers: Record<string, { models: Array<Record<string, unknown>> }>
+      }
+      const model = patch.providers.aliyun.models[0]
+      expect(model.reasoningEfforts).toBe(false)
+      expect(model.input).toEqual(['text'])
+    })
+
+    it('honors modalityAutofill:false by never filling modalities', async () => {
+      const settings = fakeSettings({
+        aliyun: { api: 'openai-completions', models: [{ id: 'qwen-max', reasoningEfforts: false }] },
+      })
+      const { ctx } = fakeHost(settings)
+      const { apply } = await import('../src/index.js')
+      apply(ctx, { modalityAutofill: false })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(settings.updates).toHaveLength(0)
+    })
+
+    it('respects a deliberate inputUnset marker while still filling efforts', async () => {
+      const settings = fakeSettings({
+        aliyun: { api: 'openai-completions', models: [{ id: 'qwen-max', inputUnset: true }] },
+      })
+      const { ctx } = fakeHost(settings)
+      const { apply } = await import('../src/index.js')
+      apply(ctx)
+      await vi.waitFor(() => { expect(settings.updates).toHaveLength(1) })
+      const patch = settings.updates[0].patch as {
+        providers: Record<string, { models: Array<Record<string, unknown>> }>
+      }
+      const model = patch.providers.aliyun.models[0]
+      expect(model.reasoningEfforts).toBeDefined()
+      expect(model.input).toBeUndefined()
+      // The marker survives: the absence stays a decision.
+      expect(model.inputUnset).toBe(true)
+    })
+  })
+})
+
+describe('apply() default-guard', () => {
+  const GUARD_PROVIDERS = {
+    suiyue: {
+      api: 'openai-completions',
+      baseURL: 'https://api.suiyue.site/v1',
+      models: [
+        { id: 'glm-5.3-flash', reasoningEfforts: { low: 'low', high: 'high', max: 'max' } },
+        { id: 'qwen3.8-flash', reasoningEfforts: { off: null, low: 'low', medium: 'medium', xhigh: 'xhigh' } },
+      ],
+    },
+  }
+
+  function fakeLlm(): {
+    svc: {
+      prepareCall(config: Record<string, unknown>): Promise<Record<string, unknown>>
+      stream(options: Record<string, unknown>): AsyncIterable<unknown>
+    }
+    prepared: Array<Record<string, unknown>>
+    streamed: Array<Record<string, unknown>>
+  } {
+    const prepared: Array<Record<string, unknown>> = []
+    const streamed: Array<Record<string, unknown>> = []
+    return {
+      svc: {
+        async prepareCall(config: Record<string, unknown>): Promise<Record<string, unknown>> {
+          prepared.push(config)
+          return { ...config }
+        },
+        stream(options: Record<string, unknown>): AsyncIterable<unknown> {
+          streamed.push(options)
+          return (async function* (): AsyncGenerator<unknown> {})()
+        },
+      },
+      prepared,
+      streamed,
+    }
+  }
+
+  it('injects the vendor default into effort-less calls on forced ladders', async () => {
+    const settings = fakeSettings(GUARD_PROVIDERS)
+    const llm = fakeLlm()
+    const { ctx } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    // The model-pro test shape: no effort named (issue #2).
+    await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash', maxTokens: 16, temperature: 0 })
+    expect(llm.prepared[0]).toMatchObject({
+      provider: 'suiyue',
+      model: 'glm-5.3-flash',
+      maxTokens: 16,
+      temperature: 0,
+      reasoningEffort: 'max',
+    })
+    llm.svc.stream({ provider: 'suiyue', model: 'glm-5.3-flash', maxTokens: 16, messages: [] })
+    expect(llm.streamed[0]).toMatchObject({ reasoningEffort: 'max' })
+  })
+
+  it('reads SettingsForms once until a document update invalidates the cache', async () => {
+    const settings = fakeSettings(GUARD_PROVIDERS)
+    const llm = fakeLlm()
+    const { ctx, emitUpdated } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false })
+
+    await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash' })
+    await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash' })
+    expect(settings.describeCalls()).toBe(1)
+
+    emitUpdated('llm-pi-ai')
+    await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash' })
+    expect(settings.describeCalls()).toBe(2)
+  })
+
+  it('fails open when SettingsForms.describe throws', async () => {
+    const settings = fakeSettings(GUARD_PROVIDERS)
+    settings.describe = () => {
+      throw new Error('settings unavailable')
+    }
+    const llm = fakeLlm()
+    const { ctx } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false })
+
+    await expect(llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash' })).resolves.toBeDefined()
+    expect('reasoningEffort' in llm.prepared[0]!).toBe(false)
+  })
+
+  it('leaves explicit selections and off-capable ladders alone', async () => {
+    const settings = fakeSettings(GUARD_PROVIDERS)
+    const llm = fakeLlm()
+    const { ctx } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash', reasoningEffort: 'low' })
+    expect(llm.prepared[0]).toMatchObject({ reasoningEffort: 'low' })
+    // Qwen carries off:null: Default must stay Default.
+    await llm.svc.prepareCall({ provider: 'suiyue', model: 'qwen3.8-flash' })
+    expect('reasoningEffort' in llm.prepared[1]).toBe(false)
+    // Unknown routes/models pass through (fail open).
+    await llm.svc.prepareCall({ provider: 'nope', model: 'glm-5.3-flash' })
+    expect('reasoningEffort' in llm.prepared[2]).toBe(false)
+  })
+
+  it('yields to a route-level reasoning default', async () => {
+    const settings = fakeSettings({
+      suiyue: {
+        api: 'openai-completions',
+        baseURL: 'https://api.suiyue.site/v1',
+        reasoning: 'low',
+        models: [{ id: 'glm-5.3-flash', reasoningEfforts: { low: 'low', high: 'high', max: 'max' } }],
+      },
+    })
+    const llm = fakeLlm()
+    const { ctx } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    // DSH core materializes profile.reasoning itself; the guard must not
+    // clobber the deployment's explicit choice with the vendor default.
+    await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash' })
+    expect('reasoningEffort' in llm.prepared[0]).toBe(false)
+  })
+
+  it('stays off the wire when defaultGuard is false', async () => {
+    const settings = fakeSettings(GUARD_PROVIDERS)
+    const llm = fakeLlm()
+    const origPrepare = llm.svc.prepareCall
+    const origStream = llm.svc.stream
+    const { ctx } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { defaultGuard: false })
+    expect(llm.svc.prepareCall).toBe(origPrepare)
+    expect(llm.svc.stream).toBe(origStream)
+    await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash' })
+    expect('reasoningEffort' in llm.prepared[0]).toBe(false)
+  })
+
+  it('restores the originals on dispose (uninstall-clean)', async () => {
+    const settings = fakeSettings(GUARD_PROVIDERS)
+    const llm = fakeLlm()
+    const origPrepare = llm.svc.prepareCall
+    const origStream = llm.svc.stream
+    const { ctx, dispose } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    expect(llm.svc.prepareCall).not.toBe(origPrepare)
+    dispose()
+    expect(llm.svc.prepareCall).toBe(origPrepare)
+    expect(llm.svc.stream).toBe(origStream)
+  })
+})

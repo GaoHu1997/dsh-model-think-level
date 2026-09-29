@@ -1,0 +1,949 @@
+/**
+ * Client apply() integration tests: the wiring layer above the injector —
+ * locale dictionary registration, stylesheet lifecycle, observer-driven
+ * mounting (row editors, the composer slider, the Models-page toggle),
+ * pushed invalidations (settings/document-updated, connection/reset),
+ * and fiber disposal. Runs against jsdom with hand-built DOM.
+ *
+ * Every test disposes the fiber in `finally`: a MutationObserver outliving
+ * its test would keep re-rendering stale joins over later tests' fresh ones.
+ */
+
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { PI_AI_NS, PLUGIN_ID, STORE_NS } from '../src/constants.js'
+import { en, zh } from '../src/client/locales.js'
+import type { ModelDirectoryLike } from '../src/client/types.js'
+import { directoryFixture, fakeApi, JOIN_FIXTURE, makeCtx, makeJoin, waitFor } from './support/composer-fixture.js'
+
+
+type Ctx = Parameters<typeof import('../src/client/index.js').apply>[0]
+
+/** Build an approximation of the official models page section (two rows). */
+function buildModelsDom(capacityLabel = 'Capacities'): HTMLElement {
+  const section = document.createElement('div')
+  section.className = 'section'
+  section.innerHTML = `
+    <div class="editor">
+      <span class="editorTitle">Aliyun</span>
+      <div class="modelEntry">
+        <div class="modelRow">
+          <input aria-label="Model ID" value="qwen-max" />
+          <button aria-label="${capacityLabel} 1"></button>
+        </div>
+        <div class="modelAdvanced" style="display:block">
+          <label><span>Context window</span><input /></label>
+        </div>
+      </div>
+      <div class="modelEntry">
+        <div class="modelRow">
+          <input aria-label="Model ID" value="qwen-turbo" />
+          <button aria-label="${capacityLabel} 2"></button>
+        </div>
+        <div class="modelAdvanced" style="display:block">
+          <label><span>Context window</span><input /></label>
+        </div>
+      </div>
+    </div>`
+  document.body.appendChild(section)
+  return section
+}
+
+/** The official composer model seat: trigger + open menu (ModelSelect shape). */
+function buildComposerMenu(): HTMLElement {
+  const card = document.createElement('div')
+  card.dataset['composerCard'] = ''
+  card.innerHTML = `
+    <div class="seatRoot">
+      <button type="button" aria-haspopup="menu" aria-expanded="true">Qwen Max</button>
+      <div role="menu" aria-label="Model and reasoning effort">
+        <button class="cell" role="menuitem">Model</button>
+        <button class="cell" role="menuitem">Effort</button>
+      </div>
+    </div>`
+  document.body.appendChild(card)
+  return card
+}
+
+/** The models page add area (the toggle never mounts there). */
+function buildAddBlock(): HTMLElement {
+  const section = document.createElement('div')
+  section.className = 'section'
+  section.innerHTML = `
+    <ul class="rows"><li class="rowCard"><span class="rowName">Aliyun</span></li></ul>
+    <div class="addBlock">
+      <div class="addActions"><button>Add provider</button><button>Add custom provider</button></div>
+    </div>`
+  document.body.appendChild(section)
+  return section
+}
+
+/**
+ * The level checkboxes of the injected editor, in LEVEL_ORDER (off…max) plus the
+ * trailing image-input toggle. Scoped to the effort CARD: the master Thinking
+ * switch renders outside it (it gates whether the card exists at all), so a bare
+ * sweep would put that switch at index 0 and shift every level by one.
+ */
+function checkboxes(): HTMLInputElement[] {
+  return Array.from(document.querySelectorAll<HTMLInputElement>('.bre-effort-card input[type="checkbox"]'))
+}
+
+beforeEach(() => {
+  document.body.innerHTML = ''
+  document.head.innerHTML = ''
+  vi.restoreAllMocks()
+})
+
+afterEach(() => {
+  document.body.innerHTML = ''
+})
+
+describe('client apply()', () => {
+  it('registers dictionaries and styles, mounts editors, and cleans up on dispose', async () => {
+    let join = makeJoin(structuredClone(JOIN_FIXTURE))
+    const api = fakeApi(() => Promise.resolve(join))
+    const h = makeCtx(api)
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+
+      // Dictionaries registered under the plugin store namespace.
+      expect(h.localeRegister).toHaveBeenCalledWith(STORE_NS, { zh, en })
+      // Stylesheet installed under the plugin's styles marker.
+      await waitFor(() => document.head.querySelector(`style[data-plugin-styles="${PLUGIN_ID}"]`) !== null)
+
+      // The observer's first scan mounts one editor per model row.
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+
+      h.disposeAll()
+      // Fiber disposal removes the stylesheet and unmounts every React root.
+      expect(document.head.querySelector(`style[data-plugin-styles="${PLUGIN_ID}"]`)).toBeNull()
+      expect(document.querySelectorAll('.bre-effort-editor')).toHaveLength(0)
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('falls back to the 0.1.6-alpha.2 disclosure label when the host dictionary is absent', async () => {
+    // 0.1.6-alpha.2 renamed the disclosure copy to "Model options". A host that
+    // ships no settings.models dictionary (translate echoes the key) must still
+    // be found, so the English fallback has to track the rename — the old
+    // `Capacities`-only fallback silently stopped injecting there.
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, { hostDict: false })
+    try {
+      buildModelsDom('Model options')
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('reads through the BOUND settings scope, never treating the binder as a scope', async () => {
+    // Regression (issue #7 branch, C1): `ctx.get('settingsScope')` yields the
+    // kernel's SettingsScopeBinder -- it has `bind()`/`describe()`, NOT
+    // `getSnapshot()`. The plugin used the binder directly, so the optional
+    // chain only guarded a missing SERVICE and every describe threw a
+    // TypeError, leaving the Models page without editors. The binder must be
+    // bound to this plugin's namespace first; that bound scope is the reader.
+    const providers = structuredClone(JOIN_FIXTURE)
+    const api = fakeApi(() => Promise.resolve(makeJoin(providers)))
+    const snapshot = {
+      status: 'ready' as const,
+      value: { providers },
+      user: { providers },
+      base: { providers },
+      revision: 7,
+      writable: true,
+    }
+    const bind = vi.fn(() => ({ getSnapshot: () => snapshot }))
+    const h = makeCtx(api, { services: { settingsScope: { bind } } })
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+      // Bound on the plugin's own namespace, and the snapshot (not the wire)
+      // answered the scan.
+      expect(bind).toHaveBeenCalledWith({ namespace: PI_AI_NS })
+      expect(api.describeSpy).not.toHaveBeenCalled()
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('prefers the 0.1.7 configForms entry over the legacy settingsScope binder', async () => {
+    const providers = structuredClone(JOIN_FIXTURE)
+    const api = fakeApi(() => Promise.resolve(makeJoin(providers)))
+    const snapshot = {
+      status: 'ready' as const,
+      value: { providers },
+      user: { providers },
+      base: { providers },
+      revision: 7,
+      writable: true,
+    }
+    const get = vi.fn(() => ({ getSnapshot: () => snapshot }))
+    const bind = vi.fn(() => ({ getSnapshot: () => snapshot }))
+    const h = makeCtx(api, { services: { configForms: { get }, settingsScope: { bind } } })
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+      expect(get).toHaveBeenCalledWith(PI_AI_NS)
+      expect(bind).not.toHaveBeenCalled()
+      expect(api.describeSpy).not.toHaveBeenCalled()
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('falls back to settingsScope when configForms.get throws', async () => {
+    const providers = structuredClone(JOIN_FIXTURE)
+    const api = fakeApi(() => Promise.resolve(makeJoin(providers)))
+    const snapshot = {
+      status: 'ready' as const,
+      value: { providers },
+      user: { providers },
+      base: { providers },
+      revision: 7,
+      writable: true,
+    }
+    const get = vi.fn(() => {
+      throw new Error('config form unavailable')
+    })
+    const bind = vi.fn(() => ({ getSnapshot: () => snapshot }))
+    const h = makeCtx(api, { services: { configForms: { get }, settingsScope: { bind } } })
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+      expect(get).toHaveBeenCalledWith(PI_AI_NS)
+      expect(bind).toHaveBeenCalledWith({ namespace: PI_AI_NS })
+      expect(api.describeSpy).not.toHaveBeenCalled()
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('fills the models added mid-session on the idle pass, never while a card is open', async () => {
+    // The running auto-fill complement the host no longer performs (issue #7):
+    // a write the moment a commit lands rides the official card's frozen
+    // revision baseline and makes the user's NEXT save in that card fail with
+    // `settings/conflict`. It waits for the idle pass instead -- the moment no
+    // official card is open.
+    const providers = structuredClone(JOIN_FIXTURE)
+    const join = makeJoin(providers, structuredClone(JOIN_FIXTURE))
+    const api = fakeApi(() => Promise.resolve(join))
+    // The config route is an addition of this release; an older/unreachable
+    // host must fall back to the documented defaults, not disable the fill.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false }) as Response))
+    const h = makeCtx(api)
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+
+      // The card is open: nothing may be written.
+      const mutate = api.settings.mutate as ReturnType<typeof vi.fn>
+      expect(mutate).not.toHaveBeenCalled()
+
+      // Closing it is the idle pass.
+      document.body.innerHTML = ''
+      await waitFor(() => mutate.mock.calls.length > 0)
+      const ops = mutate.mock.calls[0]![1] as Array<{ path: string[]; value: Array<Record<string, unknown>> }>
+      expect(ops[0]!.path).toEqual(['providers', 'aliyun', 'models'])
+      const models = ops[0]!.value
+      expect(models.map(model => model['id'])).toEqual(['qwen-max', 'qwen-turbo'])
+      // Both rows were undeclared, so the knowledge base fills both.
+      expect(models.every(model => model['reasoningEfforts'] !== undefined)).toBe(true)
+      // Capacities are never this plugin's to write.
+      expect(models.every(model => model['contextWindow'] === undefined)).toBe(true)
+    } finally {
+      h.disposeAll()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('surfaces a refused idle autofill instead of failing silently', async () => {
+    // A refusal arrives as a VALUE, not a throw: `mutate` resolves with
+    // `{ok:false}`, so the catch around the fill never runs. Without an
+    // explicit check the whole complement fails invisibly -- the user is left
+    // with models the page still shows as undeclared and no diagnostic at all.
+    const join = makeJoin(structuredClone(JOIN_FIXTURE), structuredClone(JOIN_FIXTURE))
+    const api = fakeApi(() => Promise.resolve(join))
+    const mutate = api.settings.mutate as ReturnType<typeof vi.fn>
+    mutate.mockResolvedValueOnce({ ok: false, error: { code: 'settings/conflict', message: 'refused' } })
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false }) as Response))
+    const refused = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const h = makeCtx(api)
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+
+      // The card is open, so the fill is still fenced -- and the refusal has
+      // not happened yet.
+      expect(mutate).not.toHaveBeenCalled()
+
+      // Closing it runs the idle pass, whose autofill the document refuses.
+      document.body.innerHTML = ''
+      await waitFor(() => refused.mock.calls.length > 0)
+      expect(refused.mock.calls.some(
+        call => String(call[0]).includes('[bre] idle autofill refused: refused'),
+      )).toBe(true)
+    } finally {
+      h.disposeAll()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('reads the autofill revision from the wire, not a possibly-stale scope snapshot', async () => {
+    // The scope mirror folds a fresh view in asynchronously; the plugin's own
+    // idle autofill runs right after its own writes, so a non-fresh read would
+    // hand back the revision those writes already superseded and manufacture a
+    // `settings/conflict`. The autofill read is explicitly fresh.
+    const providers = structuredClone(JOIN_FIXTURE)
+    const wire = makeJoin(structuredClone(JOIN_FIXTURE), structuredClone(JOIN_FIXTURE))
+    const api = fakeApi(() => Promise.resolve(wire))
+    const snapshot = {
+      status: 'ready' as const,
+      value: { providers },
+      user: { providers },
+      base: { providers },
+      revision: 99,
+      writable: true,
+    }
+    const bind = vi.fn(() => ({ getSnapshot: () => snapshot }))
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false }) as Response))
+    const h = makeCtx(api, { services: { settingsScope: { bind } } })
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+      const mutate = api.settings.mutate as ReturnType<typeof vi.fn>
+      expect(mutate).not.toHaveBeenCalled()
+
+      document.body.innerHTML = ''
+      await waitFor(() => mutate.mock.calls.length > 0)
+      // The wire revision (1), NOT the snapshot's stale 99.
+      expect(mutate.mock.calls[0]![2]).toBe(1)
+    } finally {
+      h.disposeAll()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('re-translates mounted copy when the shell language switches (LocaleFace path)', async () => {
+    let join = makeJoin(structuredClone(JOIN_FIXTURE))
+    const api = fakeApi(() => Promise.resolve(join))
+    const h = makeCtx(api, { localeFace: true })
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+      expect(document.body.textContent).toContain('Auto-adapt')
+
+      // The shell switches to Chinese: the revision bumps and every
+      // LocaleRefresh subscriber re-renders with the same stable `t`.
+      h.switchLocale('zh')
+      await waitFor(() => document.body.textContent?.includes('自动适配') === true)
+      // The editors survived the switch (the English fallback keeps matching
+      // the English DOM anchors) and now render Chinese copy.
+      expect(document.querySelectorAll('.bre-effort-editor')).toHaveLength(2)
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('anchors with the English fallback when the host ships no models dictionary', async () => {
+    let join = makeJoin(structuredClone(JOIN_FIXTURE))
+    const api = fakeApi(() => Promise.resolve(join))
+    const h = makeCtx(api, { localeFace: true, hostDict: false })
+    try {
+      // The page renders English aria-labels while bind('settings.models')
+      // echoes the key back — hostLabels() must fall back to the English
+      // anchors so the editor still mounts.
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+      expect(document.body.textContent).toContain('Auto-adapt')
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('re-describes and refreshes editors on a pushed pi-ai document update', async () => {
+    const providers: Record<string, unknown> = structuredClone(JOIN_FIXTURE)
+    let join = makeJoin(providers)
+    const api = fakeApi(() => Promise.resolve(join))
+    const h = makeCtx(api)
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+      const initialDescribes = api.describeSpy.mock.calls.length
+
+      // An unrelated namespace changes nothing.
+      h.emitRemote('settings/document-updated', 'some-other-ns')
+      await new Promise(resolve => setTimeout(resolve, 250))
+      expect(api.describeSpy.mock.calls.length).toBe(initialDescribes)
+
+      // The saved declaration moves under the rows; the push clears the folded
+      // snapshot and the next scan swaps fresh props into the mounted editor.
+      ;(providers.aliyun as { models: Array<Record<string, unknown>> }).models[0]!['reasoningEfforts'] = { high: 'high' }
+      join = makeJoin(providers)
+      h.emitRemote('settings/document-updated', PI_AI_NS)
+      await waitFor(() => checkboxes().length >= 7 && checkboxes()[4]!.checked === true)
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('refreshes on connection/reset too', async () => {
+    const providers: Record<string, unknown> = structuredClone(JOIN_FIXTURE)
+    let join = makeJoin(providers)
+    const api = fakeApi(() => Promise.resolve(join))
+    const h = makeCtx(api)
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+      const initialDescribes = api.describeSpy.mock.calls.length
+
+      ;(providers.aliyun as { models: Array<Record<string, unknown>> }).models[0]!['reasoningEfforts'] = false
+      join = makeJoin(providers)
+      h.emitLocal('connection/reset')
+      await waitFor(() => {
+        // The `false` declaration now renders its editor with the Thinking
+        // switch OFF and no effort card at all: the state that used to be a
+        // warning line inside the card IS the switch's own position. Scoped per
+        // editor — the other row may legitimately keep its card.
+        const editors = Array.from(document.querySelectorAll('.bre-effort-editor'))
+        return editors.some(editor => {
+          const toggle = editor.querySelector<HTMLInputElement>('.bre-thinking-switch input[type="checkbox"]')
+          return toggle !== null && !toggle.checked && editor.querySelector('.bre-effort-card') === null
+        })
+      })
+      expect(api.describeSpy.mock.calls.length).toBeGreaterThan(initialDescribes)
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('keeps the per-row editors on the row DOM bypass under the footer-slot kernel', async () => {
+    // The Models page ships two sanctioned seats and the plugin takes both: the
+    // footer (the slider toggle) and the provider card (the request-header
+    // editor, issue #12). The per-row editors are NOT one of them — they still
+    // mount through the row DOM bypass, because no official seat reaches a
+    // single model row.
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api)
+    try {
+      buildModelsDom()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+
+      // The footer slot registration happens at apply.
+      expect(h.slotCalls.injected).toContain('settings.models.footer')
+      expect(h.slotCalls.registered[0]).toMatchObject({ name: 'settings.models.footer', id: PLUGIN_ID + '-slider-toggle' })
+
+      // The provider-card seat is taken under the adapter family's namespace —
+      // the keyed dispatch key that delivers every llm-pi-ai card.
+      const cardSeat = h.slotCalls.registered.find(entry => entry['name'] === 'settings.models.provider-card')
+      expect(cardSeat).toBeDefined()
+      expect(cardSeat?.['key']).toBe('llm-pi-ai')
+
+      // …but the per-row editors still mount through the DOM bypass.
+      await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('mounts the replicated two-row body into the official model menu and unmounts it on close', async () => {
+    const directory = directoryFixture()
+    const originalSelect = directory.select
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => directory },
+      },
+    })
+    try {
+      const card = buildComposerMenu()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+
+      // The effort-memory wiretap wraps the shared directory's select as soon
+      // as the slider's first scan resolves it.
+      await waitFor(() => directory.select !== originalSelect)
+
+      // The body mounts at the TOP of the official menu, wedged before the
+      // official cells — the official trigger itself is never replaced.
+      await waitFor(() => document.querySelector('[data-bre-slider="1"]') !== null)
+      const wrapper = document.querySelector<HTMLElement>('[data-bre-slider="1"]')!
+      expect(wrapper.parentElement?.firstChild).toBe(wrapper)
+      expect(document.querySelector('[data-composer-card] button[aria-haspopup="menu"]')).not.toBeNull()
+      // The wrapper is created synchronously; the React commit inside it is
+      // scheduled, so wait for the two rows to land.
+      await waitFor(() => wrapper.querySelectorAll('.bre-row-control').length === 2)
+      const rows = Array.from(wrapper.querySelectorAll<HTMLButtonElement>('.bre-row-control'))
+      expect(rows[0]?.querySelector('.bre-row-label')?.textContent).toBe('Model')
+      expect(rows[0]?.querySelector('.bre-row-value')?.textContent).toBe('Qwen Max')
+      // The level row is moved onto the session's level by a passive effect, so
+      // the row exists one commit BEFORE it carries the value: wait for it
+      // rather than racing the commit.
+      await waitFor(() => rows[1]?.querySelector('.bre-row-value')?.textContent === 'Medium')
+
+      // The replicated body takes the upstream box, and the official root cells
+      // are hidden because the replica IS the content.
+      expect(card.querySelector('[role="menu"].bre-model-menu-host')).not.toBeNull()
+      const cells = Array.from(card.querySelectorAll('[role="menu"] > button[role="menuitem"]'))
+      expect(cells).toHaveLength(2)
+      for (const cell of cells) expect((cell as HTMLButtonElement).style.display).toBe('none')
+
+      // The model row opens the REPLICA'S OWN provider → model panel: it never
+      // reaches for an official cell (which stays hidden behind the body).
+      let officialClicks = 0
+      for (const cell of cells) cell.addEventListener('click', () => { officialClicks += 1 })
+      rows[0]!.click()
+      await waitFor(() => wrapper.querySelector('.bre-panel-models') !== null)
+      expect(officialClicks).toBe(0)
+
+      // Closing the menu (React removes it) unmounts the slider root.
+      card.querySelector('[role="menu"]')!.remove()
+      await waitFor(() => document.querySelector('[data-bre-slider="1"]') === null)
+      expect(directory.select).not.toBe(originalSelect)
+    } finally {
+      h.disposeAll()
+      // Fiber disposal restores the directory's original select.
+      expect(directory.select).toBe(originalSelect)
+    }
+  })
+
+  it('resolves the current session from uiSession when the list snapshot has no `current` (0.1.6-alpha.2)', async () => {
+    // 0.1.6-alpha.2 moved session navigation out of the list snapshot: the
+    // current session is now the main-view binding exposed by ctx.uiSession.
+    // Without this fallback the slider can never resolve a directory and never
+    // mounts at all.
+    const directory = directoryFixture()
+    const routed: string[] = []
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ ids: [], byId: {}, phase: 'ready' }) } },
+        uiSession: { adapter: { current: { getSnapshot: () => ({ key: 's9' }) } } },
+        modelDirectories: {
+          directoryFor: (id: string) => { routed.push(id); return directory },
+        },
+      },
+    })
+    try {
+      buildComposerMenu()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelector('[data-bre-slider="1"]') !== null)
+      expect(routed).toContain('s9')
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('falls back to the main-view-retained row when neither `current` nor uiSession exists', async () => {
+    const directory = directoryFixture()
+    const routed: string[] = []
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: {
+          list: {
+            getSnapshot: () => ({
+              ids: ['s1'],
+              byId: { s1: { id: 's1', retainedBy: { mainView: 2 } } },
+              phase: 'ready',
+            }),
+          },
+        },
+        modelDirectories: {
+          directoryFor: (id: string) => { routed.push(id); return directory },
+        },
+      },
+    })
+    try {
+      buildComposerMenu()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelector('[data-bre-slider="1"]') !== null)
+      expect(routed).toContain('s1')
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('retires the replica body while the official model list pane is open, then restores it', async () => {
+    const directory = directoryFixture()
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => directory },
+      },
+    })
+    try {
+      const card = buildComposerMenu()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelector('[data-bre-slider="1"]') !== null)
+      const wrapper = document.querySelector<HTMLElement>('[data-bre-slider="1"]')!
+      const menu = card.querySelector<HTMLElement>('[role="menu"]')!
+
+      // The replica's model row is the user's click target: focus it (a real
+      // click focuses the button) BEFORE drilling in.
+      const row = wrapper.querySelector<HTMLButtonElement>('.bre-row-control')!
+      row.focus()
+      expect(document.activeElement).toBe(row)
+
+      // Drill-in: the official pane switch replaces ITS root cells (the
+      // wrapper/replica stay in the DOM), so remove only the menu's DIRECT
+      // children — a descendant query would also catch the replica row,
+      // which is exactly what a real pane switch never does.
+      for (const cell of Array.from(menu.children)) {
+        if (cell instanceof HTMLButtonElement && cell.getAttribute('role') === 'menuitem') cell.remove()
+      }
+      menu.insertAdjacentHTML('beforeend', '<button role="menuitemradio">item</button>')
+      await waitFor(() => wrapper.style.display === 'none')
+      // Focus handoff: the hidden row must not dump focus onto <body> (which
+      // the official shell reads as an outside blur and closes the menu). It
+      // lands on the menu itself, inside the seat root.
+      expect(document.activeElement).toBe(menu)
+      expect(menu.tabIndex).toBe(-1)
+
+      // Back to root: the body returns and the (re-created) cells hide again.
+      menu.querySelector('[role="menuitemradio"]')?.remove()
+      menu.insertAdjacentHTML('beforeend', '<button class="cell" role="menuitem">Model</button><button class="cell" role="menuitem">Effort</button>')
+      await waitFor(() => wrapper.style.display === '' && wrapper.parentElement?.firstChild === wrapper)
+      const cells = Array.from(menu.children).filter(el => el instanceof HTMLButtonElement && el.getAttribute('role') === 'menuitem')
+      for (const cell of cells) expect((cell as HTMLButtonElement).style.display).toBe('none')
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('wires the effort-memory wiretap without the model menu ever opening', async () => {
+    const directory = directoryFixture()
+    // The wrapped select is a plain closure; the spy shape lives on the
+    // original it captured — calls made through the wrapper land here.
+    const originalSelect = directory.select as unknown as { mock: { calls: unknown[][] } }
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => directory },
+      },
+    })
+    try {
+      // No composer card and no model menu in the DOM at all: the wiring must
+      // not depend on the menu popover existing (issue #4 — a brand-new
+      // session's projection lands without going through select, so the
+      // restore watcher has to be in place from the session's birth, not
+      // from the first time the user opens the model menu).
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      expect(directory.select).not.toBe(originalSelect)
+      // The watcher reacts to a level-less projection landing after wiring.
+      directory.update({
+        current: { provider: 'aliyun', model: 'qwen-max' },
+        routable: true,
+        groups: [{
+          id: 'aliyun',
+          name: 'Aliyun',
+          models: [{
+            id: 'qwen-max',
+            name: 'Qwen Max',
+            reasoning: {
+              defaultEffort: 'medium',
+              efforts: [{ id: 'off', name: 'Off' }, { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }, { id: 'max', name: 'Max' }],
+            },
+          }],
+        }],
+        failures: [],
+        status: 'ready',
+        pending: null,
+        error: null,
+      })
+      await waitFor(() => originalSelect.mock.calls.length > 0)
+      // No memory and no provider-native sighting: the restore lands the
+      // knowledge base's vendor default for the family (qwen-max → high),
+      // NOT the fixture's adapter defaultEffort — the chain never reads it.
+      expect(originalSelect.mock.calls[0][0])
+        .toMatchObject({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'high' })
+    } finally {
+      h.disposeAll()
+      // Fiber disposal restores the directory's original select.
+      expect(directory.select).toBe(originalSelect)
+    }
+  })
+
+  it('applies the configured per-model pick from the settings document to a new session', async () => {
+    // The fixture row carries a stored defaultEffort pick (the field this
+    // feature writes): the chain's second layer must land it on a level-less
+    // projection, WITHOUT any localStorage memory.
+    const directory = directoryFixture()
+    const originalSelect = directory.select as unknown as { mock: { calls: unknown[][] } }
+    const api = fakeApi(() => Promise.resolve(makeJoin({
+      aliyun: {
+        displayName: 'Aliyun',
+        api: 'openai-completions',
+        models: [
+          { id: 'qwen-max', name: 'Qwen Max', defaultEffort: 'high' },
+          { id: 'qwen-turbo' },
+        ],
+      },
+    })))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => directory },
+      },
+    })
+    try {
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      expect(directory.select).not.toBe(originalSelect)
+      // A brand-new session's projection lands level-less; the configured
+      // pick (not the vendor default) is what the watcher applies.
+      directory.update({
+        current: { provider: 'aliyun', model: 'qwen-max' },
+        routable: true,
+        groups: [{
+          id: 'aliyun',
+          name: 'Aliyun',
+          models: [{
+            id: 'qwen-max',
+            name: 'Qwen Max',
+            reasoning: {
+              defaultEffort: 'medium',
+              efforts: [{ id: 'off', name: 'Off' }, { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }, { id: 'max', name: 'Max' }],
+            },
+          }],
+        }],
+        failures: [],
+        status: 'ready',
+        pending: null,
+        error: null,
+      })
+      await waitFor(() => originalSelect.mock.calls.length > 0)
+      expect(originalSelect.mock.calls[0][0])
+        .toMatchObject({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'high' })
+      // A pushed document update invalidates the cache without breaking the
+      // wiretap: the wire stays wrapped after the refresh runs.
+      h.emitRemote('settings/document-updated', 'llm-pi-ai')
+      expect(directory.select).not.toBe(originalSelect)
+    } finally {
+      h.disposeAll()
+      expect(directory.select).toBe(originalSelect)
+    }
+  })
+
+  it('sweeps the wiretap of a session whose scope is gone, keeping the live one', async () => {
+    // Two resident sessions, each with its own directory; the host resolver
+    // refuses an id whose session scope tore down (service.ts deletes the
+    // entry and the scope first, so the refusal is the death certificate).
+    const d1 = directoryFixture()
+    const d2 = directoryFixture()
+    // Identity anchors only: this test never inspects the recorded calls.
+    const original1 = d1.select
+    const original2 = d2.select
+    let current = 's1'
+    let s1Deleted = false
+    const resolver: { directoryFor(id: string): ModelDirectoryLike } = {
+      directoryFor(id: string): ModelDirectoryLike {
+        if (id === 's1' && s1Deleted) throw new Error('ui-model-selection: session "s1" resolved no scope')
+        return (id === 's1' ? d1 : d2) as unknown as ModelDirectoryLike
+      },
+    }
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current }) } },
+        modelDirectories: resolver,
+      },
+    })
+    try {
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      expect(d1.select).not.toBe(original1)
+      // Switch to s2: d2 gets wired, and d1 -- still alive under its own
+      // session -- keeps its wiretap (switching back must not lose it).
+      current = 's2'
+      document.body.appendChild(document.createElement('div'))
+      await waitFor(() => d2.select !== original2)
+      expect(d1.select).not.toBe(original1)
+      // s1's scope tears down: the next scan restores d1's original select
+      // and drops the wiretap, so the dead directory stops being referenced.
+      s1Deleted = true
+      document.body.appendChild(document.createElement('div'))
+      await waitFor(() => d1.select === original1)
+      expect(d2.select).not.toBe(original2)
+    } finally {
+      h.disposeAll()
+      expect(d1.select).toBe(original1)
+      expect(d2.select).toBe(original2)
+    }
+  })
+
+  it('retries the configured-pick describe after a refused read instead of caching the miss', async () => {
+    // A refused describe must not land an empty cache: the next chain read
+    // re-describes and the configured layer comes back without needing a
+    // document invalidation.
+    let ok = false
+    const api = fakeApi(() => Promise.resolve(ok
+      ? makeJoin({
+        aliyun: {
+          displayName: 'Aliyun',
+          api: 'openai-completions',
+          models: [{ id: 'qwen-max', name: 'Qwen Max', defaultEffort: 'low' }],
+        },
+      })
+      : { ...makeJoin({}), writable: true, namespace: undefined }))
+    // describeNamespace degrades a refused envelope to namespace: undefined.
+    const directory = directoryFixture()
+    const originalSelect = directory.select as unknown as { mock: { calls: unknown[][] } }
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => directory },
+      },
+    })
+    try {
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      // A level-less projection lands while the reads are still refused: the
+      // chain misses (no vendor default for this id is asserted by the
+      // configured layer being the ONLY source of 'low').
+      directory.update({
+        current: { provider: 'aliyun', model: 'qwen-max' },
+        routable: true,
+        groups: [{
+          id: 'aliyun',
+          name: 'Aliyun',
+          models: [{
+            id: 'qwen-max',
+            name: 'Qwen Max',
+            reasoning: {
+              efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+            },
+          }],
+        }],
+        failures: [],
+        status: 'ready',
+        pending: null,
+        error: null,
+      })
+      await new Promise(resolve => setTimeout(resolve, 0))
+      await waitFor(() => originalSelect.mock.calls.length > 0)
+      // During the refused window the chain falls through to the vendor
+      // default (qwen → high).
+      expect(originalSelect.mock.calls[0][0])
+        .toMatchObject({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'high' })
+      // Reads recover WITHOUT any document invalidation — the refused answer
+      // was never cached. Switch away and back: the switch chain re-describes
+      // (now ok) and the configured pick lands.
+      ok = true
+      await directory.select({ provider: 'aliyun', model: 'qwen-turbo' })
+      // Switch back: the chain reads the configured layer (now answering)
+      // and lands the pick.
+      await directory.select({ provider: 'aliyun', model: 'qwen-max' })
+      await waitFor(() => originalSelect.mock.calls.length > 2)
+      expect(originalSelect.mock.calls[2][0])
+        .toMatchObject({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'low' })
+    } finally {
+      h.disposeAll()
+      expect(directory.select).toBe(originalSelect)
+    }
+  })
+
+  it('re-inserts the slider when a React re-render displaces it', async () => {
+    const directory = directoryFixture()
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => directory },
+      },
+    })
+    try {
+      buildComposerMenu()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelector('[data-bre-slider="1"]') !== null)
+      // Simulate a pane switch: React replaces the menu's children; the
+      // next scan must put the slider back on top.
+      const menu = document.querySelector<HTMLElement>('[role="menu"]')!
+      menu.innerHTML = '<button class="cell">Effort list</button>'
+      await waitFor(() => menu.firstChild instanceof HTMLElement && (menu.firstChild as HTMLElement).dataset['breSlider'] === '1')
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('toggling the slider preference off unmounts the composer slider', async () => {
+    const directory = directoryFixture()
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => directory },
+      },
+    })
+    try {
+      buildComposerMenu()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelector('[data-bre-slider="1"]') !== null)
+
+      const { setSliderEnabled } = await import('../src/client/slider-pref.js')
+      setSliderEnabled(false)
+      await waitFor(() => document.querySelector('[data-bre-slider="1"]') === null)
+      // The host menu box reverts to the official size AND the hidden official
+      // cells become visible again (no empty shell while the menu stays open).
+      expect(document.querySelector('[role="menu"].bre-model-menu-host')).toBeNull()
+      const cells = Array.from(document.querySelectorAll('[role="menu"] > button[role="menuitem"]'))
+      for (const cell of cells) expect((cell as HTMLButtonElement).style.display).toBe('')
+      setSliderEnabled(true)
+    } finally {
+      h.disposeAll()
+    }
+  })
+
+  it('does not DOM-mount the toggle once the footer slot is active', async () => {
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api)
+    try {
+      const block = buildAddBlock().querySelector<HTMLElement>('.addBlock')!
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      // The slot registration happens at apply; a later scan must not mount
+      // a second toggle into the DOM.
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(block.querySelector('.bre-slider-setting')).toBeNull()
+    } finally {
+      h.disposeAll()
+    }
+  })
+})

@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+lib/
+
+# Packed release artifacts
+*.tgz
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+
+# Local tooling state
+.reasonix/
+
+# Scratch release notes / packed artifacts working area
+.tmp-rel/
+
+# Fetched official-document snapshots used to re-verify the knowledge base.
+# Kept in the workspace as evidence, never released: the third-party files in
+# here (models.dev exports) are cross-checks, not sources of truth.
+research/
+.mnemon/
+.workbuddy/
+
+# Localized release notes are not released with the package: .github/releases/ never ships
+.github/releases/
+
+# Local planning/spec workspace of the superpowers skill — never committed.
+docs/superpowers/
+
+# Handoff notes and any other working markdown under docs/ — internal scratch,
+# never released. Only the README's own SVG assets ship (see package.json
+# `files`), so this rule only ever catches prose.
+docs/*.md
+
+# The generated model-knowledge view and the compatibility records ARE
+# released with the repository — un-ignored below:
+!docs/supported-models.md
+!docs/compatibility-notes.md

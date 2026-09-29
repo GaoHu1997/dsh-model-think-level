@@ -1,0 +1,812 @@
+/**
+ * Client write-seam (ops) tests: suggestion resolution and per-model writes
+ * over a fake settings Remote.
+ */
+
+import { describe, expect, it, vi } from 'vitest'
+import { baselineModelsOf, createEditorApi, defaultEffortOf, describeNamespace, effortsOf, inputOf, providersOf } from '../src/client/ops.js'
+import { modelsOf } from '../src/shared.js'
+import { AUTOFILL_MARKER } from '../src/constants.js'
+import type { RemoteApi, SettingsNamespaceView, SettingsRemoteApi, SettingsScopeReadLike } from '../src/client/types.js'
+
+/** A minimal settings Remote that records mutate calls. */
+function fakeApi(initial: unknown, userSection?: unknown, baseSection?: unknown): {
+  api: RemoteApi
+  mutates: { ns: string; ops: { op: string; path: string[]; value?: unknown }[]; expectedRevision?: number }[]
+  namespace(): SettingsNamespaceView | undefined
+} {
+  // The SettingsNamespaceView pins value/user to JsonValue; fixtures are
+  // plain JSON shapes, so the view asserts once instead of per-field.
+  const namespace = {
+    ns: 'llm-pi-ai',
+    schema: {},
+    value: initial,
+    user: userSection ?? initial,
+    ...(baseSection === undefined ? {} : { base: baseSection }),
+    revision: 7,
+    applies: 'live',
+    secrets: [],
+  } as unknown as SettingsNamespaceView
+  const mutates: { ns: string; ops: { op: string; path: string[]; value?: unknown }[]; expectedRevision?: number }[] = []
+  const api: RemoteApi = {
+    settings: {
+      async describe() {
+        return { ok: true, value: { writable: true, hasDocument: true, namespaces: [namespace] } }
+      },
+      async mutate(ns, ops, expectedRevision) {
+        mutates.push({ ns, ops, expectedRevision })
+        // The write lands in the USER section; the resolved `value` keeps the
+        // fixture's shape (that divergence is exactly what these tests probe).
+        const providers = (namespace.user as { providers: Record<string, Record<string, unknown>> }).providers
+        for (const op of ops) {
+          if (op.op !== 'set') continue
+          const [_, route, key] = op.path
+          providers[route][key] = op.value
+        }
+        return { ok: true, value: namespace }
+      },
+    },
+  }
+  return { api, mutates, namespace: () => namespace }
+}
+
+const initialValue = {
+  providers: {
+    aliyun: {
+      displayName: 'Aliyun',
+      api: 'openai-completions',
+      models: [
+        { id: 'qwen-max', name: 'Qwen Max' },
+        { id: 'qwen-turbo' },
+      ],
+    },
+  },
+}
+
+/**
+ * The official settings scope's read face, as `ctx.settingsScope` presents it:
+ * one shared mirror snapshot per bound namespace.
+ */
+function scopeSnapshot(overrides: Partial<ReturnType<SettingsScopeReadLike['getSnapshot']>> = {}): SettingsScopeReadLike {
+  return {
+    getSnapshot: () => ({
+      status: 'ready',
+      value: initialValue,
+      user: initialValue,
+      base: { providers: {} },
+      revision: 42,
+      writable: true,
+      ...overrides,
+    }),
+  }
+}
+
+/** A wire Remote that answers one namespace and counts its describe calls. */
+function wireRemote(revision = 7): { settings: SettingsRemoteApi; describes: () => number } {
+  let calls = 0
+  return {
+    settings: {
+      async describe() {
+        calls += 1
+        return {
+          ok: true,
+          value: {
+            writable: true,
+            hasDocument: true,
+            namespaces: [{
+              ns: 'llm-pi-ai', schema: {}, value: initialValue, user: initialValue,
+              revision, applies: 'live' as const, secrets: [],
+            } as unknown as SettingsNamespaceView],
+          },
+        }
+      },
+      async mutate() { throw new Error('no write is expected in these tests') },
+    },
+    describes: () => calls,
+  }
+}
+
+describe('describeNamespace (official scope snapshot vs the wire)', () => {
+  it('reads the join from the scope snapshot without a wire round trip', async () => {
+    const wire = wireRemote()
+    const join = await describeNamespace({ settings: wire.settings, scope: scopeSnapshot() })
+
+    expect(wire.describes()).toBe(0)
+    expect(join.namespace?.revision).toBe(42)
+    expect(join.writable).toBe(true)
+    // The fields this half actually reads come through verbatim.
+    expect(providersOf(join.namespace)).toEqual(initialValue.providers)
+    expect(baselineModelsOf(join.namespace, 'aliyun')).toEqual(initialValue.providers.aliyun.models)
+  })
+
+  it('keeps the wire path while the snapshot carries no accepted section', async () => {
+    const wire = wireRemote(9)
+    const join = await describeNamespace({
+      settings: wire.settings,
+      scope: scopeSnapshot({ status: 'loading', value: undefined, revision: undefined }),
+    })
+
+    expect(wire.describes()).toBe(1)
+    expect(join.namespace?.revision).toBe(9)
+  })
+
+  it('skips the snapshot for a fresh read, which is what a conflict retry needs', async () => {
+    const wire = wireRemote(11)
+    const join = await describeNamespace({ settings: wire.settings, scope: scopeSnapshot() }, { fresh: true })
+
+    expect(wire.describes()).toBe(1)
+    expect(join.namespace?.revision).toBe(11)
+  })
+})
+
+describe('providersOf / modelsOf / effortsOf', () => {
+  const ns = {
+    ns: 'llm-pi-ai', schema: {}, value: initialValue, user: initialValue, revision: 1, applies: 'live' as const, secrets: [],
+  } as unknown as SettingsNamespaceView
+
+  it('reads providers and models as records', () => {
+    const providers = providersOf(ns)
+    expect(Object.keys(providers)).toEqual(['aliyun'])
+    expect(modelsOf(providers, 'aliyun')).toHaveLength(2)
+    expect(modelsOf(providers, 'missing')).toEqual([])
+  })
+
+  it('reads efforts, including false', () => {
+    const withFalse = {
+      ...ns,
+      value: { providers: { r: { models: [{ id: 'a', reasoningEfforts: false }] } } },
+    }
+    const providers = providersOf(withFalse)
+    expect(effortsOf(modelsOf(providers, 'r'), 'a')).toBe(false)
+    expect(effortsOf(modelsOf(providers, 'r'), 'b')).toBeUndefined()
+  })
+})
+
+describe('createEditorApi', () => {
+  it('holds the write while an editor owns the document', async () => {
+    // The official card freezes its own revision baseline, so a write from
+    // this seam makes the user's very next save in that card fail with
+    // `settings/conflict`. While the editor owns the document the write is
+    // therefore queued verbatim, for the injector to replay once it is gone.
+    const { api, mutates } = fakeApi(initialValue)
+    const held: { route: string; modelId: string; write: unknown }[] = []
+    const editor = createEditorApi(api, undefined, undefined, (route, modelId, write) => {
+      held.push({ route, modelId, write })
+    })
+    const reply = await editor.writeEfforts(
+      'aliyun', 'qwen-max', { high: 'high' }, { thinkingFormat: 'qwen' }, ['text'], ['vllmPriority'], 'high',
+    )
+    expect(reply).toEqual({ ok: true, staged: true })
+    expect(mutates).toHaveLength(0)
+    expect(held).toEqual([{
+      route: 'aliyun',
+      modelId: 'qwen-max',
+      write: {
+        efforts: { high: 'high' },
+        compat: { thinkingFormat: 'qwen' },
+        input: ['text'],
+        clearCompatKeys: ['vllmPriority'],
+        defaultEffort: 'high',
+      },
+    }])
+  })
+
+  it('commits straight through when no holder owns the document', async () => {
+    // The replay path itself: the injector builds a holder-less seam, so the
+    // very same call has to reach settings then.
+    const { api, mutates } = fakeApi(initialValue)
+    const replay = createEditorApi(api)
+    expect(await replay.writeEfforts('aliyun', 'qwen-max', { high: 'high' })).toEqual({ ok: true })
+    expect(mutates).toHaveLength(1)
+  })
+
+  it('suggests from the knowledge base for a known model', async () => {
+    const { api } = fakeApi(initialValue)
+    const editor = createEditorApi(api)
+    const reply = await editor.suggest('aliyun', 'qwen-max', 'Qwen Max')
+    expect(reply.ok).toBe(true)
+    if (reply.ok) {
+      expect(reply.suggestion.matched).toBe(true)
+      expect(reply.suggestion.source).toBe('qwen')
+    }
+  })
+
+  it('infers for an unknown model on an openai route', async () => {
+    const { api } = fakeApi(initialValue)
+    const editor = createEditorApi(api)
+    const reply = await editor.suggest('aliyun', 'mystery')
+    expect(reply.ok).toBe(true)
+    if (reply.ok) {
+      expect(reply.suggestion.matched).toBe(false)
+      expect(reply.suggestion.efforts).toEqual({ off: null, low: 'low', medium: 'medium', high: 'high' })
+    }
+  })
+
+  it('feeds staged facts to inference for a route the document does not hold', async () => {
+    // The create card's typed protocol/endpoint stand in for the stored
+    // profile: a known family even gets its compat block, gated as usual.
+    const { api } = fakeApi({ providers: {} })
+    const editor = createEditorApi(api)
+    const reply = await editor.suggest('acme-gateway', 'deepseek-v4-flash-free', undefined, {
+      api: 'openai-completions',
+      baseURL: 'https://api.deepseek.com/v1',
+    })
+    expect(reply.ok).toBe(true)
+    if (reply.ok) {
+      expect(reply.suggestion.matched).toBe(true)
+      expect(reply.suggestion.source).toBe('deepseek-v4')
+      expect(reply.suggestion.efforts).toEqual({ off: 'none', low: 'low', high: 'high', max: 'max' })
+    }
+  })
+
+  it('skips the endpoint probe for a route the document does not hold', async () => {
+    // The host probe resolves routes from settings: asking for a create
+    // card's typed route would always 400, so the client must not spend
+    // the round trip.
+    const { api } = fakeApi({ providers: {} })
+    const fetchSpy = vi.fn(async () => { throw new Error('probe must not run') })
+    vi.stubGlobal('fetch', fetchSpy)
+    try {
+      const editor = createEditorApi(api)
+      const reply = await editor.suggest('acme-gateway', 'mystery', undefined, { api: 'openai-completions' })
+      expect(reply.ok).toBe(true)
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('prefers the stored profile over staged facts when both exist', async () => {
+    const { api } = fakeApi(initialValue)
+    const editor = createEditorApi(api)
+    // A stale create-card fact must not shadow what the document says for a
+    // saved route.
+    const reply = await editor.suggest('aliyun', 'qwen-max', undefined, { api: 'anthropic-messages' })
+    expect(reply.ok).toBe(true)
+    if (reply.ok) expect(reply.suggestion.source).toBe('qwen')
+  })
+
+  it('stages through the injected sink and tolerates no sink', async () => {
+    const { api } = fakeApi(initialValue)
+    const sink = vi.fn()
+    const staging = createEditorApi(api, undefined, sink)
+    staging.stageEfforts('acme', 'deepseek-v4-flash-free', { high: 'high' })
+    expect(sink).toHaveBeenCalledWith('acme', 'deepseek-v4-flash-free', { high: 'high' }, undefined, undefined, undefined)
+    // The suggestion's compat rides the same seam.
+    const compat = { thinkingFormat: 'deepseek' as const, supportsReasoningEffort: true }
+    staging.stageEfforts('acme', 'deepseek-v4-flash-free', { high: 'high' }, compat)
+    expect(sink).toHaveBeenLastCalledWith('acme', 'deepseek-v4-flash-free', { high: 'high' }, compat, undefined, undefined)
+    // An edit-card seam (no sink) is a no-op, not a crash.
+    createEditorApi(api).stageEfforts('acme', 'deepseek-v4-flash-free', { high: 'high' })
+  })
+
+  it('carries the suggestion compat so the browser path writes what the host fill writes', async () => {
+    const { api } = fakeApi({ providers: {} })
+    const editor = createEditorApi(api)
+    const reply = await editor.suggest('acme-gateway', 'deepseek-v4-flash-free', undefined, {
+      api: 'openai-completions',
+      baseURL: 'https://gw.example.com/v1',
+    })
+    expect(reply.ok).toBe(true)
+    if (reply.ok) {
+      // gw.example.com is a self-hosted relay: the role pin rides along,
+      // and the host fill writes these same bytes (parity holds).
+      expect(reply.suggestion.compat).toEqual({ thinkingFormat: 'deepseek', supportsReasoningEffort: true, supportsDeveloperRole: false })
+    }
+  })
+
+  it('writes the supplied compat alongside the declaration', async () => {
+    const { api, mutates } = fakeApi(initialValue)
+    const editor = createEditorApi(api)
+    const compat = { thinkingFormat: 'qwen' as const }
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { off: null, high: 'high' }, compat)
+    expect(reply).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0].reasoningEfforts).toEqual({ off: null, high: 'high' })
+    expect(models[0].compat).toEqual({ thinkingFormat: 'qwen' })
+  })
+
+  it('leaves an existing compat untouched when the write carries none', async () => {
+    const preCompat = {
+      providers: {
+        aliyun: {
+          displayName: 'Aliyun',
+          api: 'openai-completions',
+          models: [{ id: 'qwen-max', name: 'Qwen Max', compat: { thinkingFormat: 'qwen' } }],
+        },
+      },
+    }
+    const { api, mutates } = fakeApi(preCompat)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' })
+    expect(reply).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0].compat).toEqual({ thinkingFormat: 'qwen' })
+  })
+
+  it('writes one model through settings.mutate, preserving siblings', async () => {
+    const { api, mutates } = fakeApi(initialValue)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { off: null, high: 'high' })
+    expect(reply).toEqual({ ok: true })
+    expect(mutates).toHaveLength(1)
+    const op = mutates[0].ops[0]
+    expect(op.path).toEqual(['providers', 'aliyun', 'models'])
+    const models = op.value as Record<string, unknown>[]
+    expect(models[0].reasoningEfforts).toEqual({ off: null, high: 'high' })
+    // The sibling keeps its own fields.
+    expect(models[1]).toEqual({ id: 'qwen-turbo' })
+    // The mutated value is visible to the next read.
+    const after = await editor.suggest('aliyun', 'qwen-max')
+    expect(after.ok).toBe(true)
+  })
+
+  it('rebuilds the models array from the USER layer, never the resolved value', async () => {
+    // The resolved view carries schema defaults the user never set (`input: []`,
+    // an empty `compat`, the route-level defaults). A write rebuilt from it
+    // materializes those into the stored document, so the baseline has to be
+    // the raw user section -- the same choice the host autofill makes.
+    const user = {
+      providers: { aliyun: { api: 'openai-completions', models: [{ id: 'qwen-max', contextWindow: 131_072 }] } },
+    }
+    const resolved = {
+      providers: {
+        aliyun: {
+          api: 'openai-completions',
+          models: [{ id: 'qwen-max', contextWindow: 131_072, input: [], compat: { chatTemplateKwargs: {} } }],
+          modelOverrides: {},
+          defaultContextWindow: 262_144,
+          defaultInput: ['text'],
+        },
+      },
+    }
+    const { api, mutates } = fakeApi(resolved, user)
+    const editor = createEditorApi(api)
+    expect(await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' })).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0]).toEqual({ id: 'qwen-max', contextWindow: 131_072, reasoningEfforts: { high: 'high' } })
+    expect('input' in models[0]).toBe(false)
+    expect('compat' in models[0]).toBe(false)
+  })
+
+  it('falls back to the composition base when the user layer declares no models', async () => {
+    // The official card's inheritance rule: a row the user layer does not own
+    // is read from the base layer, and touching it is what materializes it.
+    const user = { providers: { aliyun: { api: 'openai-completions' } } }
+    const resolved = {
+      providers: { aliyun: { api: 'openai-completions', models: [{ id: 'qwen-max', name: 'Qwen Max', input: [] }] } },
+    }
+    const base = { providers: { aliyun: { models: [{ id: 'qwen-max', name: 'Qwen Max' }] } } }
+    const { api, mutates } = fakeApi(resolved, user, base)
+    const editor = createEditorApi(api)
+    expect(await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' })).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0]).toEqual({ id: 'qwen-max', name: 'Qwen Max', reasoningEfforts: { high: 'high' } })
+  })
+
+  it('refuses a model neither the user layer nor the base declares', async () => {
+    const user = { providers: { aliyun: { api: 'openai-completions' } } }
+    const resolved = { providers: { aliyun: { api: 'openai-completions', models: [] } } }
+    const { api, mutates } = fakeApi(resolved, user)
+    const editor = createEditorApi(api)
+    expect(await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' }))
+      .toEqual({ ok: false, error: 'model-not-found' })
+    expect(mutates).toHaveLength(0)
+  })
+
+  it('writes, clears, and leaves the per-model default-effort pick', async () => {
+    // Own fixtures: the shared initialValue is mutated by earlier writes.
+    const { api, mutates } = fakeApi({
+      providers: { aliyun: { models: [{ id: 'qwen-max' }] } },
+    })
+    const editor = createEditorApi(api)
+    // A string pick lands on the row (the ladder rides untouched).
+    expect(await editor.writeEfforts('aliyun', 'qwen-max', 'keep', undefined, undefined, undefined, 'high')).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0].reasoningEfforts).toBeUndefined()
+    expect(models[0].defaultEffort).toBe('high')
+    // null clears the pick durably.
+    const clearFixture = fakeApi({
+      providers: { aliyun: { models: [{ id: 'qwen-max', defaultEffort: 'high' }] } },
+    })
+    const clearEditor = createEditorApi(clearFixture.api)
+    expect(await clearEditor.writeEfforts('aliyun', 'qwen-max', 'keep', undefined, undefined, undefined, null)).toEqual({ ok: true })
+    const cleared = clearFixture.mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(cleared[0].defaultEffort).toBeUndefined()
+    // An omitted intent leaves a stored pick untouched (a ladder-only edit).
+    const { api: api2, mutates: mutates2 } = fakeApi({
+      providers: { aliyun: { models: [{ id: 'qwen-max', defaultEffort: 'medium' }] } },
+    })
+    const editor2 = createEditorApi(api2)
+    expect(await editor2.writeEfforts('aliyun', 'qwen-max', 'keep', undefined, undefined, undefined)).toEqual({ ok: true })
+    const kept = mutates2[0].ops[0].value as Record<string, unknown>[]
+    expect(kept[0].defaultEffort).toBe('medium')
+  })
+
+  it('reads the stored default-effort pick, degrading junk to undefined', () => {
+    const providers = providersOf({
+      ns: 'llm-pi-ai', schema: {},
+      value: { providers: { r: { models: [
+        { id: 'a', defaultEffort: 'high' },
+        { id: 'b', defaultEffort: '' },
+        { id: 'c', defaultEffort: 42 },
+        { id: 'd' },
+      ] } } },
+      user: {}, revision: 1, applies: 'live', secrets: [],
+    } as unknown as SettingsNamespaceView)
+    const models = modelsOf(providers, 'r')
+    expect(defaultEffortOf(models, 'a')).toBe('high')
+    expect(defaultEffortOf(models, 'b')).toBeUndefined()
+    expect(defaultEffortOf(models, 'c')).toBeUndefined()
+    expect(defaultEffortOf(models, 'd')).toBeUndefined()
+    expect(defaultEffortOf(models, 'missing')).toBeUndefined()
+  })
+
+  it('writes false to disable reasoning', async () => {
+    const { api, mutates } = fakeApi(initialValue)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-turbo', false)
+    expect(reply).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[1].reasoningEfforts).toBe(false)
+  })
+
+  it('unset writes the durable marker so auto-fill respects it', async () => {
+    const { api, mutates } = fakeApi(initialValue)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', undefined)
+    expect(reply).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0].reasoningEfforts).toBeUndefined()
+    expect(models[0].reasoningEffortsUnset).toBe(true)
+  })
+
+  it('writing a declaration clears an earlier unset marker', async () => {
+    const preUnset = {
+      providers: {
+        aliyun: {
+          displayName: 'Aliyun',
+          api: 'openai-completions',
+          models: [{ id: 'qwen-max', name: 'Qwen Max', reasoningEffortsUnset: true }],
+        },
+      },
+    }
+    const { api, mutates } = fakeApi(preUnset)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' })
+    expect(reply).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0].reasoningEfforts).toEqual({ high: 'high' })
+    expect(models[0].reasoningEffortsUnset).toBeUndefined()
+  })
+
+  it('clears the named compat keys while keeping fields the editor never showed', async () => {
+    const stored = {
+      providers: {
+        aliyun: {
+          displayName: 'Aliyun',
+          api: 'openai-responses',
+          models: [{
+            id: 'qwen-max',
+            reasoningEfforts: { high: 'high' },
+            compat: { supportsMaxOutputTokens: false, supportsStore: true },
+          }],
+        },
+      },
+    }
+    const { api, mutates } = fakeApi(stored)
+    const editor = createEditorApi(api)
+    // The editor's picker was switched back to "Unset": it owns
+    // supportsMaxOutputTokens on this protocol, and nothing else.
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' }, undefined, undefined, ['supportsMaxOutputTokens'])
+    expect(reply).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0]['compat']).toEqual({ supportsStore: true })
+  })
+
+  it('drops the compat block entirely when every key was cleared', async () => {
+    const stored = {
+      providers: {
+        aliyun: { api: 'openai-responses', models: [{ id: 'qwen-max', reasoningEfforts: { high: 'high' }, compat: { supportsMaxOutputTokens: true } }] },
+      },
+    }
+    const { api, mutates } = fakeApi(stored)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' }, undefined, undefined, ['supportsMaxOutputTokens'])
+    expect(reply).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0]['compat']).toBeUndefined()
+  })
+
+  it('writing "reasoning disabled" also retires the autofill provenance marker', async () => {
+    // The autofill marker describes the ladder the HOST wrote. Once the user
+    // declares anything -- a ladder OR false -- those bytes are a decision, so
+    // a stale staging must not be allowed to override them later.
+    const autofilled = {
+      providers: {
+        aliyun: {
+          displayName: 'Aliyun',
+          api: 'openai-completions',
+          models: [{
+            id: 'qwen-max',
+            reasoningEfforts: { off: null, high: 'high' },
+            [AUTOFILL_MARKER]: 3,
+          }],
+        },
+      },
+    }
+    const { api, mutates } = fakeApi(autofilled)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', false)
+    expect(reply).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0]['reasoningEfforts']).toBe(false)
+    expect(models[0][AUTOFILL_MARKER]).toBeUndefined()
+  })
+
+  it('a declaration retires the autofill provenance marker', async () => {
+    // These bytes are the user's decision now, so the browser flush must stop
+    // reading them as the knowledge base's suggestion: otherwise a later
+    // staging would be allowed to override a deliberate hand edit.
+    const autofilled = {
+      providers: {
+        aliyun: {
+          displayName: 'Aliyun',
+          api: 'openai-completions',
+          models: [{
+            id: 'qwen-max',
+            name: 'Qwen Max',
+            reasoningEfforts: { off: null, high: 'high' },
+            input: ['text'],
+            [AUTOFILL_MARKER]: 12,
+          }],
+        },
+      },
+    }
+    const { api, mutates } = fakeApi(autofilled)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { off: null, high: 'high', max: 'max' }, undefined, ['text', 'image'])
+    expect(reply).toEqual({ ok: true })
+    const models = mutates[0].ops[0].value as Record<string, unknown>[]
+    expect(models[0].reasoningEfforts).toEqual({ off: null, high: 'high', max: 'max' })
+    expect(models[0][AUTOFILL_MARKER]).toBeUndefined()
+    // A ladder-untouched ('keep') edit must not silence provenance either: it
+    // writes no ladder, so there is nothing it could have taken over.
+    const kept = await editor.writeEfforts('aliyun', 'qwen-max', 'keep', undefined, ['text'])
+    expect(kept).toEqual({ ok: true })
+  })
+
+  it('refuses to rewrite a route whose model list carries a malformed row', async () => {
+    const malformed = {
+      providers: {
+        aliyun: {
+          displayName: 'Aliyun',
+          api: 'openai-completions',
+          models: [{ id: 'qwen-max' }, 'broken'],
+        },
+      },
+    }
+    const { api, mutates } = fakeApi(malformed)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' })
+    expect(reply).toEqual({ ok: false, error: 'invalid-models' })
+    expect(mutates).toHaveLength(0)
+  })
+
+  it('fails cleanly when the model does not exist', async () => {
+    const { api } = fakeApi(initialValue)
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'ghost', { high: 'high' })
+    expect(reply).toEqual({ ok: false, error: 'model-not-found' })
+  })
+
+  // The Typert refusal code is 'settings/conflict' — the retry must
+  // trigger on it and re-read a fresh revision.
+  it('retries once on a settings/conflict using the fresh revision', async () => {
+    let revision = 7
+    let conflictsLeft = 1
+    const mutates: Array<{ expectedRevision?: number }> = []
+    const api: RemoteApi = {
+      settings: {
+        async describe() {
+          return { ok: true, value: { writable: true, hasDocument: true, namespaces: [{ ns: 'llm-pi-ai', schema: {}, value: initialValue, user: initialValue, revision, applies: 'live' as const, secrets: [] } as unknown as SettingsNamespaceView] } }
+        },
+        async mutate(_ns, _ops, expectedRevision) {
+          mutates.push({ expectedRevision })
+          if (conflictsLeft > 0) {
+            conflictsLeft -= 1
+            revision += 1 // a concurrent writer moved the namespace
+            return {
+              ok: false,
+              error: {
+                code: 'settings/conflict',
+                message: 'settings namespace "llm-pi-ai" changed since it was read',
+                details: { ns: 'llm-pi-ai', expected: revision - 1, actual: revision },
+              },
+            }
+          }
+          return { ok: true, value: undefined as unknown as SettingsNamespaceView }
+        },
+      },
+    }
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' })
+    expect(reply).toEqual({ ok: true })
+    expect(mutates).toHaveLength(2)
+    // The retry carried the FRESH revision, not the stale one.
+    expect(mutates[1]!.expectedRevision).toBe(8)
+  })
+
+  it('surfaces non-conflict write errors without retrying', async () => {
+    const api: RemoteApi = {
+      settings: {
+        async describe() {
+          return { ok: true, value: { writable: true, hasDocument: true, namespaces: [{ ns: 'llm-pi-ai', schema: {}, value: initialValue, user: initialValue, revision: 7, applies: 'live' as const, secrets: [] } as unknown as SettingsNamespaceView] } }
+        },
+        async mutate() {
+          return {
+            ok: false,
+            error: {
+              code: 'settings/rejected',
+              message: 'model "qwen-max" sets compat "thinkingFormat", but its api is "openai-responses"',
+              details: { ns: 'llm-pi-ai' },
+            },
+          }
+        },
+      },
+    }
+    const editor = createEditorApi(api)
+    const reply = await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' })
+    expect(reply).toEqual({ ok: false, error: 'model "qwen-max" sets compat "thinkingFormat", but its api is "openai-responses"' })
+  })
+
+  it('upgrades confidence to medium when the endpoint probe confirms reasoning', async () => {
+    const { api } = fakeApi(initialValue)
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, data: [{ id: 'mystery', supported_features: ['reasoning'] }] }),
+    })))
+    try {
+      const editor = createEditorApi(api)
+      const reply = await editor.suggest('aliyun', 'mystery')
+      expect(reply.ok).toBe(true)
+      if (reply.ok) {
+        expect(reply.suggestion.confidence).toBe('medium')
+        expect(reply.suggestion.endpoint).toEqual({ reasoning: true, source: 'supported_features' })
+        // The endpoint confirms support but names no spellings — the ladder
+        // stays the conservative confirmed set.
+        expect(reply.suggestion.efforts).toEqual({ off: null, low: 'low', medium: 'medium', high: 'high' })
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('degrades to a low-confidence protocol suggestion when the probe fails', async () => {
+    const { api } = fakeApi(initialValue)
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('probe route absent')
+    }))
+    try {
+      const editor = createEditorApi(api)
+      const reply = await editor.suggest('aliyun', 'mystery')
+      expect(reply.ok).toBe(true)
+      if (reply.ok) {
+        expect(reply.suggestion.confidence).toBe('low')
+        expect(reply.suggestion.endpoint).toEqual({ reasoning: 'unknown', source: null })
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  describe('modality writes', () => {
+    it('writes modalities in the same mutate and clears an earlier marker', async () => {
+      const seeded = {
+        providers: {
+          aliyun: {
+            displayName: 'Aliyun',
+            api: 'openai-completions',
+            models: [{ id: 'qwen-max', inputUnset: true }],
+          },
+        },
+      }
+      const { api, mutates } = fakeApi(seeded)
+      const editor = createEditorApi(api)
+      const reply = await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' }, undefined, ['text', 'image'])
+      expect(reply).toEqual({ ok: true })
+      const models = mutates[0].ops[0].value as Array<Record<string, unknown>>
+      expect(models[0].input).toEqual(['text', 'image'])
+      expect(models[0].inputUnset).toBeUndefined()
+    })
+
+    it('null unsets the modality declaration durably', async () => {
+      const seeded = {
+        providers: {
+          aliyun: {
+            displayName: 'Aliyun',
+            api: 'openai-completions',
+            models: [{ id: 'qwen-max', input: ['text', 'image'] }],
+          },
+        },
+      }
+      const { api, mutates } = fakeApi(seeded)
+      const editor = createEditorApi(api)
+      await editor.writeEfforts('aliyun', 'qwen-max', undefined, undefined, null)
+      const models = mutates[0].ops[0].value as Array<Record<string, unknown>>
+      expect(models[0].input).toBeUndefined()
+      expect(models[0].inputUnset).toBe(true)
+    })
+
+    it('an omitted intent leaves the stored declaration untouched', async () => {
+      const seeded = {
+        providers: {
+          aliyun: {
+            displayName: 'Aliyun',
+            api: 'openai-completions',
+            models: [{ id: 'qwen-max', input: ['text', 'image'], reasoningEfforts: { high: 'high' } }],
+          },
+        },
+      }
+      const { api, mutates } = fakeApi(seeded)
+      const editor = createEditorApi(api)
+      // Only the effort ladder is re-declared; no input intent travels.
+      await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' })
+      const models = mutates[0].ops[0].value as Array<Record<string, unknown>>
+      expect(models[0].input).toEqual(['text', 'image'])
+      expect(models[0].reasoningEfforts).toEqual({ high: 'high' })
+    })
+
+    it("'keep' narrows modalities without touching a never-declared ladder", async () => {
+      const seeded = {
+        providers: {
+          aliyun: {
+            displayName: 'Aliyun',
+            api: 'openai-completions',
+            models: [{ id: 'qwen-max' }],
+          },
+        },
+      }
+      const { api, mutates } = fakeApi(seeded)
+      const editor = createEditorApi(api)
+      // The modality-only apply: the ladder must stay exactly as-was -- no
+      // declaration written AND no durable unset marker stamped.
+      const reply = await editor.writeEfforts('aliyun', 'qwen-max', 'keep', undefined, ['text'])
+      expect(reply).toEqual({ ok: true })
+      const models = mutates[0].ops[0].value as Array<Record<string, unknown>>
+      expect(models[0].reasoningEfforts).toBeUndefined()
+      expect(models[0].reasoningEffortsUnset).toBeUndefined()
+      expect(models[0].input).toEqual(['text'])
+    })
+
+    it("'keep' with no modality intent is a pure no-op on both parts", async () => {
+      const seeded = {
+        providers: {
+          aliyun: {
+            displayName: 'Aliyun',
+            api: 'openai-completions',
+            models: [{ id: 'qwen-max', reasoningEfforts: false, input: ['text', 'image'] }],
+          },
+        },
+      }
+      const { api, mutates } = fakeApi(seeded)
+      const editor = createEditorApi(api)
+      await editor.writeEfforts('aliyun', 'qwen-max', 'keep')
+      const models = mutates[0].ops[0].value as Array<Record<string, unknown>>
+      expect(models[0].reasoningEfforts).toBe(false)
+      expect(models[0].input).toEqual(['text', 'image'])
+    })
+
+    it('inputOf maps the resolved-layer empty array to undefined (inherit)', async () => {
+      // The settings descriptor hands the client the RESOLVED layer, where
+      // schemastery materializes absent arrays as [] -- llm-pi-ai's own
+      // declaredInput reads that as "no answer here". The client must agree,
+      // or every undeclared model renders as a phantom text-only declaration.
+      expect(inputOf([{ id: 'x', input: [] }], 'x')).toBeUndefined()
+      expect(inputOf([{ id: 'x' }], 'x')).toBeUndefined()
+      expect(inputOf([{ id: 'x', input: 'garbage' }], 'x')).toBeUndefined()
+      expect(inputOf([{ id: 'x', input: ['text'] }], 'x')).toEqual(['text'])
+      expect(inputOf([{ id: 'x', input: ['image', 'text'] }], 'x')).toEqual(['image', 'text'])
+    })
+  })
+})

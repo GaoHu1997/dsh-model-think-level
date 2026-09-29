@@ -1,0 +1,7 @@
+# Applied by the profile composer (dsh.bundle.patch) when this package is
+# added to a profile. Mounts the host half (settings auto-adaptation plus a
+# keepalive row) so the browser scanner discovers `dsh.client` and serves
+# `lib/client.js` as `/plugins/dsh-model-think-level/client.js`.
+- insert:
+    - id: dsh-model-think-level
+      name: dsh-model-think-level
