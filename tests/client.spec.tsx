@@ -110,8 +110,12 @@ describe('client apply()', () => {
 
       // Dictionaries registered under the plugin store namespace.
       expect(h.localeRegister).toHaveBeenCalledWith(STORE_NS, { zh, en })
-      // Stylesheet installed under the plugin's styles marker.
+      // Stylesheet installed under the plugin's styles marker, AND tagged with
+      // the host's ownership marker: an untagged sheet is claimed by whichever
+      // plugin materializes next and deleted when that foreign plugin reloads.
       await waitFor(() => document.head.querySelector(`style[data-plugin-styles="${PLUGIN_ID}"]`) !== null)
+      expect(document.head.querySelector(`style[data-plugin="${PLUGIN_ID}"]`)?.getAttribute('data-plugin-styles'))
+        .toBe(PLUGIN_ID)
 
       // The observer's first scan mounts one editor per model row.
       await waitFor(() => document.querySelectorAll('.bre-effort-editor').length === 2)

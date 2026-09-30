@@ -103,7 +103,15 @@ export function ProviderCardSlot({ provider, api, t }: ProviderCardSlotProps): R
   if (typeof route !== 'string' || route.length === 0) return null
   return createElement(
     'div',
-    { ref: host, className: 'bre-headers-host', 'data-edit': editing ? '1' : '0' },
+    {
+      ref: host,
+      className: 'bre-headers-host',
+      'data-edit': editing ? '1' : '0',
+      // Names the provider row this slot sits in, for the row-order pass. The
+      // slot is dispatched per card, so it is the one place every llm-pi-ai row
+      // — saved, first-run or draft — hands back its route.
+      'data-bre-provider': route,
+    },
     createElement(HeadersEditor, { route, api, t }),
   )
 }

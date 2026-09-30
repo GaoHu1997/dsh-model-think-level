@@ -40,10 +40,12 @@ export interface HeaderEnvironment {
   enabled: boolean
   /** Whether the plugin's wrapper currently owns the global fetch. */
   installed: boolean
-  /** Routes whose `user-agent` the plugin is sending. */
-  overrides: { origin: string; route: string; userAgent: string }[]
-  /** Origins two routes claim with different values. */
+  /** Routes whose configured request headers are sent. */
+  overrides: { origin: string; route: string; headers: Record<string, string>; userAgent?: string }[]
+  /** Origins two routes claim with different User-Agent values. */
   conflicts: { origin: string; routes: string[]; values: string[] }[]
+  /** Same-origin differences for any configured header. */
+  headerConflicts?: { origin: string; header: string; routes: string[]; values: string[] }[]
   /** What was found of the plugins rewriting the same surface. */
   environment: {
     adapter: 'patched' | 'stock' | 'unknown'
@@ -69,37 +71,34 @@ interface DraftRow {
   value: string
 }
 
-/** A draft as the editor holds it: ordered rows plus the UA choice. */
+/** A draft as the editor holds it: every configured header is one row. */
 interface Draft {
   rows: DraftRow[]
-  userAgent: string
+  /** Legacy input accepted by headersFromDraft callers; the UI no longer uses it. */
+  userAgent?: string
 }
 
-/** Build a draft from a stored headers dict, splitting the UA out of the rows. */
+/** Build a draft from every stored header entry, including User-Agent. */
 function draftFrom(headers: Record<string, string> | undefined): Draft {
-  const rows: DraftRow[] = []
-  let userAgent = ''
   let id = 0
-  for (const [name, value] of Object.entries(headers ?? {})) {
-    if (name.toLowerCase() === 'user-agent') {
-      userAgent = value
-      continue
-    }
-    rows.push({ id: id += 1, name, value })
+  return {
+    rows: Object.entries(headers ?? {}).map(([name, value]) => ({ id: id += 1, name, value })),
   }
-  return { rows, userAgent }
 }
 
-/** The headers dict a draft stores: blank rows dropped, UA merged back in. */
+/** The headers dict a draft stores: blank names are dropped. */
 export function headersFromDraft(draft: Draft): Record<string, string> {
   const out: Record<string, string> = {}
+  let hasUserAgent = false
   for (const row of draft.rows) {
     const name = row.name.trim()
     if (name.length === 0) continue
     out[name] = row.value
+    if (name.toLowerCase() === 'user-agent') hasUserAgent = true
   }
-  const userAgent = draft.userAgent.trim()
-  if (userAgent.length > 0) out['user-agent'] = userAgent
+  // Keep old programmatic callers working while new UI drafts use rows only.
+  const legacyUserAgent = draft.userAgent?.trim()
+  if (!hasUserAgent && legacyUserAgent !== undefined && legacyUserAgent.length > 0) out['user-agent'] = legacyUserAgent
   return out
 }
 
@@ -109,12 +108,10 @@ export function headersFromDraft(draft: Draft): Record<string, string> {
  * @returns the section.
  */
 export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode {
-  // The UA presets' datalist id: one editor instance renders per provider card,
-  // so a literal id would repeat on the page the moment two cards disclose at
-  // once. useId gives each instance its own.
+  // Kept for the optional User-Agent preset list when a row is named that way.
   const uaListId = useId()
   const [stored, setStored] = useState<Record<string, string> | undefined>(undefined)
-  const [draft, setDraft] = useState<Draft>({ rows: [], userAgent: '' })
+  const [draft, setDraft] = useState<Draft>({ rows: [] })
   /** Whether the section's details are disclosed. Collapsed on mount. */
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -261,7 +258,7 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
                   {environment.environment.preferOfficialLayer
                     ? <p className="bre-effort-note bre-warn">{t('headersConflictPatched')}</p>
                     : null}
-                  {environment.conflicts.length === 0
+                  {environment.conflicts.length === 0 && (environment.headerConflicts?.length ?? 0) === 0
                     ? null
                     : <p className="bre-effort-note bre-warn">{t('headersConflictOrigin')}</p>}
                   {environment.environment.siblings.length === 0
@@ -279,6 +276,11 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
               : editing
                 ? (
                   <div className="bre-headers-edit">
+                    <div className="bre-headers-columns" aria-hidden="true">
+                      <span>{t('headersName')}</span>
+                      <span>{t('headersValue')}</span>
+                      <span />
+                    </div>
                     {draft.rows.map(row => (
                       <div className="bre-headers-row" key={row.id}>
                         <input
@@ -295,13 +297,14 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
                           className="bre-text-input bre-headers-value"
                           value={row.value}
                           disabled={disabled}
-                          placeholder={t('headersValue')}
+                          list={row.name.trim().toLowerCase() === 'user-agent' ? uaListId : undefined}
+                           placeholder={t('headersValue')}
                           aria-label={t('headersValue')}
                           onChange={(event) => { patchRow(row.id, { value: event.target.value }) }}
                         />
                         <button
                           type="button"
-                          className="bre-link-button"
+                          className="bre-link-button bre-headers-remove"
                           disabled={disabled}
                           aria-label={`${t('headersClear')} ${row.name}`}
                           onClick={() => { removeRow(row.id) }}
@@ -310,15 +313,20 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
                         </button>
                       </div>
                     ))}
-                    <button type="button" className="bre-link-button" disabled={disabled} onClick={addRow}>
+                    <button
+                       type="button"
+                       className="bre-link-button bre-headers-add"
+                       disabled={disabled}
+                       onClick={addRow}
+                     >
                       {t('headersAdd')}
                     </button>
-                    <label className="bre-headers-row">
+                    {false && (<div className="bre-headers-legacy">
                       <span className="bre-effort-title">{t('headersUserAgentTitle')}</span>
                       <input
                         type="text"
                         className="bre-text-input bre-headers-value"
-                        value={draft.userAgent}
+                        value={draft.userAgent ?? ''}
                         disabled={disabled}
                         list={uaListId}
                         placeholder={t('headersUserAgentPlaceholder')}
@@ -328,23 +336,24 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
                           setMessage(undefined)
                         }}
                       />
-                      {draft.userAgent.trim().length === 0
+                      {(draft.userAgent ?? '').trim().length === 0
                         ? null
                         : (
                           <button
                             type="button"
-                            className="bre-link-button"
+                            className="bre-link-button bre-headers-remove"
                             disabled={disabled}
                             onClick={() => { setDraft(current => ({ ...current, userAgent: '' })); setMessage(undefined) }}
                           >
                             {t('headersUserAgentClear')}
                           </button>
                         )}
-                    </label>
-                    <datalist id={uaListId}>
+                    </div>
+                    )}
+                     <datalist id={uaListId}>
                       {USER_AGENT_PRESETS.map(preset => <option key={preset} value={preset} />)}
                     </datalist>
-                    <p className="bre-effort-note">{t('headersUserAgentHint')}</p>
+                    <p className="bre-effort-note bre-headers-legacy" hidden>{t('headersUserAgentHint')}</p>
                     <div className="bre-effort-actions">
                       <button
                         type="button"

@@ -1003,18 +1003,59 @@ body:not([data-ds-dark-theme]) .bre-effort.is-dragging .bre-effort-knob {
   line-height: 16px;
   text-align: center;
 }
+.bre-headers-head {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: var(--dsw-radius-sm, 8px);
+  background: var(--dsw-alias-interactive-bg-hover, #2631480f);
+}
+.bre-headers-head .bre-effort-title {
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font-weight: 600;
+}
 .bre-headers-edit, .bre-headers-rows {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+}
+.bre-headers-columns,
+.bre-headers-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.9fr) minmax(180px, 1.5fr) 32px;
+  align-items: center;
+  gap: 8px;
+}
+.bre-headers-columns {
+  padding: 0 10px;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  font-size: 11px;
+  line-height: 16px;
 }
 .bre-headers-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  min-height: 40px;
+  padding: 4px 6px;
+  border: 1px solid var(--dsw-alias-border-l2, #0000001a);
+  border-radius: var(--dsw-radius-sm, 8px);
+  background: var(--dsw-alias-bg-layer-1, #fff);
 }
-.bre-headers-name { flex: 1 1 40%; min-width: 0; }
-.bre-headers-value { flex: 1 1 60%; min-width: 0; }
+.bre-headers-add {
+  align-self: flex-start;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2, #0000001a);
+  border-radius: var(--dsw-radius-sm, 8px);
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+.bre-headers-add:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, #2631480f);
+}
+.bre-headers-remove {
+  width: 32px;
+  padding: 0;
+  justify-self: center;
+}
 .bre-headers-rows .bre-headers-name {
   color: var(--dsw-alias-label-secondary, #61666b);
   font-size: 12px;
@@ -1023,7 +1064,7 @@ body:not([data-ds-dark-theme]) .bre-effort.is-dragging .bre-effort-knob {
 .bre-headers-masked {
   color: var(--dsw-alias-label-tertiary, #81858c);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: 1px;
+  letter-spacing: 0;
 }
 
 /* The section's commit/dismiss pair, matching the official editor's own
@@ -1111,4 +1152,207 @@ body:not([data-ds-dark-theme]) .bre-effort.is-dragging .bre-effort-knob {
 .bre-headers .bre-effort-note.bre-warn { color: var(--dsw-alias-state-warn-label, #dd8629); }
 .bre-headers .bre-effort-message.bre-success { color: var(--dsw-alias-state-success-primary, #22c55e); }
 .bre-headers .bre-effort-message.bre-error { color: var(--dsw-alias-state-error-primary, #ec1313); }
+
+@media (max-width: 520px) {
+  .bre-headers-columns { display: none; }
+  .bre-headers-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) 32px;
+    gap: 6px;
+    padding: 4px;
+  }
+  .bre-headers-edit input.bre-text-input {
+    padding: 0 8px;
+    font-size: 12px;
+  }
+}
+
+/* ---- Provider row reordering (Models page) ---- */
+
+/* The whole row header is the drag handle: an 18px grip is a poor thing to
+   have to hit, so a drag may start anywhere on the header that is not one of
+   the card's own controls (those keep their own cursor, declared below). */
+li[data-bre-row-head='1'] { cursor: grab; }
+li[data-bre-row-head='1']:active { cursor: grabbing; }
+li[data-bre-row-head='1'] button,
+li[data-bre-row-head='1'] a,
+li[data-bre-row-head='1'] input { cursor: pointer; }
+
+/* The grip is mounted as the first child of that header, so it reads as part
+   of the row rather than as a control bolted beside it. It is also the button
+   that reorders by keyboard. */
+.bre-drag-grip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 20px;
+  margin-right: 2px;
+  border-radius: 4px;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  cursor: grab;
+  touch-action: none;
+}
+
+.bre-drag-grip:hover {
+  color: var(--dsw-alias-label-secondary, #61666b);
+  background: var(--dsw-alias-interactive-bg-hover, #2631480f);
+}
+
+.bre-drag-grip:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+.bre-drag-grip:active { cursor: grabbing; }
+
+/* What the pointer carries: the browser's own drag image would be a screenshot
+   of a whole card, so we hand it this chip with the provider name instead. */
+.bre-drag-ghost {
+  position: fixed;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 5px 10px 5px 7px;
+  border: 1px solid var(--dsw-alias-border-secondary, #e6e8eb);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  box-shadow: 0 6px 18px #0000002e;
+  color: var(--dsw-alias-label-primary, #17181a);
+  font-size: 13px;
+  line-height: 18px;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  z-index: 60;
+}
+
+.bre-drag-ghost-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bre-drag-ghost svg { color: var(--dsw-alias-label-tertiary, #81858c); }
+
+/* The row the drag is carrying: still in place, visibly the one in hand. */
+li.bre-row-dragging { opacity: .5; }
+
+/* The row the pointer would drop it on — a secondary cue; the insertion line
+   below is the one that says which side. */
+li.bre-row-drop-target { border-color: var(--dsw-alias-brand-primary); }
+
+/* The insertion line. A fixed overlay on the body, never a child of the list
+   React owns, so writing it cannot trigger anything in the official section. */
+.bre-drop-line {
+  position: fixed;
+  display: none;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  box-shadow: 0 0 0 1px #ffffffb3, 0 1px 4px var(--dsw-alias-brand-primary, #4d6bfe);
+  pointer-events: none;
+  z-index: 55;
+}
+
+/* The row slide (a FLIP pass driven from the script) is motion; drop it for a
+   reader who asked for less. */
+@media (prefers-reduced-motion: reduce) {
+  li[data-bre-row-provider] { transition: none !important; }
+}
+
+@media (max-width: 520px) {
+  .bre-drag-grip { width: 18px; height: 24px; }
+  .bre-drag-ghost { max-width: 180px; font-size: 12px; }
+}
+
+/* ---- Model rows inside one provider's editor (Models page) ---- */
+
+/* The official model row is a four-column grid (id, display name, two icon
+   buttons). Our grip is a fifth child, so the grid needs a leading track to
+   hold it — declared by our own class, because the official rule is a single
+   class selector and ours has to win on specificity, not on load order.
+   The name must NOT be "bre-model-row": that one is this plugin's own composer
+   row (see the ".bre-model-row" block above), and lending it to the host's grid
+   would hand that grid our padding, gap, min-height, pointer cursor and hover
+   fill along with it. */
+.bre-model-grid[class*="modelRow"] {
+  grid-template-columns: auto minmax(0, 1.4fr) minmax(0, 1fr) auto auto;
+}
+
+/* A model row is a grid of inputs, so only the grip drags: the row keeps its
+   text cursor and its own click behaviour. The grip takes the height of the
+   row's controls, so the pointer has a real target inside a 6px-gap grid. */
+.bre-model-grid > .bre-drag-grip {
+  width: 18px;
+  height: 24px;
+  margin-right: 0;
+}
+
+/* The engine paints the carried row and the row under the pointer with the same
+   classes it uses on a provider card; the official model entry carries the
+   border, so the drop cue has to land there rather than on the list item. */
+div.bre-row-dragging { opacity: .5; }
+[class*="modelEntry"].bre-row-drop-target { border-color: var(--dsw-alias-brand-primary); }
+
+/* The row slide (a FLIP pass driven from the script) is motion; drop it for a
+   reader who asked for less. */
+@media (prefers-reduced-motion: reduce) {
+  [data-bre-row-model] { transition: none !important; }
+}
+
+/* ---- Provider enable switch (Models page) ---- */
+
+/* Leads the row's own action group (which is pushed right by margin-left:auto),
+   in front of the card's buttons, so the destructive one stays last. The knob is
+   a pseudo element: no extra node for the official section's tree to trip over. */
+.bre-provider-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: var(--dsw-alias-bg-tertiary, #d7dae0);
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.bre-provider-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  box-shadow: 0 1px 2px #00000026;
+  transition: transform 140ms ease;
+}
+
+.bre-provider-switch:not([aria-checked='true']):hover { background: var(--dsw-alias-bg-quaternary, #c9ccd2); }
+
+.bre-provider-switch[aria-checked='true'] { background: var(--dsw-alias-brand-primary, #4d6bfe); }
+
+.bre-provider-switch[aria-checked='true']:hover { background: var(--dsw-alias-brand-primary-hover, #3f5ce8); }
+
+.bre-provider-switch[aria-checked='true']::after { transform: translateX(12px); }
+
+.bre-provider-switch:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 2px;
+}
+
+/* A provider that is switched off stays on the page — this is the only place it
+   can be switched back on — but it is visibly out of play. The switch itself is
+   left at full strength: it is the way back. */
+li.bre-row-disabled [class*="rowIdentity"],
+li.bre-row-disabled [class*="rowName"] { opacity: .5; }
+
+@media (prefers-reduced-motion: reduce) {
+  .bre-provider-switch,
+  .bre-provider-switch::after { transition: none; }
+}
 `

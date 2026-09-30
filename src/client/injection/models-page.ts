@@ -27,6 +27,24 @@ import {
 import { describeNamespace } from '../ops.ts'
 import type { ClientContext, RemoteApi } from '../types.js'
 import { EffortBoundary, panelRoot } from './mount.js'
+import {
+  createProviderOrderState,
+  reconcileProviderOrder,
+  teardownProviderOrder,
+  type ProviderOrderDeps,
+} from './provider-order-drag.js'
+import {
+  createProviderToggleState,
+  reconcileProviderEnabled,
+  teardownProviderEnabled,
+  type ProviderToggleDeps,
+} from './provider-toggle.js'
+import {
+  createModelOrderState,
+  reconcileModelOrder,
+  teardownModelOrder,
+  type ModelOrderDeps,
+} from './model-order-drag.js'
 
 /** Dictionary namespace owning the Models page's copy (ui-settings-models). */
 const HOST_MODELS_NS = 'settings.models'
@@ -55,6 +73,11 @@ const HOST_LABEL_KEYS = {
   // anchor of its own: the button keeps its position in the row.
   apply: ['apply', 'Apply'],
   cancel: ['cancel', 'Cancel'],
+  // A provider row's edit button. The row order pass reads the provider id out
+  // of this label's `{provider}` slot for every row this plugin gets no seat in
+  // (the DeepSeek rows), so the template must be resolved in the page's own
+  // language rather than assumed.
+  editProvider: ['editProvider', 'Edit {provider}'],
 } as const satisfies Record<keyof HostLabels, readonly [string, string, ...string[]]>
 
 /** What the Models-page injection needs from its host. */
@@ -124,12 +147,19 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       apiProtocol: resolve(HOST_LABEL_KEYS.apiProtocol),
       apply: resolve(HOST_LABEL_KEYS.apply),
       cancel: resolve(HOST_LABEL_KEYS.cancel),
+      editProvider: resolve(HOST_LABEL_KEYS.editProvider),
     }
   }
 
   /** Debounce window for DOM-mutation scans (one scan per render burst). */
   const SCAN_DEBOUNCE_MS = 120
   const scanState = createScanState()
+  const providerOrderState = createProviderOrderState()
+  const providerOrderDeps: ProviderOrderDeps = { t, labels }
+  const providerToggleState = createProviderToggleState()
+  const providerToggleDeps: ProviderToggleDeps = { t, labels }
+  const modelOrderState = createModelOrderState()
+  const modelOrderDeps: ModelOrderDeps = { t, labels }
   let scanTimer: number | undefined
   let retryTimer: number | undefined
   let observer: MutationObserver | undefined
@@ -218,6 +248,17 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // preference flip.
       composerMutation?.()
       reconcile(panelRoot(), injectorDeps, scanState)
+      // The row order pass rides the same scan but NOT the editor reconcile:
+      // `reconcile` bails out whenever no editing card is open, and the
+      // provider rows are on the page precisely when nothing is being edited.
+      reconcileProviderOrder(panelRoot(), providerOrderDeps, providerOrderState)
+      // The switch pass follows the order pass: it reads the same row ids, and
+      // it must see the rows where that pass left them.
+      reconcileProviderEnabled(panelRoot(), providerToggleDeps, providerToggleState)
+      // The model pass comes last and covers a different list entirely: the
+      // model rows inside whichever provider editor is open. Its own lists are
+      // absent unless a card is expanded, so it no-ops on a collapsed page.
+      reconcileModelOrder(panelRoot(), modelOrderDeps, modelOrderState)
     }, SCAN_DEBOUNCE_MS)
   }
 
@@ -270,6 +311,15 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // visibly. Unmount every React root this plugin created.
     for (const [, entry] of scanState.mounted) entry.editor.unmount()
     scanState.mounted.clear()
+    // The grips are raw DOM this plugin owns inside the official page: leaving
+    // them behind would keep a dead fiber's listeners live on a live page.
+    teardownProviderOrder(providerOrderState)
+    // Same for the enable switches: a live listener on a dead fiber would keep
+    // toggling providers the user can no longer see the state of.
+    teardownProviderEnabled()
+    // And for the model grips inside an open editor, whose own lists live
+    // outside the provider rows' seat.
+    teardownModelOrder(modelOrderState)
   }
 
   const flushOnUnloadNow = (): void => { flushOnUnload(scanState, injectorDeps) }

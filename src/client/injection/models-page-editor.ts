@@ -84,6 +84,13 @@ export interface HostLabels {
   apply: readonly string[]
   /** The editing card's dismiss button (the commit's left-hand sibling). */
   cancel: readonly string[]
+  /**
+   * A provider row's edit button, as the official `providerCopy` template
+   * ("Edit {provider}" / "编辑 {provider}"). Its `{provider}` slot carries
+   * `Name (route)`, which is how a row names its provider even when the row
+   * offers this plugin no seat to stamp that name on.
+   */
+  editProvider: readonly string[]
 }
 
 /** A row's identity as found on the page, resolved from the settings join. */
@@ -992,8 +999,13 @@ async function flushPending(deps: InjectorDeps, state: ScanState, ignoreFence = 
   return failed
 }
 
-/** Find the first input/select whose aria-label starts with one of the labels. */
-function inputValueByLabel(card: HTMLElement, labels: readonly string[]): string {
+/**
+ * Find the first input/select whose aria-label starts with one of the labels.
+ * Exported because the model-order pass reads a row's id and display name the
+ * same way the editor reads them: by the official label stem, never by
+ * position (the label's trailing number IS the position).
+ */
+export function inputValueByLabel(card: HTMLElement, labels: readonly string[]): string {
   for (const label of labels) {
     const input = Array.from(card.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[aria-label], select[aria-label]'))
       .find(candidate => (candidate.getAttribute('aria-label') ?? '').startsWith(label))

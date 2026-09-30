@@ -35,6 +35,21 @@ import { flushSync } from 'react-dom'
 import type { ReactNode } from 'react'
 import { inferModalitiesFromName, matchKnowledgeBase } from '../knowledge.js'
 import { selectRefusalMessage } from './effort-memory.js'
+import {
+  disabledProviders,
+  subscribeDisabledProviders,
+} from './provider-enabled.js'
+import {
+  baseProviderOrder,
+  mergeProviderOrder,
+  providerOrder,
+  subscribeProviderOrder,
+} from './provider-order.js'
+import {
+  modelOrders,
+  orderModelEntries,
+  subscribeModelOrders,
+} from './model-order.js'
 import type {
   DirectoryCurrentLike,
   DirectoryGroupLike,
@@ -302,11 +317,28 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const modelLabel = model?.name ?? (current === null ? t('triggerFallback') : current.model)
   const effortLabel = levels.find(level => level.id === effort)?.name ?? t('effortDefault')
 
+  // The provider order set on the Models settings page, where the rows are
+  // draggable: the switcher reports the same sequence so the two views never
+  // disagree about where a provider lives. Subscribed rather than read once,
+  // because a drag on the settings page has to reach an already-open composer.
+  const preferredOrder = useSyncExternalStore(subscribeProviderOrder, providerOrder)
+
+  // The providers switched off on the Models settings page. Hiding one here is
+  // the whole point of the switch, and the trigger above does not care: the
+  // current model keeps its own name even when its provider is hidden.
+  const disabled = useSyncExternalStore(subscribeDisabledProviders, disabledProviders)
+
+  // The model order set inside each provider's editor on the settings page: the
+  // right column reports the same sequence, per provider. Subscribed for the
+  // same reason as the provider order — a drag has to reach an open composer.
+  const modelOrderByProvider = useSyncExternalStore(subscribeModelOrders, modelOrders)
+
   // Providers that actually hold models; the one whose models the right column
   // shows follows the current model until the user picks another column entry.
-  const providerIds = state.groups
-    .filter(candidate => modelsOf(candidate).length > 0)
+  const providerCatalog = state.groups
+    .filter(candidate => modelsOf(candidate).length > 0 && !disabled.includes(candidate.id))
     .map(candidate => candidate.id)
+  const providerIds = mergeProviderOrder(baseProviderOrder(providerCatalog), preferredOrder)
   const shownProvider = openProvider !== null && providerIds.includes(openProvider)
     ? openProvider
     : (current !== null && providerIds.includes(current.provider)
@@ -314,7 +346,10 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
       : providerIds[0] ?? null)
   const shownModels = shownProvider === null
     ? []
-    : modelsOf(state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike)
+    : orderModelEntries(
+      modelsOf(state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike),
+      modelOrderByProvider[shownProvider] ?? [],
+    )
   const activeKey = current === null ? '' : current.provider + '/' + current.model
 
   /**
@@ -379,7 +414,14 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const chooseEffort = useCallback(async (next: string): Promise<void> => {
     if (committingRef.current) return
     collapsePanel()
-    if (next === committedRef.current && state.status !== 'error') return
+    // The row's displayed level can be a PREDICTION rather than a commitment:
+    // `effectiveEffortIndex` falls back to the adapter default (or the middle of
+    // the ladder) when the session carries no effort, so the FIRST use of a
+    // model shows "Medium" while the seat trigger still reads Default. Guarding
+    // the repick on that displayed level swallowed the very click that would
+    // commit it, leaving the level unpickable until another one was chosen.
+    // Only the SESSION'S OWN effort is a settled level.
+    if (next === state.current?.reasoningEffort && state.status !== 'error') return
     committingRef.current = true
     const previous = committedRef.current
     focusMenu()

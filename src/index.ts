@@ -30,7 +30,7 @@ import { suggestEfforts } from './knowledge.js'
 import type { ReasoningEfforts } from './knowledge.js'
 import { resolveGuardEffort } from './guard.js'
 import { isRecord, looksLikeCompatRefusal, routeFactsOf } from './shared.js'
-import { buildUserAgentIndex, emptyIndex, type UserAgentIndex } from './headers-core.js'
+import { buildHeaderIndex, emptyIndex, type UserAgentIndex } from './headers-core.js'
 import { headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from './headers-fetch.js'
 import { detectHeaderConflicts, type HeaderConflictReport } from './headers-conflict.js'
 // The knowledge-base patch builder lives in its own module: the browser half
@@ -89,13 +89,11 @@ export interface Config {
    */
   defaultGuard?: boolean
   /**
-   * Take over `user-agent` at the fetch layer for every route whose `headers`
-   * declare one (default true). The official adapter drops a profile
-   * `user-agent` in favour of the harness attribution, so a gateway that
-   * fingerprints the client identity never sees the configured value; this
-   * overlay is the only seam that can send it (issue #12). Inert unless a route
-   * actually declares a `user-agent`; turn it off to leave the wire to another
-   * plugin that rewrites the same surface.
+   * Take over the configured request headers at the fetch layer for every route
+   * whose `headers` declare one (default true). The official adapter may merge
+   * attribution headers over profile values, so the overlay reapplies the
+   * profile dictionary before the request reaches the wire. The historical
+   * `uaOverride` name is retained for configuration compatibility.
    */
   uaOverride?: boolean
 }
@@ -538,12 +536,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
   }
 
-  // user-agent takeover (issue #12): the official adapter drops a profile
-  // `user-agent` and merges the harness attribution over the route's own
-  // headers, so a fingerprinting gateway (agentrouter and claude-code-router
-  // style relays) never sees the identity the user configured. Nothing in the
-  // configuration layer can express that override, so the plugin performs it at
-  // the fetch layer — the only public seam below the adapter's header merge.
+  // Request-header takeover (issue #12): the official adapter can merge
+  // attribution headers over the profile's own dictionary, so configured
+  // values may be lost before the request reaches the wire. The plugin applies
+  // the complete profile dictionary at the fetch layer, the last public seam
+  // below the adapter.
   //
   // The index is keyed by the endpoint's ORIGIN and rebuilt from the live
   // settings section, so a route added, edited, or removed on the Models page
@@ -552,18 +549,49 @@ export function apply(ctx: Context, config: Config = {}): void {
   // seam, one owner) and simply stops matching anything.
   /** Live index the overlay reads; never undefined once apply has run. */
   const overlaySource: OverlaySource = { current: emptyIndex() }
+  const headerRetryTimers = new Set<ReturnType<typeof setTimeout>>()
+  let headerRetryAttempt = 0
+  const stopHeaderRetries = (): void => {
+    for (const timer of headerRetryTimers) clearTimeout(timer)
+    headerRetryTimers.clear()
+    headerRetryAttempt = 0
+  }
+  const scheduleHeaderRefresh = (refresh: () => void): void => {
+    // A settings event may arrive while a retry is already pending. Keep one
+    // timer per activation so repeated document notifications cannot accelerate
+    // or multiply the boot retry sequence.
+    if (headerRetryTimers.size > 0 || headerRetryAttempt >= resolved.bootRetryDelaysMs.length) return
+    const delay = resolved.bootRetryDelaysMs[headerRetryAttempt]
+    headerRetryAttempt += 1
+    const timer = setTimeout(() => {
+      headerRetryTimers.delete(timer)
+      refresh()
+    }, delay)
+    headerRetryTimers.add(timer)
+  }
   const refreshHeaders = (): void => {
     if (!resolved.uaOverride) {
       overlaySource.current = emptyIndex()
+      stopHeaderRetries()
       return
     }
     const section = piSection()
+    if (section === undefined) {
+      // llm-pi-ai can register its settings namespace after this plugin. The
+      // model probe has an independent direct-header path, but chat needs this
+      // index ready before the adapter's first stream reaches fetch().
+      overlaySource.current = emptyIndex()
+      scheduleHeaderRefresh(refreshHeaders)
+      return
+    }
+    stopHeaderRetries()
     const providers = isRecord(section) && isRecord(section['providers'])
       ? (section['providers'] as Record<string, Record<string, unknown>>)
       : {}
-    overlaySource.current = buildUserAgentIndex(providers)
+    overlaySource.current = buildHeaderIndex(providers)
   }
   refreshHeaders()
+  ctx.effect(() => () => stopHeaderRetries(), 'dsh-model-think-level: header retries')
   ctx.on('settings/document-updated', (ns) => {
     if (ns === PI_NS) refreshHeaders()
   })
@@ -756,18 +784,17 @@ export function apply(ctx: Context, config: Config = {}): void {
                 enabled: resolved.uaOverride,
                 /** Whether this plugin's wrapper currently owns the global fetch. */
                 installed: headerOverlayInstalled(),
-                /** Routes whose `user-agent` the plugin is sending, by origin. */
+                /** Routes whose configured request headers are sent, by origin. */
                 overrides: [...index.byOrigin.values()].map(entry => ({
                   origin: entry.origin,
                   route: entry.route,
-                  userAgent: entry.userAgent,
+                  headers: entry.headers,
+                  ...(entry.userAgent === undefined ? {} : { userAgent: entry.userAgent }),
                 })),
-                /**
-                 * Origins two routes claim with different values: the fetch seam
-                 * cannot tell their requests apart, so the first declaration is
-                 * the one sent.
-                 */
+                /** Same-origin routes with different User-Agent values. */
                 conflicts: index.conflicts,
+                /** Same-origin differences for any configured request header. */
+                headerConflicts: index.headerConflicts,
                 /** What was found of the plugins that rewrite the same surface. */
                 environment: headerConflicts,
               },

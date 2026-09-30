@@ -4,7 +4,7 @@
  *
  * The fetch tests drive a STUB global fetch, so what they assert is exactly the
  * contract the real seam has to keep: an unconfigured origin passes through
- * with its arguments untouched, a configured one gets the indexed `user-agent`
+ * with its arguments untouched, a configured one gets every indexed header
  * merged over the caller's own headers, and the global is restored (and only
  * then) once the last activation goes away.
  */
@@ -98,13 +98,18 @@ describe('buildUserAgentIndex', () => {
     expect(index.conflicts).toEqual([])
   })
 
-  it('skips a route with no endpoint, no UA, or an unparseable endpoint', () => {
+  it('indexes a route with any sendable header, even without User-Agent', () => {
     const index = buildUserAgentIndex({
       noEndpoint: { headers: { 'user-agent': 'x' } },
-      noUa: { baseURL: 'https://a.example.com', headers: { 'x-y': '1' } },
+      arbitrary: { baseURL: 'https://a.example.com', headers: { 'x-y': '1' } },
       badEndpoint: { baseURL: 'not a url', headers: { 'user-agent': 'x' } },
     })
-    expect(index.byOrigin.size).toBe(0)
+    expect(index.byOrigin.size).toBe(1)
+    expect(index.byOrigin.get('https://a.example.com')).toMatchObject({
+      route: 'arbitrary',
+      headers: { 'x-y': '1' },
+    })
+    expect(index.byOrigin.get('https://a.example.com')?.userAgent).toBeUndefined()
     expect(index.conflicts).toEqual([])
   })
 
@@ -217,12 +222,16 @@ describe('installHeaderOverlay', () => {
     expect(calls[0]?.init).toBe(init)
   })
 
-  it('injects the indexed user-agent and preserves the caller-owned headers', async () => {
+  it('injects every indexed header and preserves unrelated caller headers', async () => {
     install({
       current: buildUserAgentIndex({
         agentrouter: {
           baseURL: 'https://relay.example.com',
-          headers: { 'user-agent': 'claude-cli/2.1.161 (external, cli)' },
+          headers: {
+            'user-agent': 'claude-cli/2.1.161 (external, cli)',
+            'x-company': 'configured',
+            'x-route-key': 'route-a',
+          },
         },
       }),
     })
@@ -230,12 +239,15 @@ describe('installHeaderOverlay', () => {
       method: 'POST',
       headers: {
         'user-agent': 'deepseek-harness/0.1.7 (+https://github.com/deepseek-ai/deepseek-harness)',
-        'x-company': 'acme',
+        'x-company': 'caller-value',
+        'x-keep': 'acme',
       },
     })
     const headers = new Headers(calls[0]?.init?.headers)
     expect(headers.get('user-agent')).toBe('claude-cli/2.1.161 (external, cli)')
-    expect(headers.get('x-company')).toBe('acme')
+    expect(headers.get('x-company')).toBe('configured')
+    expect(headers.get('x-route-key')).toBe('route-a')
+    expect(headers.get('x-keep')).toBe('acme')
     expect(calls[0]?.init?.method).toBe('POST')
   })
 
@@ -258,6 +270,8 @@ describe('installHeaderOverlay', () => {
     })
     await globalThis.fetch(new Request('https://relay.example.com/v1', { headers: { 'x-own': 'kept' } }))
     expect(new Headers(calls[0]?.init?.headers).get('x-own')).toBe('kept')
+    expect(calls[0]?.input).toBeInstanceOf(Request)
+    expect((calls[0]?.input as Request).headers.get('user-agent')).toBe('spoofed/1')
 
     await globalThis.fetch(new Request('https://relay.example.com/v1', { headers: { 'x-request': 'dropped' } }), {
       headers: { 'x-init': 'wins' },

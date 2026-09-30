@@ -2,13 +2,12 @@
  * Provider request-header overlay, PURE half: the origin index and the header
  * value rules shared by the fetch-layer installer and the conflict report.
  *
- * Why this exists at all (issue #12): a route's `headers` dict reaches the wire
- * through the official adapter, but `user-agent` does not. The pi-ai adapter
- * merges `attributionHeaders()` over the profile's dict and drops the profile's
- * own `user-agent` first, so a gateway that fingerprints the client identity
- * (agentrouter and claude-code-router style relays) never sees the configured
- * value. No configuration field can express that override, so the plugin takes
- * it over at the fetch layer.
+ * Why this exists at all (issue #12): a route's `headers` dict can be merged or
+ * overwritten by the official adapter's attribution headers, with `user-agent`
+ * being the most visible case. A gateway that depends on any configured client
+ * header therefore may not see the value stored in the profile. The overlay
+ * reapplies the complete configured dictionary at the fetch layer, the last
+ * public seam before the request reaches the wire.
  *
  * The index is keyed by ORIGIN, deliberately: the fetch seam sees a URL and
  * nothing else, and unlike a substring match an origin compare cannot be
@@ -28,32 +27,45 @@ import { isRecord } from './shared.js'
  */
 const MAX_UA_LENGTH = 512
 
-/** One origin's user-agent override, with the route that produced it. */
-export interface UserAgentOverride {
+/** One origin's configured request headers, with the route that produced them. */
+export interface HeaderOverride {
   /** `scheme://host:port` of the route's endpoint, exactly as Fetch would print it. */
   origin: string
-  /** The configured `user-agent` value. */
-  userAgent: string
-  /** The route key that declared it (diagnostics and the UI's own labelling). */
+  /** The string header pairs to apply at the fetch layer. */
+  headers: Record<string, string>
+  /** The route key that declared them (diagnostics and UI labelling). */
   route: string
+  /** The configured `user-agent`, retained for compatibility and diagnostics. */
+  userAgent?: string
 }
 
-/** The origin index plus what could not be indexed. */
-export interface UserAgentIndex {
-  /** origin → override, first declarer wins (see {@link conflicts}). */
-  byOrigin: Map<string, UserAgentOverride>
-  /**
-   * Origins two or more routes claim with DIFFERENT values. The index keeps the
-   * first and reports the rest: silently picking one would make the other
-   * route's UA a coin flip, and the fetch layer has no way to tell the two
-   * requests apart.
-   */
+/** Backwards-compatible name retained for callers that only knew the UA seam. */
+export type UserAgentOverride = HeaderOverride
+
+/** A same-origin header disagreement that the URL-only seam cannot disambiguate. */
+export interface HeaderConflict {
+  origin: string
+  header: string
+  routes: string[]
+  values: string[]
+}
+
+/** The origin index plus what could not be indexed or was ambiguous. */
+export interface HeaderIndex {
+  /** origin → complete header override, first declarer wins. */
+  byOrigin: Map<string, HeaderOverride>
+  /** Same-origin routes that declare different header values. */
   conflicts: { origin: string; routes: string[]; values: string[] }[]
+  /** Same-origin disagreements for any configured header. */
+  headerConflicts: HeaderConflict[]
 }
 
-/** An empty index, for the "no route declares a UA" case. */
-export function emptyIndex(): UserAgentIndex {
-  return { byOrigin: new Map(), conflicts: [] }
+/** Backwards-compatible name retained for the original public index contract. */
+export type UserAgentIndex = HeaderIndex
+
+/** An empty index, for the "no route declares headers" case. */
+export function emptyIndex(): HeaderIndex {
+  return { byOrigin: new Map(), conflicts: [], headerConflicts: [] }
 }
 
 /** The `scheme://host:port` of a URL string, or undefined when unparseable. */
@@ -82,6 +94,22 @@ export function isSendableUserAgent(value: string): boolean {
   return !/[\r\n\0]/.test(value)
 }
 
+/**
+ * Whether a configured name/value pair can ride a Fetch header. Fetch is the
+ * authority for the exact token grammar, so this accepts arbitrary legal names
+ * instead of maintaining a brittle allow-list.
+ */
+export function isSendableHeader(name: string, value: string): boolean {
+  if (name.length === 0) return false
+  try {
+    const headers = new Headers()
+    headers.set(name, value)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** The `headers` dict of one route profile, as string pairs, or undefined. */
 export function headersOf(profile: Record<string, unknown> | undefined): Record<string, string> | undefined {
   if (profile === undefined) return undefined
@@ -92,6 +120,25 @@ export function headersOf(profile: Record<string, unknown> | undefined): Record<
     if (typeof value === 'string') pairs[name] = value
   }
   return Object.keys(pairs).length === 0 ? undefined : pairs
+}
+
+/**
+ * The subset of a profile's headers that Fetch can send. An invalid stored
+ * entry must not make the wrapper throw and break an otherwise valid request.
+ */
+function sendableHeadersOf(profile: Record<string, unknown> | undefined): Record<string, string> | undefined {
+  const headers = headersOf(profile)
+  if (headers === undefined) return undefined
+  const sendable: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers)) {
+    if (!isSendableHeader(name, value)) continue
+    // Keep the historical UA guard: it avoids sending a malformed or
+    // unexpectedly huge client identity while leaving every other legal header
+    // available to the arbitrary-header editor.
+    if (name.toLowerCase() === 'user-agent' && !isSendableUserAgent(value)) continue
+    sendable[name] = value
+  }
+  return Object.keys(sendable).length === 0 ? undefined : sendable
 }
 
 /**
@@ -112,43 +159,85 @@ export function declaredUserAgent(profile: Record<string, unknown> | undefined):
   return undefined
 }
 
-/**
- * Build the origin index from the resolved `providers` dict of the pi-ai
- * namespace.
- *
- * Only routes that both name an endpoint and declare a sendable `user-agent`
- * enter the index: a route with no `baseURL` resolves to a catalog endpoint the
- * plugin cannot know from settings, and inventing a value for it would rewrite
- * requests the user never configured.
- * @param providers - the `llm-pi-ai` providers dict, as stored.
- * @returns the index plus any same-origin disagreements.
- */
+/** Normalize names the way Fetch's Headers object compares them. */
+function normalizedHeaders(headers: Record<string, string>): Map<string, { name: string; value: string }> {
+  const normalized = new Map<string, { name: string; value: string }>()
+  for (const [name, value] of Object.entries(headers)) {
+    normalized.set(name.toLowerCase(), { name, value })
+  }
+  return normalized
+}
+
+/** Record a same-origin difference that the URL-only fetch seam cannot route. */
+function recordHeaderConflicts(index: HeaderIndex, existing: HeaderOverride, route: string, headers: Record<string, string>): void {
+  const first = normalizedHeaders(existing.headers)
+  const next = normalizedHeaders(headers)
+  const names = new Set([...first.keys(), ...next.keys()])
+  for (const name of names) {
+    const oldEntry = first.get(name)
+    const nextEntry = next.get(name)
+    if (oldEntry?.value === nextEntry?.value) continue
+    const reportedName = nextEntry?.name ?? oldEntry?.name ?? name
+    const reported = index.headerConflicts.find(entry => entry.origin === existing.origin && entry.header.toLowerCase() === name)
+    if (reported === undefined) {
+      index.headerConflicts.push({
+        origin: existing.origin,
+        header: reportedName,
+        routes: [existing.route, route],
+        values: [oldEntry?.value ?? '<not configured>', nextEntry?.value ?? '<not configured>'],
+      })
+    } else if (!reported.routes.includes(route)) {
+      reported.routes.push(route)
+      reported.values.push(nextEntry?.value ?? '<not configured>')
+    }
+  }
+}
+
+/** Build the origin index from every sendable header in each provider profile. */
+export function buildHeaderIndex(
+  providers: Record<string, Record<string, unknown>>,
+): HeaderIndex {
+  const index = emptyIndex()
+  const claimedUserAgents = new Map<string, { routes: string[]; values: string[] }>()
+  for (const [route, profile] of Object.entries(providers)) {
+    const headers = sendableHeadersOf(profile)
+    if (headers === undefined) continue
+    const origin = originOf(typeof profile['baseURL'] === 'string' ? profile['baseURL'] : undefined)
+    if (origin === undefined) continue
+
+    const userAgent = Object.entries(headers).find(([name]) => name.toLowerCase() === 'user-agent')?.[1]
+    const existing = index.byOrigin.get(origin)
+    if (existing === undefined) {
+      index.byOrigin.set(origin, { origin, headers, route, ...(userAgent === undefined ? {} : { userAgent }) })
+    } else {
+      recordHeaderConflicts(index, existing, route, headers)
+    }
+
+    if (userAgent === undefined) continue
+    const claimed = claimedUserAgents.get(origin)
+    if (claimed === undefined) {
+      claimedUserAgents.set(origin, { routes: [route], values: [userAgent] })
+      continue
+    }
+    claimed.routes.push(route)
+    claimed.values.push(userAgent)
+    // Idempotent declaration (two routes, same identity) is not a UA conflict.
+    if (claimed.values.every(value => value === claimed.values[0])) continue
+    const reported = index.conflicts.find(entry => entry.origin === origin)
+    if (reported === undefined) index.conflicts.push({ origin, routes: [...claimed.routes], values: [...claimed.values] })
+    else {
+      reported.routes = [...claimed.routes]
+      reported.values = [...claimed.values]
+    }
+  }
+  return index
+}
+
+/** Original public name retained while callers migrate to the generic index. */
 export function buildUserAgentIndex(
   providers: Record<string, Record<string, unknown>>,
 ): UserAgentIndex {
-  const index = emptyIndex()
-  const claimed = new Map<string, { routes: string[]; values: string[] }>()
-  for (const [route, profile] of Object.entries(providers)) {
-    const userAgent = declaredUserAgent(profile)
-    if (userAgent === undefined) continue
-    const origin = originOf(typeof profile['baseURL'] === 'string' ? profile['baseURL'] : undefined)
-    if (origin === undefined) continue
-    const existing = index.byOrigin.get(origin)
-    if (existing === undefined) {
-      index.byOrigin.set(origin, { origin, userAgent, route })
-      claimed.set(origin, { routes: [route], values: [userAgent] })
-      continue
-    }
-    const group = claimed.get(origin)!
-    group.routes.push(route)
-    group.values.push(userAgent)
-    // Idempotent declaration (two routes, same identity) is not a conflict:
-    // nothing is ambiguous about which value to send.
-    if (existing.userAgent === userAgent) continue
-    const reported = index.conflicts.find(entry => entry.origin === origin)
-    if (reported === undefined) index.conflicts.push({ origin, routes: group.routes, values: group.values })
-  }
-  return index
+  return buildHeaderIndex(providers)
 }
 
 /**

@@ -1,5 +1,5 @@
 {
   "meta": {
-    "description": "Thinking levels and image input for third-party models, edited right in the Models page."
+    "description": "Thinking levels, image input and custom request headers for third-party models, edited right in the Models page; switch models and reasoning levels right in the composer."
   }
 }

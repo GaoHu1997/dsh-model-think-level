@@ -288,6 +288,33 @@ describe('apply() autofill', () => {
   })
 })
 
+describe('apply() header overlay lifecycle', () => {
+  it('refreshes headers when the pi-ai settings namespace registers after boot', async () => {
+    vi.useFakeTimers()
+    const settings = fakeSettings(undefined)
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { ctx } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false, bootRetryDelaysMs: [5] })
+
+    // The settings namespace is registered after the plugin's first pass.
+    settings.register('llm-pi-ai', {
+      agentrouter: {
+        baseURL: 'https://relay.example.com/v1',
+        headers: { 'user-agent': 'custom-agent/1.0', 'x-company': 'acme' },
+      },
+    })
+    await vi.advanceTimersByTimeAsync(5)
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions')
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, { headers: HeadersInit }]
+    const headers = new Headers(init.headers)
+    expect(headers.get('user-agent')).toBe('custom-agent/1.0')
+    expect(headers.get('x-company')).toBe('acme')
+  })
+})
+
 describe('apply() probe route', () => {
   const PROBE_PATH = '/dsh-model-think-level/raw-models'
 

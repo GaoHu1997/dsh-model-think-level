@@ -151,6 +151,7 @@ function makeDeps(overrides?: Partial<InjectorDeps>): InjectorDeps & {
       apiProtocol: ['API protocol'],
       apply: ['Apply'],
       cancel: ['Cancel'],
+      editProvider: ['Edit {provider}'],
     }),
     mount,
     editors,

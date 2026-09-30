@@ -164,12 +164,11 @@ async function type(input: HTMLInputElement, value: string): Promise<void> {
 /**
  * Inputs carrying one aria-label, in DOM order. Editing by label rather than by
  * a positional index is what keeps these tests honest: the row list grows and
- * shrinks, so an index assumed by the test would silently address the
- * user-agent field (the one input that is always last).
+ * shrinks, so an index would silently address a hidden legacy field or a later row.
  */
 function inputsByLabel(container: HTMLElement, label: string): HTMLInputElement[] {
   return Array.from(container.querySelectorAll<HTMLInputElement>('input[type="text"]'))
-    .filter(input => input.getAttribute('aria-label') === label)
+    .filter(input => input.getAttribute('aria-label') === label && input.closest('[hidden]') === null)
 }
 
 /** The headers dict one mutate call wrote. */
@@ -284,7 +283,7 @@ describe('HeadersEditor', () => {
     }
   })
 
-  it('saves the whole dict once, with the edited row and the user-agent', async () => {
+  it('saves the whole dict once, with edited arbitrary header rows', async () => {
     const api = fakeApi({ headers: { 'x-company': 'acme' } })
     const editor = await renderEditor({ route: 'aliyun', api, t })
     try {
@@ -292,13 +291,16 @@ describe('HeadersEditor', () => {
       await expand(editor.container)
       await act(async () => { buttonByText(editor.container, en.headersEdit).click() })
 
-      const values = inputsByLabel(editor.container, en.headersValue)
-      const userAgent = inputsByLabel(editor.container, en.headersUserAgentTitle)
-      // Row: name, value. Then the user-agent field.
-      expect(values).toHaveLength(1)
-      expect(userAgent).toHaveLength(1)
+      let values = inputsByLabel(editor.container, en.headersValue)
+       let names = inputsByLabel(editor.container, en.headersName)
+      await act(async () => { buttonByText(editor.container, en.headersAdd).click() })
+      values = inputsByLabel(editor.container, en.headersValue)
+      names = inputsByLabel(editor.container, en.headersName)
+      expect(values).toHaveLength(2)
+      expect(names).toHaveLength(2)
       await type(values[0]!, 'ACME-2')
-      await type(userAgent[0]!, 'claude-cli/2.1.161 (external, cli)')
+      await type(names[1]!, 'user-agent')
+      await type(values[1]!, 'claude-cli/2.1.161 (external, cli)')
       await act(async () => { buttonByText(editor.container, en.headersSave).click() })
 
       expect(api.mutate).toHaveBeenCalledTimes(1)
@@ -330,8 +332,8 @@ describe('HeadersEditor', () => {
       await act(async () => { buttonByText(editor.container, en.headersAdd).click() })
 
       // The new row is the LAST one of each column; the stored row is first.
-      const names = inputsByLabel(editor.container, en.headersName)
-      const values = inputsByLabel(editor.container, en.headersValue)
+      let names = inputsByLabel(editor.container, en.headersName)
+      let values = inputsByLabel(editor.container, en.headersValue)
       expect(names).toHaveLength(2)
       expect(names[0]!.value).toBe('x-drop')
       await type(names[1]!, 'x-new')

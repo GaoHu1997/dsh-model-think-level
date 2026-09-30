@@ -1,7 +1,6 @@
 /**
- * The fetch-layer installer for provider `user-agent` overrides (issue #12,
- * MVP-2). The decision of WHAT to override lives in
- * `headers-core.ts`; this module owns the global seam.
+ * The fetch-layer installer for provider request-header overrides. The decision of
+ * WHAT to override lives in `headers-core.ts`; this module owns the global seam.
  *
  * Shape of the seam: one process-wide wrapper owns `globalThis.fetch`, and
  * every activation is an ENTRY inside it. That is what makes the plugin safe
@@ -27,7 +26,7 @@
  * @module dsh-model-think-level/headers-fetch
  */
 
-import { emptyIndex, originOf, requestUrlOf, type UserAgentIndex } from './headers-core.js'
+import { emptyIndex, originOf, requestUrlOf, type HeaderIndex, type HeaderOverride } from './headers-core.js'
 
 /** Registry key on `globalThis`, so a second plugin load shares the one wrapper. */
 const REGISTRY = Symbol.for('dsh-model-think-level.fetch-overrides')
@@ -39,7 +38,7 @@ interface Entry {
    * document is live: a route added, edited, or removed on the Models page must
    * reach the next request without a plugin reload.
    */
-  index: () => UserAgentIndex
+  index: () => HeaderIndex
 }
 
 /** The process-wide wrapper state. */
@@ -55,10 +54,10 @@ function registryOf(): Registry | undefined {
 }
 
 /** Whether one request's URL is aimed at an origin this index overrides. */
-function overrideFor(index: UserAgentIndex, url: string): string | undefined {
+function overrideFor(index: HeaderIndex, url: string): HeaderOverride | undefined {
   const origin = originOf(url)
   if (origin === undefined) return undefined
-  return index.byOrigin.get(origin)?.userAgent
+  return index.byOrigin.get(origin)
 }
 
 /**
@@ -74,20 +73,33 @@ function seedHeaders(input: unknown, init: RequestInit | undefined): Headers {
   return new Headers()
 }
 
-/** The wrapper: inject the indexed `user-agent`, delegate everything else. */
+/** The wrapper: inject the indexed request headers and delegate everything else. */
 function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>): typeof globalThis.fetch {
   return function fetchWithProviderHeaders(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const url = requestUrlOf(input)
     if (url === undefined) return base(input, init)
-    let userAgent: string | undefined
+    let override: HeaderOverride | undefined
     for (const entry of entries.values()) {
-      userAgent = overrideFor(entry.index(), url)
-      if (userAgent !== undefined) break
+      override = overrideFor(entry.index(), url)
+      if (override !== undefined) break
     }
-    if (userAgent === undefined) return base(input, init)
+    if (override === undefined) return base(input, init)
     const headers = seedHeaders(input, init)
-    headers.set('user-agent', userAgent)
-    return base(input, { ...init, headers })
+    for (const [name, value] of Object.entries(override.headers)) {
+      // The index already filters invalid entries. Keep the seam defensive for
+      // a live source supplied by another caller or a stale settings snapshot.
+      try {
+        headers.set(name, value)
+      } catch {
+        // A malformed stored pair must not prevent the remaining headers or the
+        // underlying request from being sent.
+      }
+    }
+    const nextInit = { ...init, headers }
+    if (typeof Request !== 'undefined' && input instanceof Request) {
+      return base(new Request(input, { headers }), nextInit)
+    }
+    return base(input, nextInit)
   }
 }
 
@@ -105,7 +117,7 @@ export interface HeaderOverlay extends HeaderOverlayHandle {
 
 /** A mutable index source an activation reads on every request. */
 export interface OverlaySource {
-  current: UserAgentIndex
+  current: HeaderIndex
 }
 
 /**

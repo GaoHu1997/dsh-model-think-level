@@ -304,6 +304,39 @@ describe('ComposerSlider commit', () => {
     root.unmount()
   })
 
+  it('commits a level the row only PREDICTED on the first use of a model', async () => {
+    // A model switch lands with no effort, and `effectiveEffortIndex` fills the
+    // row from the adapter default so the body is not blank. The seat trigger
+    // still reads Default, so the displayed level is a PREDICTION, not a
+    // commitment: re-picking it must submit instead of being swallowed (the
+    // reported "pick another level or Medium never applies").
+    const { directory, selectSpy } = fixture({ current: { provider: 'aliyun', model: 'qwen-max' } })
+    const { root, container } = await mount(directory)
+    expect(directory.store.getSnapshot().current?.reasoningEffort).toBeUndefined()
+    // The adapter default (medium) is what the row predicts before any pick.
+    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Medium'))
+    const options = await openLevels(container)
+    click(optionNamed(options, 'Medium'))
+    await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'medium' }))
+    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Medium'))
+    root.unmount()
+  })
+
+  it('commits a ladder-middle prediction that no adapter default backs', async () => {
+    // Same shape without a declared `defaultEffort`: the middle of the ladder is
+    // the rest position, and it is equally a prediction.
+    const { directory, selectSpy } = fixture({
+      current: { provider: 'aliyun', model: 'qwen-plus' },
+      groups: onlyModel({ id: 'qwen-plus', name: 'Qwen Plus', reasoning: { efforts: LADDER.slice(0, 4) } }),
+    })
+    const { root, container } = await mount(directory)
+    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Low'))
+    const options = await openLevels(container)
+    click(optionNamed(options, 'Low'))
+    await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-plus', reasoningEffort: 'low' }))
+    root.unmount()
+  })
+
   it('rolls back to the committed level when the select rejects', async () => {
     const { directory, selectSpy, update } = fixture()
     // Faithful to the real ModelDirectory: a refused selection surfaces on the

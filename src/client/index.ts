@@ -12,6 +12,10 @@
  *   session-directory.ts    the per-session directory + effort-memory wiretaps
  *   configured-efforts.ts   the settings document's per-model `defaultEffort` cache
  *   slider-toggle-slot.ts   the Models-page footer toggle
+ *   provider-order-drag.ts  the Models-page provider-row drag handles (order)
+ *   provider-order.ts       the stored provider order (settings page + composer)
+ *   provider-toggle.ts      the Models-page per-provider enable switch
+ *   provider-enabled.ts     the stored disabled providers (settings page + composer)
  *   autofill-run.ts         the running auto-fill complement (issue #7)
  *   mount.tsx               foreign React roots and the render boundary
  *   model-menu.ts           locating the official composer model menu
@@ -51,6 +55,15 @@ import { PI_AI_NS, PLUGIN_ID, STORE_NS } from '../constants.js'
 import { LocaleRefresh, type LocaleFace } from './LocaleRefresh.tsx'
 import { en, zh, type BreKey } from './locales.ts'
 import { SLIDER_PREF_KEY, sliderEnabled, subscribeSliderEnabled, syncSliderEnabled } from './slider-pref.js'
+import {
+  PROVIDER_DISABLED_KEY, parseDisabledProviders, subscribeDisabledProviders, syncDisabledProviders,
+} from './provider-enabled.js'
+import {
+  PROVIDER_ORDER_KEY, parseProviderOrder, subscribeProviderOrder, syncProviderOrder,
+} from './provider-order.js'
+import {
+  MODEL_ORDER_KEY, parseModelOrders, subscribeModelOrders, syncModelOrders,
+} from './model-order.js'
 import { STYLES } from './styles.ts'
 import { createComposerMenu } from './injection/composer-menu.js'
 import { createConfiguredEfforts } from './injection/configured-efforts.js'
@@ -82,6 +95,17 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(STORE_NS, { zh, en }), 'dsh-model-think-level: dictionaries')
 
   const style = document.createElement('style')
+  // `data-plugin` is the host's own ownership marker, not decoration. The
+  // client module system claims EVERY untagged `<style>` for whichever plugin
+  // happens to materialize next (claimStyles: querySelectorAll of
+  // 'style:not([data-plugin])' -> setAttribute('data-plugin', id)) and later
+  // deletes its claimed tags by that id (removeOwnedStyles). A stylesheet left
+  // untagged is therefore stolen by an unrelated plugin and removed when THAT
+  // plugin reloads, while our injected DOM stays mounted: the rows keep
+  // rendering and every rule stops applying (default buttons, no flex, no
+  // card). Tagging the sheet here keeps it ours, so only our own reload cycles
+  // touch it.
+  style.dataset['plugin'] = PLUGIN_ID
   style.dataset['pluginStyles'] = PLUGIN_ID
   style.textContent = STYLES
   document.head.appendChild(style)
@@ -223,19 +247,36 @@ export function apply(ctx: ClientContext): void {
     return () => { for (const dispose of disposers) dispose() }
   }, 'dsh-model-think-level: pushed invalidations')
 
-  // Refresh the composer the moment the preference flips (the toggle and the
-  // menu can be open at the same time), and follow other tabs' changes.
+  // Refresh the composer the moment a preference flips (the toggle and the
+  // menu can be open at the same time), and follow other tabs' changes. The
+  // provider order joins in: its rows live on the settings page, so a change
+  // has to reach a scan — and a composer that is already open — without a
+  // reload. So does the enable switch, for the same reason in reverse: the
+  // switch is on the settings page, and it decides what the switcher lists.
   ctx.effect(() => {
     const onStorage = (event: StorageEvent): void => {
       if (event.key === SLIDER_PREF_KEY) syncSliderEnabled(event.newValue !== 'false')
+      else if (event.key === PROVIDER_ORDER_KEY) syncProviderOrder(parseProviderOrder(event.newValue))
+      else if (event.key === PROVIDER_DISABLED_KEY) {
+        syncDisabledProviders(parseDisabledProviders(event.newValue))
+      }
+      else if (event.key === MODEL_ORDER_KEY) syncModelOrders(parseModelOrders(event.newValue))
     }
     window.addEventListener('storage', onStorage)
     const dispose = subscribeSliderEnabled(() => { modelsPage.schedule() })
+    const disposeOrder = subscribeProviderOrder(() => { modelsPage.schedule() })
+    const disposeEnabled = subscribeDisabledProviders(() => { modelsPage.schedule() })
+    // The per-provider model order rides the same scan: a drag inside an open
+    // editor has to leave the grips where they are, which takes a rescan.
+    const disposeModelOrder = subscribeModelOrders(() => { modelsPage.schedule() })
     return () => {
       window.removeEventListener('storage', onStorage)
       void dispose()
+      void disposeOrder()
+      void disposeEnabled()
+      void disposeModelOrder()
     }
-  }, 'dsh-model-think-level: slider preference')
+  }, 'dsh-model-think-level: client preferences')
 
   ctx.effect(() => registerSliderToggleSlot(ctx, t), 'dsh-model-think-level: footer slot activation')
 
