@@ -44,7 +44,10 @@ function stateWith(
       {
         id: 'openai',
         name: 'OpenAI',
-        models: [{ id: 'gpt-5.6', name: 'GPT-5.6', reasoning: { efforts: LEVELS('low', 'medium', 'high', 'xhigh', 'max') } }],
+        models: [
+          { id: 'gpt-5.6', name: 'GPT-5.6', reasoning: { efforts: LEVELS('low', 'medium', 'high', 'xhigh', 'max') } },
+          { id: 'gpt-6-astra', name: 'GPT-6 Astra', reasoning: { efforts: LEVELS('low', 'medium', 'high', 'xhigh', 'max') } },
+        ],
       },
       {
         id: 'moonshot',
@@ -246,6 +249,25 @@ describe('wireEffortMemory: model switches', () => {
     }
   })
 
+  it('commits the displayed middle level on first use when the model has no declared default', async () => {
+    const fake = fakeDirectory(stateWith({ provider: 'plain', model: 'plain-chat-9' }))
+    const restore = wireEffortMemory(fake.directory)
+    try {
+      // GPT-6 Astra has a thinking ladder but no documented/default effort. The
+      // composer previews the middle option (High for this five-level ladder),
+      // so the native selection must receive that same level on the first model
+      // switch.
+      await fake.directory.select({ provider: 'openai', model: 'gpt-6-astra' })
+      expect(fake.submitted).toEqual([{
+        provider: 'openai',
+        model: 'gpt-6-astra',
+        reasoningEffort: 'high',
+      }])
+    } finally {
+      restore()
+    }
+  })
+
   it('falls back to the vendor default when the target model has no memory', async () => {
     const fake = fakeDirectory(stateWith({ provider: 'plain', model: 'plain-chat-9' }))
     const restore = wireEffortMemory(fake.directory)
@@ -372,6 +394,20 @@ describe('wireEffortMemory: restored projections', () => {
       await vi.waitFor(() => expect(fake.submitted).toEqual([{ provider: 'moonshot', model: 'kimi-k3', reasoningEffort: 'max' }]))
       // The watcher's own re-apply is a memory READ, not a user pick.
       expect(rememberedEffort('moonshot', 'kimi-k3')).toBeUndefined()
+    } finally {
+      restore()
+    }
+  })
+
+  it('commits the displayed middle level for a level-less first-use projection', async () => {
+    const fake = fakeDirectory(stateWith({ provider: 'openai', model: 'gpt-6-astra' }, { restore: true }))
+    const restore = wireEffortMemory(fake.directory)
+    try {
+      await vi.waitFor(() => expect(fake.submitted).toEqual([{
+        provider: 'openai',
+        model: 'gpt-6-astra',
+        reasoningEffort: 'high',
+      }]))
     } finally {
       restore()
     }

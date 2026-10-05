@@ -150,6 +150,28 @@ function effortIdsOf(
   return efforts === undefined ? [] : efforts.map(level => level.id)
 }
 
+/** The model-advertised default level, when the catalog carries one. */
+function advertisedDefaultOf(
+  state: ModelDirectoryStateLike,
+  provider: string,
+  model: string,
+): string | undefined {
+  const group = state.groups.find(candidate => candidate.id === provider)
+  return group?.models.find(candidate => candidate.id === model)?.reasoning?.defaultEffort
+}
+
+/**
+ * The level the composer body displays when a ladder has no current or declared
+ * default. Keep the wire fallback identical to that visual prediction; otherwise
+ * the body can say "Medium" while the native trigger still says "Default".
+ * A one-level ladder remains provider-owned because there is no real choice to
+ * restore and the existing no-fallback behavior is useful for capability probes.
+ */
+function displayedMiddleOf(supported: readonly string[]): string | undefined {
+  if (supported.length < 2) return undefined
+  return supported[Math.floor((supported.length - 1) / 2)]
+}
+
 /** Whether the selection moves to a DIFFERENT model (or picks the first one). */
 function isModelSwitch(
   current: DirectoryCurrentLike | null,
@@ -165,8 +187,10 @@ function isModelSwitch(
  * the SESSION'S own sighting (a level the user picked in this session --
  * switching away and back must not lose it), else the per-model configured
  * pick from the settings document, else the cross-session memory, else the
- * vendor's documented default from the knowledge base — always validated
- * against the ADVERTISED ladder, and undefined when nothing legitimate lands.
+ * vendor's documented default, else the catalog's advertised default, else the
+ * same middle-level preview used by the composer body — always validated
+ * against the ADVERTISED ladder, and undefined when the ladder has no usable
+ * fallback.
  * Async only because the configured pick reads the settings document; every
  * other layer is synchronous.
  */
@@ -187,7 +211,10 @@ async function resolveFallback(
   const memory = rememberedEffort(provider, model)
   if (memory !== undefined && supported.includes(memory)) return memory
   const fallback = suggestEfforts(model, {}).defaultEffort
-  return fallback !== undefined && supported.includes(fallback) ? fallback : undefined
+  if (fallback !== undefined && supported.includes(fallback)) return fallback
+  const advertised = advertisedDefaultOf(snapshot, provider, model)
+  if (advertised !== undefined && supported.includes(advertised)) return advertised
+  return displayedMiddleOf(supported)
 }
 
 /**
@@ -275,9 +302,9 @@ export function wireEffortMemory(directory: ModelDirectoryLike, deps?: EffortMem
       return original.call(directory, selection)
     }
     // A switch without a level: re-apply the session's sighting, the
-    // configured pick, the model's own memory, or the vendor's documented
-    // default from the knowledge base — never a guess. A model with no
-    // advertised ladder cannot be spoken to at all.
+    // configured pick, the model's own memory, the vendor/catalog default, or
+    // the same middle-level preview the composer displays — so the native
+    // trigger and the replicated body settle on one level.
     if (!sliderEnabled()) return original.call(directory, selection)
     const fallback = await resolveFallback(snapshot, selection.provider, selection.model, sessionSightings, deps)
     // The chain awaited (the configured layer may have made a wire round
