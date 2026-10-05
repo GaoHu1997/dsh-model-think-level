@@ -128,7 +128,7 @@ function modelsOf(group: DirectoryGroupLike): readonly ModelChoiceLike[] {
 }
 
 /** Provider label: the SDK face names it differently across kernel lines. */
-function groupLabel(group: DirectoryGroupLike): string {
+export function providerLabelOf(group: DirectoryGroupLike): string {
   const named = group as unknown as { name?: string; label?: string; title?: string }
   return named.name ?? named.label ?? named.title ?? group.id
 }
@@ -314,7 +314,10 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const current = state.current
   const group = state.groups.find(candidate => candidate.id === current?.provider)
   const model = group?.models.find(candidate => candidate.id === current?.model)
-  const modelLabel = model?.name ?? (current === null ? t('triggerFallback') : current.model)
+  const modelName = model?.name ?? (current === null ? t('triggerFallback') : current.model)
+  const modelLabel = current === null
+    ? modelName
+    : providerLabelOf(group ?? ({ id: current.provider } as DirectoryGroupLike)) + ' · ' + modelName
   const effortLabel = levels.find(level => level.id === effort)?.name ?? t('effortDefault')
 
   // The provider order set on the Models settings page, where the rows are
@@ -324,8 +327,8 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const preferredOrder = useSyncExternalStore(subscribeProviderOrder, providerOrder)
 
   // The providers switched off on the Models settings page. Hiding one here is
-  // the whole point of the switch, and the trigger above does not care: the
-  // current model keeps its own name even when its provider is hidden.
+  // the whole point of the switch, and the trigger decoration still keeps the
+  // current provider visible so the selected model remains unambiguous.
   const disabled = useSyncExternalStore(subscribeDisabledProviders, disabledProviders)
 
   // The model order set inside each provider's editor on the settings page: the
@@ -501,7 +504,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
             createElement(
               'span',
               { className: 'bre-option-name' },
-              groupLabel(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike),
+              providerLabelOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike),
             ),
             chevron(provider === shownProvider),
           )),

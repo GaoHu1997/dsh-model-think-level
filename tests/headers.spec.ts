@@ -16,6 +16,7 @@ import {
   emptyIndex,
   headersOf,
   isSendableUserAgent,
+  modelOfJsonBody,
   originOf,
   requestUrlOf,
 } from '../src/headers-core.js'
@@ -351,5 +352,188 @@ describe('installHeaderOverlay', () => {
     })
     await globalThis.fetch('https://relay.example.com/v1', { headers: {} })
     expect(new Headers(calls[0]?.init?.headers).get('user-agent')).toBe('first/1')
+  })
+})
+
+describe('per-route request headers on a shared origin', () => {
+  const original = globalThis.fetch
+  let calls: { input: unknown; init: RequestInit | undefined }[]
+  let handles: { dispose(): void }[]
+
+  function stubFetch(): void {
+    calls = []
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init })
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    }) as unknown as typeof globalThis.fetch
+  }
+
+  function install(source: OverlaySource) {
+    const handle = installHeaderOverlay(source)
+    handles.push(handle)
+    return handle
+  }
+
+  /** Two routes on ONE origin/path, separated only by the models they serve. */
+  function sharedProviders() {
+    return buildUserAgentIndex({
+      alpha: {
+        api: 'openai-completions',
+        baseURL: 'https://relay.example.com/v1',
+        models: [{ id: 'alpha-large' }],
+        headers: { 'user-agent': 'alpha/1.0', 'x-tenant': 'alpha' },
+      },
+      beta: {
+        api: 'openai-completions',
+        baseURL: 'https://relay.example.com/v1',
+        models: [{ id: 'beta-mini' }],
+        headers: { 'user-agent': 'beta/2.0', 'x-tenant': 'beta' },
+      },
+    })
+  }
+
+  beforeEach(() => {
+    handles = []
+    stubFetch()
+  })
+
+  afterEach(() => {
+    for (const handle of handles) handle.dispose()
+    globalThis.fetch = original
+  })
+
+  it('indexes every route, keeping its path and model ids', () => {
+    const index = sharedProviders()
+    expect(index.overrides).toHaveLength(2)
+    expect(index.overrides.map(entry => entry.route)).toEqual(['alpha', 'beta'])
+    expect(index.overrides[0]).toMatchObject({
+      origin: 'https://relay.example.com',
+      pathPrefix: '/v1',
+      modelIds: ['alpha-large'],
+    })
+  })
+
+  it('picks the route whose body model matches, not the first declarer', async () => {
+    install({ current: sharedProviders() })
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'beta-mini', messages: [] }),
+    })
+    const headers = new Headers(calls[0]?.init?.headers)
+    expect(headers.get('user-agent')).toBe('beta/2.0')
+    expect(headers.get('x-tenant')).toBe('beta')
+  })
+
+  it('reads the model from a Request body without consuming it', async () => {
+    install({ current: sharedProviders() })
+    const request = new Request('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'alpha-large' }),
+    })
+    await globalThis.fetch(request)
+    expect(new Headers(calls[0]?.init?.headers).get('user-agent')).toBe('alpha/1.0')
+    // The clone-fenced body survived: the sent Request still carries it.
+    expect(calls[0]?.input).toBeInstanceOf(Request)
+    expect(await (calls[0]?.input as Request).clone().text()).toContain('alpha-large')
+  })
+
+  it('separates same-origin routes by their baseURL path before reading any body', async () => {
+    install({
+      current: buildUserAgentIndex({
+        a: {
+          baseURL: 'https://relay.example.com/a',
+          models: [{ id: 'a-model' }],
+          headers: { 'user-agent': 'a/1.0' },
+        },
+        b: {
+          baseURL: 'https://relay.example.com/b',
+          models: [{ id: 'b-model' }],
+          headers: { 'user-agent': 'b/1.0' },
+        },
+      }),
+    })
+    // No body at all: the path alone is enough.
+    await globalThis.fetch('https://relay.example.com/b/chat/completions', { method: 'POST', headers: {} })
+    expect(new Headers(calls[0]?.init?.headers).get('user-agent')).toBe('b/1.0')
+    expect(calls[0]?.init?.body).toBeUndefined()
+  })
+
+  it('counts modelOverrides keys as route identity', () => {
+    const index = buildUserAgentIndex({
+      a: { baseURL: 'https://relay.example.com/v1', headers: { 'user-agent': 'a/1' } },
+      b: {
+        baseURL: 'https://relay.example.com/v1',
+        modelOverrides: { 'only-via-override': { input: ['text'] } },
+        headers: { 'user-agent': 'b/1' },
+      },
+    })
+    expect(index.overrides.find(entry => entry.route === 'b')?.modelIds).toEqual(['only-via-override'])
+  })
+
+  it('falls back to the first declarer when no body model identifies a route', async () => {
+    install({ current: sharedProviders() })
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'unknown-model' }),
+    })
+    expect(new Headers(calls[0]?.init?.headers).get('user-agent')).toBe('alpha/1.0')
+  })
+
+  it('leaves a request with no matching route origin untouched', async () => {
+    install({ current: sharedProviders() })
+    const init: RequestInit = { method: 'POST', headers: {} }
+    await globalThis.fetch('https://elsewhere.example.com/v1/chat/completions', init)
+    expect(calls[0]?.init).toBe(init)
+  })
+
+  it('sends nothing for a route that declares no headers instead of a sibling route\'s', async () => {
+    install({
+      current: buildUserAgentIndex({
+        bare: {
+          api: 'openai-completions',
+          baseURL: 'https://relay.example.com/v1',
+          models: [{ id: 'bare-model' }],
+        },
+        configured: {
+          api: 'openai-completions',
+          baseURL: 'https://relay.example.com/v1',
+          models: [{ id: 'configured-model' }],
+          headers: { 'user-agent': 'configured/1.0' },
+        },
+      }),
+    })
+    // The bare route claims its own model: the sibling's UA must not leak in.
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'x-keep': '1' },
+      body: JSON.stringify({ model: 'bare-model' }),
+    })
+    const bareHeaders = new Headers(calls[0]?.init?.headers)
+    expect(bareHeaders.get('user-agent')).toBeNull()
+    expect(bareHeaders.get('x-keep')).toBe('1')
+
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify({ model: 'configured-model' }),
+    })
+    expect(new Headers(calls[1]?.init?.headers).get('user-agent')).toBe('configured/1.0')
+  })
+})
+
+describe('modelOfJsonBody', () => {
+  it('reads a string model from a JSON object body', () => {
+    expect(modelOfJsonBody(JSON.stringify({ model: 'gpt-5.6' }))).toBe('gpt-5.6')
+    expect(modelOfJsonBody(JSON.stringify({ messages: [] }))).toBeUndefined()
+    expect(modelOfJsonBody(JSON.stringify({ model: 42 }))).toBeUndefined()
+    expect(modelOfJsonBody(JSON.stringify(['model']))).toBeUndefined()
+  })
+
+  it('refuses a body that is not JSON', () => {
+    expect(modelOfJsonBody('model=gpt-5.6')).toBeUndefined()
+    expect(modelOfJsonBody('')).toBeUndefined()
   })
 })

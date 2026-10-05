@@ -289,7 +289,8 @@ export function wireEffortMemory(directory: ModelDirectoryLike, deps?: EffortMem
     const fresh = directory.store.getSnapshot()
     const moved = (a: DirectoryCurrentLike | null, b: DirectoryCurrentLike | null): boolean =>
       a === null || b === null
-      || a.provider !== b.provider || a.model !== b.model || a.reasoningEffort !== b.reasoningEffort
+        ? a !== b
+        : a.provider !== b.provider || a.model !== b.model || a.reasoningEffort !== b.reasoningEffort
     if (utterances !== myUtterance || moved(fresh.current, snapshot.current)) return undefined
     // The chain awaited: the gate is re-checked BEFORE speaking, or a slider
     // toggle landing inside the await window would make the plugin inject a

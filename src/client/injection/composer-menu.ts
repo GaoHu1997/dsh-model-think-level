@@ -1,8 +1,9 @@
 /**
  * The composer model menu injection: the reasoning-effort slider AND the model
  * search box, both mounted inside the OFFICIAL model menu opened from the
- * bottom-right seat. The seat's trigger is never touched — the official
- * "model · effort" display stays.
+ * bottom-right seat. The official menu body remains host-owned apart from the
+ * replicated rows; its trigger keeps its own children and receives only a
+ * provider prefix through a plugin-owned data attribute.
  *
  * This module is the single place that decides which pane the menu is showing,
  * where each foreign body sits, and when each one retires. The two pane probes
@@ -23,7 +24,7 @@ import { flushSync } from 'react-dom'
 import type { ReactNode } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { PLUGIN_ID } from '../../constants.js'
-import { ComposerSlider } from '../ComposerSlider.js'
+import { ComposerSlider, providerLabelOf } from '../ComposerSlider.js'
 import { ModelSearch, isModelPane } from '../ModelSearch.js'
 import type { ModelDirectoryLike } from '../types.js'
 import { EffortBoundary, mountReact, unmountReact, type ForeignMount } from './mount.js'
@@ -32,6 +33,8 @@ import { EffortBoundary, mountReact, unmountReact, type ForeignMount } from './m
 export interface ComposerMenuDeps {
   /** The official menu element, or undefined while it is closed. */
   menuOf: () => HTMLElement | undefined
+  /** The official model trigger, present even while the menu is closed. */
+  triggerOf: () => HTMLElement | undefined
   /** The plugin's locale-bound translator. */
   t: Translate
   /** Wrap a subtree so it re-translates on a language switch. */
@@ -85,10 +88,52 @@ const rePlaceInFrame = (): void => {
  * @returns the injection's {@link ComposerMenuInjection} face.
  */
 export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjection {
-  const { menuOf, t, refreshed, sliderEnabled, directory } = deps
+  const { menuOf, triggerOf, t, refreshed, sliderEnabled, directory } = deps
   let sliderMount: ForeignMount | undefined
   let searchMount: ForeignMount | undefined
   let lastModelPane: boolean | undefined
+  let triggerDirectory: ModelDirectoryLike | undefined
+  let triggerUnsubscribe: (() => void) | undefined
+  let decoratedTrigger: HTMLElement | undefined
+
+  const clearTriggerDecoration = (): void => {
+    decoratedTrigger?.removeAttribute('data-bre-provider')
+    decoratedTrigger = undefined
+  }
+
+  /** Update the provider prefix without changing the host-owned trigger children. */
+  const updateTriggerDecoration = (): void => {
+    const trigger = triggerOf()
+    if (decoratedTrigger !== undefined && decoratedTrigger !== trigger) {
+      clearTriggerDecoration()
+    }
+    const state = triggerDirectory?.store.getSnapshot()
+    const current = state?.current
+    if (trigger === undefined || current === null || current === undefined) {
+      if (trigger === decoratedTrigger) clearTriggerDecoration()
+      return
+    }
+    const group = state?.groups.find(candidate => candidate.id === current.provider)
+    const provider = group === undefined ? current.provider : providerLabelOf(group)
+    if (provider.trim() === '') {
+      if (trigger === decoratedTrigger) clearTriggerDecoration()
+      return
+    }
+    trigger.dataset['breProvider'] = provider
+    decoratedTrigger = trigger
+  }
+
+  /** Follow whichever session directory the official composer currently owns. */
+  const syncTriggerDirectory = (): void => {
+    const next = directory()
+    if (next !== triggerDirectory) {
+      triggerUnsubscribe?.()
+      triggerUnsubscribe = undefined
+      triggerDirectory = next
+      if (next !== undefined) triggerUnsubscribe = next.store.subscribe(updateTriggerDecoration)
+    }
+    updateTriggerDecoration()
+  }
 
   const unmountSearch = (): void => {
     unmountReact(searchMount)
@@ -247,6 +292,7 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
   }
 
   const reconcile = (): void => {
+    syncTriggerDirectory()
     const menu = menuOf()
     if (menu === undefined) {
       unmountReact(sliderMount)
@@ -276,6 +322,10 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
   }
 
   const dispose = (): void => {
+    triggerUnsubscribe?.()
+    triggerUnsubscribe = undefined
+    triggerDirectory = undefined
+    clearTriggerDecoration()
     unmountReact(sliderMount)
     sliderMount = undefined
     unmountSearch()

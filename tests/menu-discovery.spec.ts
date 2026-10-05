@@ -15,7 +15,7 @@
 
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest'
-import { findModelMenu } from '../src/client/index.js'
+import { findModelMenu, findModelTrigger } from '../src/client/index.js'
 
 /** A seat trigger wired to a menu id, as the host renders it. */
 function trigger(menuId: string | null): HTMLButtonElement {
@@ -90,5 +90,39 @@ describe('findModelMenu', () => {
     document.body.appendChild(card)
 
     expect(findModelMenu()).toBeUndefined()
+  })
+})
+
+describe('findModelTrigger', () => {
+  it('returns the trigger linked to the open portaled model menu', () => {
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const seat = trigger('tid-menu')
+    card.appendChild(seat)
+    document.body.appendChild(card)
+    document.body.appendChild(menu('tid-menu'))
+
+    expect(findModelTrigger()).toBe(seat)
+  })
+
+  it('returns the trigger beside the inline menu', () => {
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const seat = trigger('tid-menu')
+    card.appendChild(seat)
+    card.appendChild(menu('tid-menu'))
+    document.body.appendChild(card)
+
+    expect(findModelTrigger()).toBe(seat)
+  })
+
+  it('returns the closed composer trigger when no menu is mounted', () => {
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const seat = trigger(null)
+    card.appendChild(seat)
+    document.body.appendChild(card)
+
+    expect(findModelTrigger()).toBe(seat)
   })
 })

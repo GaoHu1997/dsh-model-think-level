@@ -785,7 +785,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 /** Whether this plugin's wrapper currently owns the global fetch. */
                 installed: headerOverlayInstalled(),
                 /** Routes whose configured request headers are sent, by origin. */
-                overrides: [...index.byOrigin.values()].map(entry => ({
+                overrides: index.overrides.map(entry => ({
                   origin: entry.origin,
                   route: entry.route,
                   headers: entry.headers,

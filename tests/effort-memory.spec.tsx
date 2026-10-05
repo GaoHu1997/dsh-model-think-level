@@ -231,6 +231,21 @@ describe('wireEffortMemory: model switches', () => {
     }
   })
 
+  it('applies the fallback on the first model selection from an empty session', async () => {
+    const fake = fakeDirectory(stateWith(null))
+    const restore = wireEffortMemory(fake.directory)
+    try {
+      await fake.directory.select({ provider: 'openai', model: 'gpt-5.6' })
+      expect(fake.submitted).toEqual([{
+        provider: 'openai',
+        model: 'gpt-5.6',
+        reasoningEffort: 'medium',
+      }])
+    } finally {
+      restore()
+    }
+  })
+
   it('falls back to the vendor default when the target model has no memory', async () => {
     const fake = fakeDirectory(stateWith({ provider: 'plain', model: 'plain-chat-9' }))
     const restore = wireEffortMemory(fake.directory)

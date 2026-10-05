@@ -26,7 +26,15 @@
  * @module dsh-model-think-level/headers-fetch
  */
 
-import { emptyIndex, originOf, requestUrlOf, type HeaderIndex, type HeaderOverride } from './headers-core.js'
+import {
+  emptyIndex,
+  modelOfJsonBody,
+  pathCandidatesOf,
+  requestUrlOf,
+  selectOverrideFrom,
+  type HeaderIndex,
+  type HeaderOverride,
+} from './headers-core.js'
 
 /** Registry key on `globalThis`, so a second plugin load shares the one wrapper. */
 const REGISTRY = Symbol.for('dsh-model-think-level.fetch-overrides')
@@ -53,11 +61,27 @@ function registryOf(): Registry | undefined {
   return holder[REGISTRY]
 }
 
-/** Whether one request's URL is aimed at an origin this index overrides. */
-function overrideFor(index: HeaderIndex, url: string): HeaderOverride | undefined {
-  const origin = originOf(url)
-  if (origin === undefined) return undefined
-  return index.byOrigin.get(origin)
+/**
+ * Read a request body as text without consuming the request itself.
+ *
+ * The body is only read when the URL alone leaves the route ambiguous, so the
+ * common single-route case still pays nothing. A `Request` is cloned (its
+ * stream must survive for the real send); an `init.body` string is used
+ * directly, and any other body shape (stream, FormData) yields undefined
+ * rather than being disturbed.
+ */
+async function bodyTextOf(input: unknown, init: RequestInit | undefined): Promise<string | undefined> {
+  if (typeof init?.body === 'string') return init.body
+  if (typeof Request !== 'undefined' && input instanceof Request) {
+    try {
+      return await input.clone().text()
+    } catch {
+      // A body that cannot be cloned (already disturbed, or streamed) simply
+      // leaves the route ambiguous and the first declarer serves.
+      return undefined
+    }
+  }
+  return undefined
 }
 
 /**
@@ -73,17 +97,30 @@ function seedHeaders(input: unknown, init: RequestInit | undefined): Headers {
   return new Headers()
 }
 
-/** The wrapper: inject the indexed request headers and delegate everything else. */
+/** The wrapper: inject the matched route's request headers and delegate everything else. */
 function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>): typeof globalThis.fetch {
-  return function fetchWithProviderHeaders(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return async function fetchWithProviderHeaders(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const url = requestUrlOf(input)
     if (url === undefined) return base(input, init)
-    let override: HeaderOverride | undefined
+    // The URL (origin + endpoint path) narrows the route. Only when it leaves
+    // several candidates does the request body's `model` have to decide -- so a
+    // single-route deployment keeps the zero-read, zero-allocation fast path.
+    let candidates: HeaderOverride[] = []
     for (const entry of entries.values()) {
-      override = overrideFor(entry.index(), url)
-      if (override !== undefined) break
+      candidates = pathCandidatesOf(entry.index(), url)
+      if (candidates.length > 0) break
+    }
+    if (candidates.length === 0) return base(input, init)
+    let override = candidates.length === 1 ? candidates[0] : undefined
+    if (override === undefined) {
+      const body = await bodyTextOf(input, init)
+      const model = body === undefined ? undefined : modelOfJsonBody(body)
+      override = selectOverrideFrom(candidates, model)
     }
     if (override === undefined) return base(input, init)
+    // A route that claims the request but declares no headers is a deliberate
+    // "send nothing": another route's identity must not leak onto it.
+    if (!override.hasHeaders) return base(input, init)
     const headers = seedHeaders(input, init)
     for (const [name, value] of Object.entries(override.headers)) {
       // The index already filters invalid entries. Keep the seam defensive for

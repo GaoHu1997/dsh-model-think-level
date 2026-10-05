@@ -248,6 +248,17 @@ export const STYLES = `
   width: min(340px, calc(100vw - 32px));
   min-width: 0;
 }
+/* The official trigger keeps ownership of its model/effort children. The
+   provider prefix is a pseudo-element so host React updates, focus handling and
+   the click target remain untouched. */
+button[data-bre-provider]::before {
+  content: attr(data-bre-provider) " · ";
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
 /* ---- Model / reasoning-level rows ----
    Presentation follows dsh-tauri-model-config's settings rows
    (src/client/models/styles.ts: .zGbnIq_rowCard / .zGbnIq_rowHead /

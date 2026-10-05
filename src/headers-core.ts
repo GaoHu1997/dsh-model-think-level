@@ -9,10 +9,11 @@
  * reapplies the complete configured dictionary at the fetch layer, the last
  * public seam before the request reaches the wire.
  *
- * The index is keyed by ORIGIN, deliberately: the fetch seam sees a URL and
- * nothing else, and unlike a substring match an origin compare cannot be
- * fooled by `http://host` matching `http://host.example` or by two loopback
- * ports bleeding into each other.
+ * The index keeps every route's endpoint path and configured model ids. The URL
+ * alone cannot distinguish two routes that share an origin, while an OpenAI-
+ * compatible chat request carries the selected model in its JSON body. The
+ * origin map remains as a backwards-compatible fallback for requests that do
+ * not expose enough identity (for example a GET /models probe).
  *
  * @module dsh-model-think-level/headers-core
  */
@@ -27,22 +28,32 @@ import { isRecord } from './shared.js'
  */
 const MAX_UA_LENGTH = 512
 
-/** One origin's configured request headers, with the route that produced them. */
+/** One route's configured request headers and its fetch matching metadata. */
 export interface HeaderOverride {
   /** `scheme://host:port` of the route's endpoint, exactly as Fetch would print it. */
   origin: string
-  /** The string header pairs to apply at the fetch layer. */
+  /** Normalized pathname prefix from the route's baseURL. */
+  pathPrefix: string
+  /**
+   * The string header pairs to apply at the fetch layer. Empty when the route
+   * declares none: the route still participates in matching, so a request that
+   * clearly belongs to it is NOT given another route's headers.
+   */
   headers: Record<string, string>
   /** The route key that declared them (diagnostics and UI labelling). */
   route: string
+  /** Model IDs declared by this route, used to disambiguate shared endpoints. */
+  modelIds: string[]
   /** The configured `user-agent`, retained for compatibility and diagnostics. */
   userAgent?: string
+  /** Whether this route actually declares sendable request headers. */
+  hasHeaders: boolean
 }
 
 /** Backwards-compatible name retained for callers that only knew the UA seam. */
 export type UserAgentOverride = HeaderOverride
 
-/** A same-origin header disagreement that the URL-only seam cannot disambiguate. */
+/** A same-origin header disagreement that the URL-only fetch seam cannot disambiguate. */
 export interface HeaderConflict {
   origin: string
   header: string
@@ -50,9 +61,13 @@ export interface HeaderConflict {
   values: string[]
 }
 
-/** The origin index plus what could not be indexed or was ambiguous. */
+/** The route index plus what could not be indexed or was ambiguous. */
 export interface HeaderIndex {
-  /** origin → complete header override, first declarer wins. */
+  /** Every route with a usable endpoint, headers included or not. */
+  routes: HeaderOverride[]
+  /** Every route with sendable headers, retained for diagnostics and the UI. */
+  overrides: HeaderOverride[]
+  /** origin → first complete header override, used as a conservative fallback. */
   byOrigin: Map<string, HeaderOverride>
   /** Same-origin routes that declare different header values. */
   conflicts: { origin: string; routes: string[]; values: string[] }[]
@@ -65,7 +80,7 @@ export type UserAgentIndex = HeaderIndex
 
 /** An empty index, for the "no route declares headers" case. */
 export function emptyIndex(): HeaderIndex {
-  return { byOrigin: new Map(), conflicts: [], headerConflicts: [] }
+  return { routes: [], overrides: [], byOrigin: new Map(), conflicts: [], headerConflicts: [] }
 }
 
 /** The `scheme://host:port` of a URL string, or undefined when unparseable. */
@@ -159,6 +174,35 @@ export function declaredUserAgent(profile: Record<string, unknown> | undefined):
   return undefined
 }
 
+/** Normalize a route endpoint's pathname for boundary-safe prefix matching. */
+function pathPrefixOf(url: string): string {
+  try {
+    const pathname = new URL(url).pathname.replace(/\/+$/, '')
+    return pathname.length === 0 ? '/' : pathname
+  } catch {
+    return '/'
+  }
+}
+
+/** Model IDs that can appear in a pi-ai request body for one route. */
+function modelIdsOf(profile: Record<string, unknown>): string[] {
+  const ids = new Set<string>()
+  const models = profile['models']
+  if (Array.isArray(models)) {
+    for (const model of models) {
+      if (!isRecord(model) || typeof model['id'] !== 'string' || model['id'].length === 0) continue
+      ids.add(model['id'])
+    }
+  }
+  // modelOverrides is keyed by model id and can carry entries not repeated in
+  // the explicit models array, so include it as another source of route identity.
+  const overrides = profile['modelOverrides']
+  if (isRecord(overrides)) {
+    for (const id of Object.keys(overrides)) if (id.length > 0) ids.add(id)
+  }
+  return [...ids]
+}
+
 /** Normalize names the way Fetch's Headers object compares them. */
 function normalizedHeaders(headers: Record<string, string>): Map<string, { name: string; value: string }> {
   const normalized = new Map<string, { name: string; value: string }>()
@@ -193,24 +237,40 @@ function recordHeaderConflicts(index: HeaderIndex, existing: HeaderOverride, rou
   }
 }
 
-/** Build the origin index from every sendable header in each provider profile. */
+/** Build the route index from each provider profile's endpoint and header declaration. */
 export function buildHeaderIndex(
   providers: Record<string, Record<string, unknown>>,
 ): HeaderIndex {
   const index = emptyIndex()
   const claimedUserAgents = new Map<string, { routes: string[]; values: string[] }>()
   for (const [route, profile] of Object.entries(providers)) {
-    const headers = sendableHeadersOf(profile)
-    if (headers === undefined) continue
-    const origin = originOf(typeof profile['baseURL'] === 'string' ? profile['baseURL'] : undefined)
+    const baseURL = typeof profile['baseURL'] === 'string' ? profile['baseURL'] : undefined
+    const origin = originOf(baseURL)
     if (origin === undefined) continue
 
-    const userAgent = Object.entries(headers).find(([name]) => name.toLowerCase() === 'user-agent')?.[1]
+    const sendable = sendableHeadersOf(profile) ?? {}
+    const hasHeaders = Object.keys(sendable).length > 0
+    const userAgent = Object.entries(sendable).find(([name]) => name.toLowerCase() === 'user-agent')?.[1]
+    const override: HeaderOverride = {
+      origin,
+      pathPrefix: pathPrefixOf(baseURL ?? origin),
+      headers: sendable,
+      route,
+      modelIds: modelIdsOf(profile),
+      hasHeaders,
+      ...(userAgent === undefined ? {} : { userAgent }),
+    }
+    // Every route is registered, headers or not: a route that declares no
+    // headers must still be able to claim its own requests so another route on
+    // the same endpoint cannot leak its headers onto them.
+    index.routes.push(override)
+    if (!hasHeaders) continue
+    index.overrides.push(override)
     const existing = index.byOrigin.get(origin)
     if (existing === undefined) {
-      index.byOrigin.set(origin, { origin, headers, route, ...(userAgent === undefined ? {} : { userAgent }) })
+      index.byOrigin.set(origin, override)
     } else {
-      recordHeaderConflicts(index, existing, route, headers)
+      recordHeaderConflicts(index, existing, route, sendable)
     }
 
     if (userAgent === undefined) continue
@@ -238,6 +298,108 @@ export function buildUserAgentIndex(
   providers: Record<string, Record<string, unknown>>,
 ): UserAgentIndex {
   return buildHeaderIndex(providers)
+}
+
+/** The pathname of a request URL, normalized the way {@link pathPrefixOf} is. */
+export function requestPathOf(url: string): string | undefined {
+  try {
+    return new URL(url).pathname
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether a request path sits under a route's baseURL path prefix. */
+function pathMatches(requestPath: string, prefix: string): boolean {
+  if (prefix === '/') return true
+  return requestPath === prefix || requestPath.startsWith(`${prefix}/`)
+}
+
+/**
+ * The model id carried by a JSON request body, or undefined when the body is
+ * not JSON / names no string `model`. OpenAI-compatible chat completions and
+ * responses both put the selected model in the top-level `model` field.
+ */
+export function modelOfJsonBody(body: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(body)
+    if (!isRecord(parsed)) return undefined
+    const model = parsed['model']
+    return typeof model === 'string' && model.length > 0 ? model : undefined
+  } catch {
+    // A non-JSON body (multipart, SSE upload, empty) carries no model identity.
+    return undefined
+  }
+}
+
+/**
+ * The routes that could own a request, narrowed by origin and endpoint path.
+ *
+ * The result is the set the fetch layer must disambiguate: one element means
+ * the URL already identifies the route (no body read is needed), several means
+ * only the request's own `model` can decide, and zero means no route matches.
+ * @param index - the live route index.
+ * @param url - the request URL.
+ * @returns the candidate overrides, in declaration order.
+ */
+export function pathCandidatesOf(index: HeaderIndex, url: string): HeaderOverride[] {
+  const origin = originOf(url)
+  if (origin === undefined) return []
+  // A hand-built index may carry only the origin map; honour it as the legacy
+  // single-candidate shape.
+  const known = index.routes.length === 0 ? index.overrides : index.routes
+  const byOrigin = known.length === 0
+    ? (() => { const only = index.byOrigin.get(origin); return only === undefined ? [] : [only] })()
+    : known.filter(entry => entry.origin === origin)
+  if (byOrigin.length <= 1) return byOrigin
+  const requestPath = requestPathOf(url)
+  if (requestPath === undefined) return byOrigin
+  const matched = byOrigin.filter(entry => pathMatches(requestPath, entry.pathPrefix))
+  // An empty path match means the route paths were not describable (or the
+  // request targets a prefix no route declares): keep every candidate.
+  return matched.length === 0 ? byOrigin : matched
+}
+
+/**
+ * Pick one route out of already-narrowed candidates by the request body's model.
+ *
+ * The model only decides when exactly one candidate declares it; a model no
+ * candidate declares, or a model several candidates share, falls back to the
+ * first declarer — the same conservative rule as a request with no model at
+ * all.
+ * @param candidates - the path-narrowed candidates, in declaration order.
+ * @param model - the model id read from the request body, when one was found.
+ * @returns the override to apply, or undefined when there are no candidates.
+ */
+export function selectOverrideFrom(candidates: HeaderOverride[], model?: string): HeaderOverride | undefined {
+  if (candidates.length <= 1) return candidates[0]
+  if (model !== undefined) {
+    const byModel = candidates.filter(entry => entry.modelIds.includes(model))
+    if (byModel.length === 1) return byModel[0]
+  }
+  return candidates[0]
+}
+
+/**
+ * Pick the route whose configured headers belong on one request.
+ *
+ * Two routes can share an origin, which the URL alone cannot separate. The
+ * choice is therefore narrowed in three steps: the endpoint path prefix (see
+ * {@link pathCandidatesOf}), then the `model` carried by the JSON body (see
+ * {@link selectOverrideFrom}), then the first declarer. A request that cannot
+ * be pinned down therefore keeps the conservative behaviour the plugin shipped
+ * with, and the index's conflict report tells the user the endpoints overlap.
+ * @param index - the live route index.
+ * @param url - the request URL.
+ * @param model - the model id read from the request body, when one was found.
+ * @returns the override to apply, or undefined when no route matches.
+ */
+export function selectOverride(
+  index: HeaderIndex,
+  url: string,
+  model?: string,
+): HeaderOverride | undefined {
+  return selectOverrideFrom(pathCandidatesOf(index, url), model)
 }
 
 /**

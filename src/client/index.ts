@@ -70,7 +70,7 @@ import { createConfiguredEfforts } from './injection/configured-efforts.js'
 import { createIdleAutofill } from './injection/autofill-run.js'
 import { createModelsPage } from './injection/models-page.js'
 import { createSessionDirectoryTracker } from './injection/session-directory.js'
-import { modelMenuOf } from './injection/model-menu.js'
+import { modelMenuOf, modelTriggerOf } from './injection/model-menu.js'
 import { registerProviderCardSlot } from './injection/provider-card-slot.js'
 import { registerSliderToggleSlot } from './injection/slider-toggle-slot.js'
 
@@ -176,6 +176,7 @@ export function apply(ctx: ClientContext): void {
   })
   const composerMenu = createComposerMenu({
     menuOf: modelMenuOf,
+    triggerOf: modelTriggerOf,
     t,
     refreshed,
     sliderEnabled,
@@ -293,7 +294,7 @@ export function apply(ctx: ClientContext): void {
 export type { BreKey }
 export { EffortEditor } from './EffortEditor.tsx'
 export type { EffortEditorProps, EffortModel } from './EffortEditor.tsx'
-export { findModelMenu } from './injection/model-menu.js'
+export { findModelMenu, findModelTrigger } from './injection/model-menu.js'
 export type { InjectorDeps, EditorMountProps, ScanState } from './injection/models-page-editor.js'
 export * from './ops.ts'
 export * from './types.ts'

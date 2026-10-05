@@ -498,21 +498,28 @@ describe('client apply()', () => {
       await waitFor(() => directory.select !== originalSelect)
 
       // The body mounts at the TOP of the official menu, wedged before the
-      // official cells — the official trigger itself is never replaced.
+      // official cells — the host trigger keeps its host-owned children and receives only the provider prefix.
       await waitFor(() => document.querySelector('[data-bre-slider="1"]') !== null)
       const wrapper = document.querySelector<HTMLElement>('[data-bre-slider="1"]')!
       expect(wrapper.parentElement?.firstChild).toBe(wrapper)
-      expect(document.querySelector('[data-composer-card] button[aria-haspopup="menu"]')).not.toBeNull()
+      const trigger = card.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!
+       expect(trigger).not.toBeNull()
       // The wrapper is created synchronously; the React commit inside it is
       // scheduled, so wait for the two rows to land.
       await waitFor(() => wrapper.querySelectorAll('.bre-row-control').length === 2)
       const rows = Array.from(wrapper.querySelectorAll<HTMLButtonElement>('.bre-row-control'))
       expect(rows[0]?.querySelector('.bre-row-label')?.textContent).toBe('Model')
-      expect(rows[0]?.querySelector('.bre-row-value')?.textContent).toBe('Qwen Max')
+      expect(rows[0]?.querySelector('.bre-row-value')?.textContent).toBe('Aliyun · Qwen Max')
+       await waitFor(() => trigger.dataset['breProvider'] === 'Aliyun')
+       expect(trigger.textContent).toBe('Qwen Max')
+
       // The level row is moved onto the session's level by a passive effect, so
       // the row exists one commit BEFORE it carries the value: wait for it
       // rather than racing the commit.
       await waitFor(() => rows[1]?.querySelector('.bre-row-value')?.textContent === 'Medium')
+       await directory.select({ provider: 'dashscope', model: 'qwen-max' })
+       await waitFor(() => trigger.dataset['breProvider'] === 'dashscope')
+       await waitFor(() => rows[0]?.querySelector('.bre-row-value')?.textContent === 'dashscope · qwen-max')
 
       // The replicated body takes the upstream box, and the official root cells
       // are hidden because the replica IS the content.

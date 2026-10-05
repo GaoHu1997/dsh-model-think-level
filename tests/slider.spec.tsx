@@ -186,7 +186,7 @@ describe('ComposerSlider rows', () => {
     // The model row names the current model; the level row follows the
     // mount-sync effect onto the session's medium. Passive effects flush
     // asynchronously, so wait for the rest position instead of racing it.
-    expect(controls[0]?.querySelector('.bre-row-value')?.textContent).toBe('Qwen Max')
+    expect(controls[0]?.querySelector('.bre-row-value')?.textContent).toBe('Aliyun · Qwen Max')
     await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Medium'))
     // The radiation slider is gone: nothing renders a range input or a track.
     expect(container.querySelector('input[type="range"]')).toBeNull()
@@ -257,7 +257,7 @@ describe('ComposerSlider model picker', () => {
     // to be picked next.
     await vi.waitFor(() => expect(container.querySelector('.bre-panel-models')).toBeNull())
     expect(rows(container)).toHaveLength(2)
-    await vi.waitFor(() => expect(rowValue(container, 0)).toBe('Qwen Plus'))
+    await vi.waitFor(() => expect(rowValue(container, 0)).toBe('Aliyun · Qwen Plus'))
     root.unmount()
   })
 
