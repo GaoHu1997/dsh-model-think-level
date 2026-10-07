@@ -191,13 +191,18 @@ afterEach(() => {
 })
 
 describe('the list', () => {
-  it('opens on a loading line and then shows what the host answered', async () => {
+  it('opens on an empty panel and then shows what the host answered', async () => {
     const { client } = recorder({ list: async () => state({ entries: [row({ ref: 'A' })] }) })
     const panel = mount({ client })
-    expect(panel.root.textContent).toContain('Loading keys…')
+    // The first paint is deliberately empty, and NOT a "Loading keys…" line: the
+    // mount happens in the same frame the card opens, so a placeholder would put
+    // a one-line panel on screen for a frame and then visibly swap it for the
+    // list — the reported flicker. An empty panel reads as the card still opening.
+    expect(panel.root.querySelector('.bre-keys')?.textContent).toBe('')
+    expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(0)
+    expect(panel.root.querySelector('.bre-keys-add-row')).toBeNull()
 
     await flush()
-    expect(panel.root.textContent).not.toContain('Loading keys…')
     expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(1)
   })
 
@@ -621,7 +626,12 @@ describe('the read-only list', () => {
         }),
     })
     const panel = mount({ client })
-    expect(panel.root.textContent).toContain('Loading keys…')
+    // Nothing that writes is offered until the list answers: no rows, and no
+    // "add" entry either — a control whose write would race the read the host is
+    // still running would be the only thing on screen while the panel is empty.
+    expect(panel.root.querySelector('.bre-keys')?.textContent).toBe('')
+    expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(0)
+    expect(panel.root.querySelector('.bre-keys-add-row')).toBeNull()
 
     release?.(state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }))
     await flush()

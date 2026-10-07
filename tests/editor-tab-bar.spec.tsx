@@ -159,10 +159,12 @@ describe('EditorTabBar', () => {
     expect(STYLES).toContain('.bre-tabbed .bre-headers-host { display: block; }')
     expect(STYLES).toContain(".bre-tabbed[data-bre-tab='advanced'] .bre-headers { display: flex; }")
     // The pane is a card in its own right: as the only content under the bar the
-    // section stops being an appendage and draws the surface instead of a rule
-    // dividing it from fields that are not on this tab.
+    // section stops being an appendage and draws the surface — the hairline that
+    // divided it from the fields is gone with those fields — and it is set off
+    // the bar by the same 12px the other two panes put between the bar and their
+    // own cards.
     expect(STYLES).toContain(
-      ".bre-tabbed[data-bre-tab='advanced'] .bre-headers {\n  padding: 12px;\n  border-top: none;",
+      ".bre-tabbed[data-bre-tab='advanced'] .bre-headers {\n  margin-top: 12px;\n  padding: 12px;\n  border-top: none;",
     )
     expect(STYLES).toContain('background: var(--dsw-alias-bg-module-platform, #f5f6f7);')
   })

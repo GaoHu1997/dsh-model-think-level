@@ -292,8 +292,13 @@ describe('HeadersEditor', () => {
       expect(editor.container.querySelector('.bre-headers-disclosure')).toBeNull()
       expect(editor.container.querySelectorAll('.bre-headers-row')).toHaveLength(1)
       expect(editor.container.textContent).toContain(en.headersHint)
-      // Reaches its own edit affordances without a disclosure click.
-      expect(editor.container.textContent).toContain(en.headersEdit)
+      // Reaches its own edit affordances without a disclosure click — and
+      // without the pill the collapsed card section shows to open the fold: the
+      // pane IS the editor, so the rows are typed in place (the other two panes
+      // take their edits directly too, and this one does now as well).
+      expect(editor.container.querySelectorAll('input.bre-headers-name')).toHaveLength(1)
+      expect(editor.container.querySelector('.bre-headers-add')).not.toBeNull()
+      expect(editor.container.querySelector('.bre-headers-edit')).not.toBeNull()
 
       // Leaving the pane (another tab → the attribute is dropped, or full
       // teardown) restores the collapsed card section.
