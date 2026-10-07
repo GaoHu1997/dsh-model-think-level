@@ -28,6 +28,12 @@ import { describeNamespace } from '../ops.ts'
 import type { ClientContext, RemoteApi } from '../types.js'
 import { EffortBoundary, panelRoot } from './mount.js'
 import {
+  createEditorTabsState,
+  reconcileEditorTabs,
+  teardownEditorTabs,
+  type EditorTabsDeps,
+} from './editor-tabs.js'
+import {
   createProviderOrderState,
   reconcileProviderOrder,
   teardownProviderOrder,
@@ -39,6 +45,12 @@ import {
   teardownProviderEnabled,
   type ProviderToggleDeps,
 } from './provider-toggle.js'
+import {
+  reconcileProviderDeleteSeat,
+  teardownProviderDeleteSeats,
+  type ProviderDeleteDeps,
+} from './provider-delete-seat.js'
+import { teardownAutoEffortSeats } from './auto-effort-seat.js'
 import {
   createModelOrderState,
   reconcileModelOrder,
@@ -158,8 +170,13 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   const providerOrderDeps: ProviderOrderDeps = { t, labels }
   const providerToggleState = createProviderToggleState()
   const providerToggleDeps: ProviderToggleDeps = { t, labels }
+  // No per-scan state: the seat IS the DOM node, and the pass is idempotent by
+  // its presence, so nothing has to be remembered between scans.
+  const providerDeleteDeps: ProviderDeleteDeps = { t, labels }
   const modelOrderState = createModelOrderState()
   const modelOrderDeps: ModelOrderDeps = { t, labels }
+  const editorTabsState = createEditorTabsState()
+  const editorTabsDeps: EditorTabsDeps = { t }
   let scanTimer: number | undefined
   let retryTimer: number | undefined
   let observer: MutationObserver | undefined
@@ -248,6 +265,12 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // preference flip.
       composerMutation?.()
       reconcile(panelRoot(), injectorDeps, scanState)
+      // The tab pass rides the settled scan as well, after the editor injector
+      // has stocked the open card. Its reactive path is the observer above; this
+      // one covers the paths no mutation carries — a boot over an editor that
+      // is already open, and a retry whose scan re-arms without a re-render.
+      // Its own writes are guarded, so no scan ever chases its own tail.
+      reconcileEditorTabs(panelRoot(), editorTabsDeps, editorTabsState)
       // The row order pass rides the same scan but NOT the editor reconcile:
       // `reconcile` bails out whenever no editing card is open, and the
       // provider rows are on the page precisely when nothing is being edited.
@@ -255,6 +278,9 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // The switch pass follows the order pass: it reads the same row ids, and
       // it must see the rows where that pass left them.
       reconcileProviderEnabled(panelRoot(), providerToggleDeps, providerToggleState)
+      // The delete seat follows the switch pass: it reads the same rows, and it
+      // fills the hole the host leaves in an unremovable row's action group.
+      reconcileProviderDeleteSeat(panelRoot(), providerDeleteDeps)
       // The model pass comes last and covers a different list entirely: the
       // model rows inside whichever provider editor is open. Its own lists are
       // absent unless a card is expanded, so it no-ops on a collapsed page.
@@ -279,6 +305,13 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // session switch lands as a DOM mutation, and the new session's
       // directory must be watched before its projection can read as Default.
       onComposerMutation()
+      // The tab pass runs HERE too, synchronously, for the same reason: it is
+      // pure DOM work (attribute writes, no wire reads), and it must land in
+      // the microtask that carries the official commit. Deferred to the
+      // debounced scan below, the opened editor would paint as the official
+      // one long column and then visibly re-sort itself a frame or more later
+      // — the "click Edit and the tabbed editor flickers in" report.
+      reconcileEditorTabs(panelRoot(), editorTabsDeps, editorTabsState)
       schedule()
     })
     observer.observe(document.body, { childList: true, subtree: true })
@@ -317,9 +350,19 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // Same for the enable switches: a live listener on a dead fiber would keep
     // toggling providers the user can no longer see the state of.
     teardownProviderEnabled()
+    // The delete seats are raw DOM as well, and they stand for a control the
+    // page owns: a dead fiber must not leave a row reading as unavailable.
+    teardownProviderDeleteSeats()
+    // And for the auto-adapt seats: raw DOM this plugin put in the official
+    // catalogue head, which a dead fiber must not leave clickable-looking.
+    teardownAutoEffortSeats()
     // And for the model grips inside an open editor, whose own lists live
     // outside the provider rows' seat.
     teardownModelOrder(modelOrderState)
+    // And for the editor tabs: the bar and the region tags are raw DOM and
+    // attributes this plugin owns inside the official card — a dead fiber must
+    // not leave the page keyed to tabs nothing maintains anymore.
+    teardownEditorTabs()
   }
 
   const flushOnUnloadNow = (): void => { flushOnUnload(scanState, injectorDeps) }

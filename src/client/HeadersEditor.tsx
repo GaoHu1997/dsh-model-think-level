@@ -81,9 +81,12 @@ interface Draft {
 /** Build a draft from every stored header entry, including User-Agent. */
 function draftFrom(headers: Record<string, string> | undefined): Draft {
   let id = 0
-  return {
-    rows: Object.entries(headers ?? {}).map(([name, value]) => ({ id: id += 1, name, value })),
-  }
+  const rows = Object.entries(headers ?? {}).map(([name, value]) => ({ id: id += 1, name, value }))
+  // One blank pair by default: the pane is the editor now, and an empty pane
+  // would offer nothing to type into — the other two panes always show fields,
+  // and this one starts with one pair the user can fill (or replace) directly.
+  if (rows.length === 0) rows.push({ id: id += 1, name: '', value: '' })
+  return { rows }
 }
 
 /** The headers dict a draft stores: blank names are dropped. */
@@ -120,7 +123,15 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
   const [readOnly, setReadOnly] = useState(false)
   const [message, setMessage] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | undefined>(undefined)
   const [environment, setEnvironment] = useState<HeaderEnvironment | undefined>(undefined)
+  /**
+   * Whether the tab takeover made this section a whole pane (`高级配置`).
+   *
+   * There is no disclosure control to click there: the pane holds this section
+   * and nothing else, so it renders expanded and drops the pill.
+   */
+  const [tabbed, setTabbed] = useState(false)
   const nextRowId = useRef(1)
+  const rootRef = useRef<HTMLDivElement | null>(null)
 
   // Seed the draft from the stored document. The slot hands the editor a route,
   // not a profile: the section reads the pi-ai namespace itself, so the card
@@ -159,6 +170,21 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
       }
     })()
     return () => { live = false }
+  }, [])
+
+  // The takeover marks this component's own root with `data-bre-region="advanced"`
+  // (the editor-tabs pass), which is the only signal that says "you are the
+  // whole 高级配置 pane now". The mark lands in the microtask carrying the
+  // official commit, so it can arrive either side of this effect: read once on
+  // mount AND observe, because neither alone is sufficient.
+  useEffect(() => {
+    const root = rootRef.current
+    if (root === null) return
+    const sync = (): void => { setTabbed(root.dataset['breRegion'] === 'advanced') }
+    sync()
+    const observer = new MutationObserver(sync)
+    observer.observe(root, { attributes: true, attributeFilter: ['data-bre-region'] })
+    return () => { observer.disconnect() }
   }, [])
 
   const addRow = (): void => {
@@ -214,43 +240,56 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
 
   const rows = Object.entries(stored ?? {})
   const disabled = readOnly || busy
-  // Collapsed by default: the card is a list of providers, and a section that
-  // pushed its hint, its rows and its warnings into every card would bury the
-  // list. Collapsed shows the section's identity only — what it is called and
-  // whether anything is configured — and the disclosure arrow opens the rest.
+  // Collapsed by default in the single-column card: the card is a list of
+  // providers, and a section that pushed its hint, its rows and its warnings
+  // into every card would bury the list. Collapsed shows the section's identity
+  // only — what it is called and whether anything is configured — and the
+  // disclosure arrow opens the rest. The tab takeover removes that trade-off:
+  // there the section is the whole 高级配置 pane, so it stays expanded and the
+  // disclosure disappears instead of hiding the only thing the pane holds.
   const count = rows.length
+  // Under the tabs the pane IS the editor: rows on screen, typed in place, and
+  // the pane's own Save commits them through the same seam the fold's editor
+  // used. No "press Edit first" step — the other two panes take their edits
+  // directly, and this one does now too.
+  const inline = tabbed
 
   return (
-    <div className="bre-headers" data-plugin={PLUGIN_ID} data-open={open ? '1' : '0'}>
-      <div className="bre-headers-head">
-        {editing
-          ? <span className="bre-effort-title">{t('headersTitle')}</span>
-          : (
-            <button
-              type="button"
-              className="bre-headers-disclosure"
-              aria-expanded={open}
-              aria-label={`${t('headersTitle')} ${route}`}
-              onClick={() => { setOpen(!open); setMessage(undefined) }}
-            >
-              <span className="bre-effort-title">{t('headersTitle')}</span>
-              {loading || count === 0
-                ? null
-                : <span className="bre-headers-count">{count}</span>}
-              <span className="bre-headers-chevron" aria-hidden="true">›</span>
-            </button>
-          )}
-      </div>
+    <div className="bre-headers" ref={rootRef} data-plugin={PLUGIN_ID} data-open={open ? '1' : '0'}>
+      {/* The title strip only exists while the section is a fold inside the
+          provider card: the grey head is the identity of a collapsed disclosure.
+          Under the tabs the section is the whole 高级配置 pane, and the
+          provider and models panes carry no heading strip of their own — the
+          tab itself names the pane — so the head steps aside there the same
+          way the disclosure button does, keeping the three panes identical in
+          weight. */}
+      {!tabbed && (
+        <div className="bre-headers-head">
+          {editing
+            ? <span className="bre-effort-title">{t('headersTitle')}</span>
+            : (
+              <button
+                type="button"
+                className="bre-headers-disclosure"
+                aria-expanded={open}
+                aria-label={`${t('headersTitle')} ${route}`}
+                onClick={() => { setOpen(!open); setMessage(undefined) }}
+              >
+                <span className="bre-effort-title">{t('headersTitle')}</span>
+                {loading || count === 0
+                  ? null
+                  : <span className="bre-headers-count">{count}</span>}
+                <span className="bre-headers-chevron" aria-hidden="true">›</span>
+              </button>
+            )}
+        </div>
+      )}
 
-      {!open && !editing
+      {!open && !editing && !tabbed
         ? null
         : (
           <>
             <p className="bre-effort-note">{t('headersHint')}</p>
-
-            {/* The coexistence report. It is the difference between "the value I
-                typed is on the wire" and "another plugin is winning", which the
-                user cannot tell from the settings document alone. */}
             {environment === undefined
               ? null
               : (
@@ -273,7 +312,7 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
 
             {loading
               ? null
-              : editing
+              : editing || inline
                 ? (
                   <div className="bre-headers-edit">
                     <div className="bre-headers-columns" aria-hidden="true">

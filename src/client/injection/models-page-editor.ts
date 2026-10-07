@@ -30,9 +30,18 @@
 import { AUTOFILL_MARKER, INPUT_UNSET_MARKER, PLUGIN_ID, UNSET_MARKER } from '../../constants.js'
 import { suggestEfforts, type CompatSuggestion, type InputModalities, type ReasoningEfforts } from '../../knowledge.js'
 import { modelsOf, routeFactsOf, isRecord } from '../../shared.js'
-import { sameEfforts } from '../effort.js'
+import { buildIntent, draftFrom, sameEfforts } from '../effort.js'
+import {
+  buildModalityIntent,
+  compatDraftOf,
+  ladderIntent,
+  modalityFrom,
+  pendingWriteOf,
+  sameModality,
+} from '../EffortEditor.js'
 import { compatOf, createEditorApi, defaultEffortOf, effortsOf, inputOf, nameOf, providersOf, writeModelRows, type RowIntent } from '../ops.js'
 import type { EffortEditorApi, EffortWriteIntent, HeldWrite, RemoteApi, SettingsJoin } from '../types.js'
+import { reconcileAutoEffortSeats, type AutoEffortSeatTarget } from './auto-effort-seat.js'
 import { panelRoot } from './mount.js'
 
 export type { SettingsJoin }
@@ -95,8 +104,15 @@ export interface HostLabels {
 
 /** A row's identity as found on the page, resolved from the settings join. */
 interface FoundModel {
-  /** The official disclosure container that holds the capacity fields. */
-  container: HTMLElement
+  /**
+   * The official disclosure container that holds the capacity fields, when the
+   * row is EXPANDED. A collapsed row renders no such container at all (the
+   * official editor returns null for it), so a row the user has not unfolded
+   * still counts as found: it is a model of the provider and everything that
+   * works per PROVIDER (the auto-adapt seat, the provider-wide adapt) must see
+   * it. Only the per-row editor mount needs the container.
+   */
+  container?: HTMLElement
   /** The trigger's OWN model row element (row-scoped input reads). */
   row: HTMLElement
   /** The model id read from the row's "Model ID" input. */
@@ -243,6 +259,13 @@ export interface ScanState {
    * dismissed without saving is dropped, exactly like the card's own fields.
    */
   committing: Set<string>
+  /**
+   * Routes with a provider-wide adapt in flight (the auto-adapt seat's click).
+   * Nothing debounces that click: a second one arriving while the first pass is
+   * still describing and suggesting would re-ask every model and re-commit the
+   * same bytes, so the route is simply not re-entered until its pass ends.
+   */
+  adapting: Set<string>
   /**
    * Whether the official action row has failed to yield usable buttons for
    * every card seen so far. When it has, the landing decision degrades to
@@ -470,6 +493,7 @@ export function createScanState(): ScanState {
     flushFailures: 0,
     nextFlushAt: 0,
     committing: new Set(),
+    adapting: new Set(),
     signalsUnavailable: false,
     submitWired: new WeakSet(),
     cancelWired: new WeakSet(),
@@ -1015,12 +1039,17 @@ export function inputValueByLabel(card: HTMLElement, labels: readonly string[]):
 }
 
 /** The nearest editor card element of a trigger. */
-function cardOf(trigger: HTMLButtonElement): HTMLElement | undefined {
+function cardOf(trigger: Element): HTMLElement | undefined {
   return trigger.closest<HTMLElement>('[class*="editor"], [class*="rowCard"], [class*="addCard"]') ?? undefined
 }
 
-/** The official per-row disclosure container (holds the capacity fields). */
-function disclosureOf(trigger: HTMLButtonElement): HTMLElement | undefined {
+/**
+ * The official per-row disclosure container (holds the capacity fields), or
+ * undefined while that row is COLLAPSED: the official editor renders the
+ * container only for an expanded row, so an untouched provider shows nothing
+ * for its models to mount into.
+ */
+function disclosureOf(trigger: Element): HTMLElement | undefined {
   // The disclosure lives inside the trigger's own model row, not elsewhere in
   // the card: scoping to the row keeps each trigger's container distinct even
   // when several rows are expanded at once.
@@ -1045,6 +1074,119 @@ function disclosureOf(trigger: HTMLButtonElement): HTMLElement | undefined {
  */
 function officialInputTypesOf(container: HTMLElement): boolean {
   return container.querySelector('[class*="modelInputTypes"]') !== null
+}
+
+/**
+ * One auto-adapt seat per card that has models on screen: the card's own
+ * catalogue, paired with the route that card edits. Deduped by card, because
+ * every model row of a card shares the one catalogue head.
+ */
+function autoEffortTargets(
+  found: readonly FoundModel[],
+  providers: Record<string, Record<string, unknown>>,
+  labels: HostLabels,
+): AutoEffortSeatTarget[] {
+  const targets: AutoEffortSeatTarget[] = []
+  const seen = new Set<HTMLElement>()
+  for (const model of found) {
+    if (seen.has(model.card)) continue
+    seen.add(model.card)
+    const resolved = routeOfCard(model.card, providers, labels)
+    if (resolved === undefined) continue
+    const catalogue = model.card.querySelector<HTMLElement>('[class*="modelCatalog"]')
+    if (catalogue === null) continue
+    targets.push({ catalogue, route: resolved.route })
+  }
+  return targets
+}
+
+/**
+ * Adapt every model of one provider, the rows the user never unfolded
+ * included.
+ *
+ * The seat's click reaches the per-row editors through a document event, but
+ * an editor only exists for a row with a disclosure container, and a collapsed
+ * row renders none — so the visible answer is structurally incomplete. This
+ * routine answers from the settings DOCUMENT instead of the DOM: every model
+ * the provider declares goes through the same suggestion the row's own
+ * auto-adapt would have asked for, is mapped by the same pure functions
+ * ({@link ladderIntent}, {@link compatDraftOf}, {@link pendingWriteOf}) so both
+ * paths write identical bytes, and lands by the same rule — nothing is written
+ * while an official card holds the document; the write is held on the route
+ * and the card's own Save commits it (issue #7 / C2).
+ *
+ * The rows that ARE on screen keep answering for themselves: their editors
+ * hold the user's unsaved draft, which this document walk cannot see, and two
+ * writers for one row would let whichever ran last overwrite the other.
+ * @param state - mutable scan state: the adapting guard and the held ledger.
+ * @param deps - the injection dependencies.
+ * @param route - the provider route whose models are adapted.
+ */
+export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, route: string): Promise<void> {
+  if (route.length === 0 || state.adapting.has(route)) return
+  state.adapting.add(route)
+  try {
+    // One read for the whole run: `suggest` only ever READS the namespace here
+    // (its endpoint probe is a read-only GET, it never resolves a credential),
+    // the holds below change nothing the read depends on, and every model of
+    // the route needs the same provider facts anyway.
+    let join: Promise<SettingsJoin> | undefined
+    const describe = (): Promise<SettingsJoin> => (join ??= deps.describeNamespace())
+    const seen = await describe()
+    const providers = providersOf(seen.namespace)
+    // A read-only page and a route that is not in the document yet (a create
+    // card's typed id) have nothing to adapt: the card's own rows stage their
+    // work and it lands with the route.
+    if (seen.writable !== true || !hasOwn(providers, route)) return
+    const models = modelsOf(providers, route)
+    if (models.length === 0) return
+    const profile = providers[route] ?? {}
+    const routeApi = typeof profile['api'] === 'string' ? profile['api'] as string : undefined
+    const covered = new Set<string>()
+    for (const entry of state.mounted.values()) {
+      if (entry.props.route === route) covered.add(entry.props.modelId)
+    }
+    const api = createEditorApi(
+      deps.api,
+      describe,
+      // No stage arm: this routine only runs while the page is up, and a write
+      // made then is always a HOLD that the official Save lands.
+      undefined,
+      (heldRoute, modelId, write) => { queueWriteInto(state, heldRoute, modelId, write) },
+    )
+    for (const model of models) {
+      const modelId = typeof model['id'] === 'string' ? model['id'] : ''
+      if (modelId.length === 0 || covered.has(modelId)) continue
+      const initialEfforts = effortsOf(models, modelId)
+      const initialInput = inputOf(models, modelId)
+      const initialCompat = compatOf(models, modelId)
+      const reply = await api.suggest(route, modelId, nameOf(models, modelId))
+      // 'no-suggestion' is the normal outcome for a model with no knowledge
+      // match (the seat is a bulk convenience, not a promise): leave that row
+      // exactly as it is.
+      if (!reply.ok) continue
+      const parts = reply.suggestion
+      const nextThinking = parts.efforts !== false
+      // The draft a fresh editor would hold, mapped exactly as its own commit
+      // maps it: an untouched ladder and an untouched modality stay out of the
+      // write rather than stamping an unset marker onto the row.
+      const nextModality = parts.input === undefined ? modalityFrom(initialInput) : modalityFrom(parts.input)
+      api.commit(route, modelId, pendingWriteOf({
+        efforts: ladderIntent(nextThinking, buildIntent(draftFrom(parts.efforts)), initialEfforts),
+        input: sameModality(nextModality, initialInput) ? undefined : buildModalityIntent(nextModality),
+        manualCompat: compatDraftOf(initialCompat),
+        appliedCompat: parts.compat,
+        routeApi,
+        initialCompat,
+      }))
+    }
+  } catch (error) {
+    // The seat has no message area of its own, and one row's refusal must not
+    // strand the rows behind it: report, keep whatever holds already landed.
+    console.warn('[bre] provider-wide adapt failed:', error)
+  } finally {
+    state.adapting.delete(route)
+  }
 }
 
 /** Whether an editor is already mounted in a container (idempotency guard). */
@@ -1263,6 +1405,10 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   const hasCapacityRows = Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
     .some(button => labels.capacity.some(label => (button.getAttribute('aria-label') ?? '').startsWith(label)))
   if (!cardOpen) {
+    // No card is open, so no catalogue is either — but the seat is this
+    // plugin's OWN DOM inside the host's head, and only a scan can take it
+    // out, so every path that skips the row scan also has to clear the seats.
+    reconcileAutoEffortSeats(root, [], { t: deps.t })
     if (state.mounted.size > 0) {
       for (const [, entry] of state.mounted) entry.editor.unmount()
       state.mounted.clear()
@@ -1285,7 +1431,15 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   state.editing = true
   // An open card showing no model row has nothing to equip: the idle pass
   // stays fenced until the card goes away (or a row appears).
-  if (!hasCapacityRows) return
+  if (!hasCapacityRows) {
+    // ...and the auto-adapt seat has nothing to adapt either. It has to come
+    // out HERE: this path returns before the row scan, so nothing else would
+    // ever sweep it, and the editors still mounted for the rows the user just
+    // deleted are detached but listening — a seat left behind would answer
+    // each click with a write for rows that are no longer on screen.
+    reconcileAutoEffortSeats(root, [], { t: deps.t })
+    return
+  }
   // Fold the describe request across scans (one wire read per wave). A
   // promise's .then ALWAYS runs asynchronously (microtask), even when already
   // resolved — the fold just keeps concurrent scans from stacking wire reads.
@@ -1310,8 +1464,6 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       const triggers = Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
         .filter(button => (button.getAttribute('aria-label') ?? '').startsWith(aria))
       for (const trigger of triggers) {
-        const container = disclosureOf(trigger)
-        if (container === undefined) continue
         const card = cardOf(trigger)
         if (card === undefined) continue
         // The model id lives on the trigger's OWN row, not elsewhere in the
@@ -1320,9 +1472,27 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         const row = trigger.closest<HTMLElement>('[class*="modelEntry"]') ?? card
         const modelId = inputValueByLabel(row, labels.modelId)
         if (modelId.length === 0) continue
-        found.push({ container, row, modelId, card })
+        // The container is OPTIONAL: a collapsed row renders no disclosure at
+        // all, and skipping it here was what kept the provider-wide seat (and
+        // every provider-wide decision) blind until the user unfolded a model.
+        // A row with no container is still a model of this provider -- it
+        // contributes to what the seat adapts, and only its own editor mount
+        // waits for the container the chevron will render.
+        found.push({ container: disclosureOf(trigger), row, modelId, card })
       }
     }
+
+    // The "adapt every model of this provider" seat (user request ⑤) rides the
+    // same scan that found the rows: one seat per card, seated in that card's
+    // catalogue head beside the official fetch link. The rows' own editors
+    // answer the click through the document event, but only for a row that is
+    // EXPANDED (only it has a container to mount into), so the seat also hands
+    // the route to the provider-wide adapt, which reads the settings document
+    // and covers exactly the rows nothing on screen can answer for.
+    reconcileAutoEffortSeats(root, autoEffortTargets(found, providers, labels), {
+      t: deps.t,
+      onRequest: route => { void adaptEveryModel(state, deps, route) },
+    })
 
     // Unmount editors whose rows are gone (the page re-rendered).
     for (const [key, entry] of state.mounted) {
@@ -1366,6 +1536,12 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     }
 
     found.forEach((target, index) => {
+      // A collapsed row has nowhere to mount: its editor appears the moment
+      // the official chevron unfolds it and the next scan sees the container.
+      // Everything below assumes one, so the row bows out here -- after it has
+      // already served the provider-wide side of the scan above.
+      const container = target.container
+      if (container === undefined) return
       const resolved = routeOfCard(target.card, providers, labels)
       if (resolved === undefined) return
       const { route, staged: routeStaged } = resolved
@@ -1453,7 +1629,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         ...defaultEffort === undefined ? {} : { defaultEffort },
         index,
         staged,
-        officialInputTypes: officialInputTypesOf(target.container),
+        officialInputTypes: officialInputTypesOf(container),
         api: createEditorApi(
           deps.api,
           undefined,
@@ -1475,7 +1651,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         readOnly: join.writable !== true,
         t: deps.t,
       }
-      const existing = state.mounted.get(target.container)
+      const existing = state.mounted.get(container)
       if (existing !== undefined) {
         // The official page kept the container but moved the document under
         // it (an apply from this editor or elsewhere): swap the fresh props
@@ -1487,9 +1663,9 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         }
         return
       }
-      if (hasEditor(target.container)) return
-      const editor = deps.mount(target.container, next)
-      state.mounted.set(target.container, { editor, props: next })
+      if (hasEditor(container)) return
+      const editor = deps.mount(container, next)
+      state.mounted.set(container, { editor, props: next })
     })
   }
   // A rejected describe must not permanently disable the injector: clear the

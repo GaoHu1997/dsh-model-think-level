@@ -130,9 +130,28 @@ export function idFromTargetLabel(label: string): string | undefined {
   return /\s/.test(trimmed) ? undefined : trimmed
 }
 
-/** Whether a node belongs to this plugin (or any other `bre-`-prefixed seat). */
+/** The official card roots: a provider row, a row awaiting its first key, and the add card. */
+const CARD_ROOT_PROBE = '[class*="rowCard"], [class*="setupCard"], [class*="addCard"]'
+
+/**
+ * Whether a control belongs to this plugin (or any other `bre-`-prefixed seat)
+ * rather than to the official page: any mark of ours between the control and its
+ * own card means the control is ours.
+ *
+ * The walk deliberately STOPS at the card. The tab takeover paints `bre-tabbed`
+ * on the OFFICIAL row while that card's editor is open (`./editor-tabs.ts`), so
+ * an ancestor-wide `[class*="bre-"]` test reads the row's own Edit button as
+ * ours; `providerIdOfRow` then finds no id, and every pass keyed on the row id
+ * skips exactly the row the user has open. The built-in rows carry no
+ * `data-bre-provider` stamp to fall back on, so the seat, the switch and the
+ * drag handle all disappear with the id.
+ */
 function isForeign(node: Element): boolean {
-  return node.closest('[data-plugin], [class*="bre-"]') !== null
+  const card = node.closest(CARD_ROOT_PROBE)
+  for (let el: Element | null = node; el !== null && el !== card; el = el.parentElement) {
+    if (el.matches('[data-plugin], [class*="bre-"]')) return true
+  }
+  return false
 }
 
 /**

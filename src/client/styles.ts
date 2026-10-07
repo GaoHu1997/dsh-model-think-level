@@ -56,6 +56,13 @@ export const STYLES = `
 }
 .bre-link-button:hover { text-decoration: underline; }
 .bre-link-button:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
+.bre-auto-effort {
+  /* Seated in the OFFICIAL catalogue head, beside the host's own fetch link:
+     it borrows the plugin's link metrics and only adds the gap the head's own
+     controls are spaced by, so it reads as one more control of that row. */
+  margin-left: 4px;
+  flex: none;
+}
 .bre-effort-grid {
   /* Exactly two equal columns mirroring the official capacity pair the editor
      sits under; an odd row count leaves the last cell in the left column,
@@ -1254,7 +1261,11 @@ li.bre-row-dragging { opacity: .5; }
 li.bre-row-drop-target { border-color: var(--dsw-alias-brand-primary); }
 
 /* The insertion line. A fixed overlay on the body, never a child of the list
-   React owns, so writing it cannot trigger anything in the official section. */
+   React owns, so writing it cannot trigger anything in the official section.
+   The layer stack matters more than it looks: the provider list lives inside the
+   settings dialog, whose overlay is fixed and opaque with z-index 1000, so a
+   line in the shell's own range would be drawn behind the dialog and never
+   seen. It clears the dialog, and stays under the header's controls. */
 .bre-drop-line {
   position: fixed;
   display: none;
@@ -1263,7 +1274,7 @@ li.bre-row-drop-target { border-color: var(--dsw-alias-brand-primary); }
   background: var(--dsw-alias-brand-primary, #4d6bfe);
   box-shadow: 0 0 0 1px #ffffffb3, 0 1px 4px var(--dsw-alias-brand-primary, #4d6bfe);
   pointer-events: none;
-  z-index: 55;
+  z-index: 1200;
 }
 
 /* The row slide (a FLIP pass driven from the script) is motion; drop it for a
@@ -1365,5 +1376,542 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 @media (prefers-reduced-motion: reduce) {
   .bre-provider-switch,
   .bre-provider-switch::after { transition: none; }
+}
+
+/* ---- The reserved delete seat (Models page) ---- */
+
+/* A provider the host will not let the user remove renders no delete button, so
+   that row's action group — pushed right by margin-left:auto — starts further
+   right than its neighbours' and the column of buttons lines up raggedly. This
+   seat holds the place: it borrows the metrics the official button takes inside
+   an action group (.rowActions button is 28px tall / 12px / 0 10px) and the
+   dimmed treatment the host gives its own disabled buttons (opacity .4 with a
+   default cursor). It is always disabled — it is the alignment, not an action. */
+.bre-provider-delete {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: 0 0;
+  color: var(--dsw-alias-state-error-primary, #e5484d);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  opacity: .4;
+  cursor: default;
+}
+
+/* -----------------------------------------------------------------------
+   The provider editor's three tabs.
+
+   The official editor lays a provider out as one long column — identity
+   fields, then the model list, then this plugin's request-header section
+   one slot up the card. The tab pass (injection/editor-tabs.ts) tags each
+   region and stamps the card with the active tab; EVERY visibility decision
+   lives here, so the official React tree never moves and a pass failure
+   degrades to the untouched one-column editor.
+   ----------------------------------------------------------------------- */
+
+/* The segmented control. The plugin's tab-bar component renders it inside the
+   request-header mount, which already holds the card's 12px gap slot — so the
+   bar reaches the panes in the card's own rhythm WITHOUT this plugin ever
+   inserting a node into the official child list. It stays hidden until the pass
+   marks the card: a card the pass could not take over (the DeepSeek account
+   editor) keeps that mount visible for its request-header section, and must not
+   grow a bar that switches nothing. */
+.bre-editor-tabs {
+  display: none;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09));
+}
+
+/* Only a taken-over card shows the bar. */
+.bre-tabbed .bre-editor-tabs { display: flex; }
+
+/* ...and while the takeover is on, the mount holding that bar MUST be visible.
+   This is the one place the takeover does not delegate its reveal to the
+   official-edit state: the bar lives in here, and gating it on the _editor
+   class probe would make the tabs depend on a probe an official redesign can
+   break — with data-edit stuck at 0 the bar would be inside a display:none
+   parent and no rule of ours could reach it. The taken-over class is written by
+   the pass itself, in the same frame, so it is the trustworthy half of the
+   pair. The section's own visibility stays a pane decision (below). */
+.bre-tabbed .bre-headers-host { display: block; }
+
+.bre-editor-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #61666b);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.bre-editor-tab:hover { color: var(--dsw-alias-label-primary, #0f1115); }
+
+/* The selected segment lifts out of the track: the page's own surface colour
+   plus the card's own hairline, the same elevation the host uses for raised
+   controls. Hover on a selected tab stays put — it is already where you are. */
+.bre-editor-tab[aria-selected='true'],
+.bre-editor-tab[aria-selected='true']:hover {
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  color: var(--dsw-alias-label-primary, #0f1115);
+  box-shadow: 0 1px 2px #0000001a, 0 0 0 1px var(--dsw-alias-border-l2, #0000001a);
+}
+
+.bre-editor-tab:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 1px;
+}
+
+/* An advanced section with no headers mount (pre-first-render, feature off)
+   offers an empty pane — the button steps aside until the mount exists. */
+.bre-editor-tab[hidden] { display: none; }
+
+/* Pane visibility, keyed on the card's active tab. Only the HIDING has to win
+   a specificity fight (against the official sheet and the headers host's own
+   reveal rule); the active pane keeps whatever display the official layout
+   gave it, so showing must not declare a display at all. */
+.bre-tabbed:not([data-bre-tab='provider']) [data-bre-region='provider'],
+.bre-tabbed:not([data-bre-tab='models']) [data-bre-region='models'],
+.bre-tabbed:not([data-bre-tab='advanced']) [data-bre-region='advanced'] {
+  display: none !important;
+}
+
+/* The advanced tab: the official body — fields, model list, action row and the
+   editor's own header — steps aside for the request-header section, which is a
+   complete form with its own save/cancel and becomes the pane under the very
+   same bar. */
+.bre-tabbed[data-bre-tab='advanced'] [data-bre-editor-body] {
+  display: none !important;
+}
+
+/* The advanced pane shows the section for the same reason the mount is shown:
+   a pane that is already the active one has no business depending on the
+   official-edit probe. The rule above still wins for every other tab, and the
+   base bre-headers rule keeps a collapsed card's section hidden — a card only
+   carries the taken-over class while its editor is open. */
+.bre-tabbed[data-bre-tab='advanced'] .bre-headers { display: flex; }
+
+/* The pane is a card, and the section draws it. On the advanced tab the section
+   is not an appendage to the fields above it any more — it is the whole surface
+   — so it takes the inset fill the official module cards use (the add and setup
+   cards): the one fill in this system that stays visible on the content card's
+   own white in the light theme and reads as raised in the dark one, where every
+   theme layer token collapses onto the same value. The hairline goes with it: it
+   divided this section from those fields, and here the bar above ends the pane.
+   The 12px top margin sets the card off the tab bar above it — the same gap the
+   provider and models panes put between the bar and their own cards — and the
+   12px padding is the card's inner inset, not the separator. */
+.bre-tabbed[data-bre-tab='advanced'] .bre-headers {
+  margin-top: 12px;
+  padding: 12px;
+  border-top: none;
+  border-radius: var(--dsw-radius-lg, 16px);
+  background: var(--dsw-alias-bg-module-platform, #f5f6f7);
+}
+
+/* The live editor folds its identity fields and model list into one
+   "Customized" disclosure. Under the tabs the grouping is the panes' job: the
+   group stays expanded (the pass forces it open) and its summary row — now a
+   toggle with nothing left to toggle — steps aside. */
+.bre-tabbed [data-bre-editor-body] details > summary {
+  display: none !important;
+}
+
+/* A region that is NOT a pane. The editor's own header repeats the card row's
+   provider name and route tag, and that row is already on screen directly above
+   it, so the header is hidden on every tab. No pane rule above can select this
+   id, which is what keeps it hidden whichever tab is active. */
+.bre-tabbed [data-bre-region='none'] {
+  display: none !important;
+}
+
+/* The Models pane shows the custom model list and the catalogue, and two
+   hairlines used to divide it: the "Customized" group's separator from the key
+   field (which this pane hides) and the catalogue's own, drawn directly above
+   its "Model catalogue" heading. Neither has anything to divide here — the tab
+   bar already ends the pane above, and the divider between the two lists above
+   the catalogue is the group's boundary, not a rule. Both go, with every top
+   padding that held content off them (the group's 10px, its body's 12px, the
+   catalogue's 12px), so the pane runs from the tab bar into the catalogue with
+   only the official editor's own 14px gap between blocks. */
+.bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] details[class*='customized'] {
+  border-top: none;
+  padding-top: 0;
+}
+
+.bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] details[class*='customized'] > [class*='customizedBody'] {
+  padding-top: 0;
+}
+
+/* The catalogue is a section (its heading, title and meta are the divs inside
+   it), so this probe hits the ruled box and nothing else. */
+.bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] section[class*='modelCatalog'] {
+  border-top: none;
+  padding-top: 0;
+}
+
+/* The API-key eye. The official key field is a plain flex column whose input is
+   its last in-flow child, so the button hangs on the field's own box and is
+   measured against the input's 32px row — the official markup offers no
+   wrapper, and introducing one would mean moving DOM the host owns. The input
+   keeps the room the button needs. */
+.bre-key-field { position: relative; }
+
+.bre-key-field > input { padding-right: 34px; }
+
+/* A field the plugin's key list manages hands its input over: the list below
+   says the same thing once per key and keeps the pick, the alias and the value
+   in one place, so an official box that writes the provider's single key would
+   be a second, conflicting way to do it. The input stays in the DOM — the
+   host's form still owns it and the reveal pass still finds it — so unmanaging
+   the field brings the official box back. The marker is what the reveal pass
+   stamps on that input; the direct-child form covers the pass that has not run
+   yet, and the eye is the button the same pass hangs on the field. */
+.bre-key-managed [data-bre-key-input],
+.bre-key-managed > input,
+.bre-key-managed .bre-key-eye { display: none; }
+
+/* A field that failed validation grows a message line under the input; the eye
+   rides above it so it stays on the input it belongs to (18px line + 6px gap). */
+.bre-key-field:has(> p) .bre-key-eye { bottom: 24px; }
+
+.bre-key-eye {
+  position: absolute;
+  right: 4px;
+  bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.bre-key-eye:hover {
+  color: var(--dsw-alias-label-primary, #0f1115);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.bre-key-eye:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--dsw-alias-border-l3);
+}
+
+/* Resolving a stored key is a same-origin round trip, so the button can be
+   busy: it stays in place and dims rather than changing size or disappearing. */
+.bre-key-eye[aria-busy='true'] {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.bre-key-eye[hidden] { display: none; }
+
+/* One glyph at a time. The state lives on the button's own attribute, so a
+   click swaps the icon without the host re-rendering anything. */
+.bre-key-eye svg[data-bre-icon] { display: none; }
+
+.bre-key-eye[aria-pressed='false'] svg[data-bre-icon='eye'],
+.bre-key-eye[aria-pressed='true'] svg[data-bre-icon='eye-off'] { display: block; }
+
+/* The key list. The plugin mounts it into its own host, a sibling placed right
+   after the official key field, so the list sits under the input without
+   changing the field's own box: the reveal eye is measured against that box
+   (bottom: 0), and a list inside the field would drag the eye down onto the
+   list's last row. The margin only covers the case where the card spaces its
+   fields with margins instead of a gap. */
+.bre-keys-host {
+  display: block;
+  min-width: 0;
+  margin-top: 4px;
+}
+
+.bre-keys { display: flex; flex-direction: column; gap: 8px; }
+
+/* While the key list is still reading, the panel renders NOTHING (the component
+   returns an empty .bre-keys). An empty ruled box — or a placeholder line that
+   then swaps to the list — would paint one frame of a panel that then visibly
+   changes: the "the key section flashes when you press Edit" report. :empty
+   takes the panel out of the layout until the first answer lands, so the list
+   is the first thing the key area ever paints, and nothing under it moves. */
+.bre-keys:empty { display: none; }
+
+/* One ruled container holding the keys and the add entry, the way a settings
+   list reads: a single hairline box, and hairlines between rows only. */
+.bre-keys-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  border: 0.5px solid var(--dsw-alias-border-l2, #d5d7dd);
+  border-radius: 8px;
+  list-style: none;
+  overflow: hidden;
+}
+
+.bre-keys-list > li + li { border-top: 0.5px solid var(--dsw-alias-border-l2, #d5d7dd); }
+
+.bre-keys-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+/* The enable choice closes the row. The radio stays the real input — so the
+   keys of one provider are one group, choosing one clears the rest, and the
+   pick is keyboard-reachable — and the circle is its face; the word beside it
+   names the action instead of a state to hunt for. */
+.bre-keys-enable {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.bre-keys-enable-text {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+}
+
+.bre-keys-enable:has(.bre-keys-enabled:checked) .bre-keys-enable-text {
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+
+.bre-keys-enabled {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+.bre-keys-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border-l3, #9aa0aa);
+  border-radius: 50%;
+  color: var(--dsw-alias-bg-layer-1, #ffffff);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.bre-keys-mark > svg { width: 12px; height: 12px; }
+
+.bre-keys-enabled:checked + .bre-keys-mark {
+  border-color: var(--dsw-alias-label-primary, #0f1115);
+  background: var(--dsw-alias-label-primary, #0f1115);
+}
+
+.bre-keys-enabled:focus-visible + .bre-keys-mark {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+}
+
+/* With an alias the alias is the row's name and the masked key follows it as a
+   quiet code pill; without one the masked key is the name and takes the row's
+   measure, so a key is always readable as itself. */
+.bre-keys-alias {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+
+.bre-keys-mask {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.bre-keys-mask-plain {
+  flex: 1 1 auto;
+  padding: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+/* The row's three actions, revealed on hover or keyboard focus rather than
+   removed, so the row keeps its width and nothing shifts under the pointer.
+   Revealing is opacity alone; a pointer that cannot hover simply always sees
+   them, because a hidden action there would be an unreachable one. */
+.bre-keys-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.bre-keys-row:hover .bre-keys-actions,
+.bre-keys-row:focus-within .bre-keys-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .bre-keys-actions { opacity: 1; pointer-events: auto; }
+}
+
+.bre-keys-danger { color: var(--dsw-alias-state-error-primary, #c62828); }
+
+/* The one inline form. It opens under the row it edits, or — for a new key — as
+   the list's own last item, which is what keeps adding a key in place instead
+   of in a dialog that has to be found and dismissed. */
+.bre-keys-form-row { padding: 10px; }
+
+.bre-keys-form { display: flex; flex-direction: column; gap: 8px; }
+
+.bre-keys-form-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+/* One field means the whole row: the value form holds only the secret, and it
+   must not sit in half a row beside an empty half. */
+.bre-keys-form-fields > :only-child { grid-column: 1 / -1; }
+
+/* The shared input caps itself at 240px for the panels it was written for; here
+   the field is the measure. */
+.bre-keys-form-fields .bre-text-input { max-width: none; }
+
+.bre-keys-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* The shared primary button is styled inside the headers editor, which is not
+   where this form lives, so the key list carries its own compact copy. */
+.bre-keys-form-actions .bre-primary-button {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--dsw-radius-md, 8px);
+  background: var(--dsw-alias-button-primary-fill, #0f1115);
+  color: var(--dsw-alias-label-primary-foreground, #ffffff);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.bre-keys-form-actions .bre-primary-button:hover {
+  background: var(--dsw-alias-button-primary-hover, #43454a);
+}
+
+.bre-keys-form-actions .bre-primary-button:disabled { opacity: 0.5; cursor: default; }
+
+.bre-keys-form-actions .bre-primary-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+}
+
+/* The add entry is the list's own last row — full width, the same shape as the
+   keys it adds to — so the way in and the thing it makes read as one list. */
+.bre-keys-add-row { padding: 0; }
+
+.bre-keys-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 10px;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.bre-keys-add:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+
+.bre-keys-add:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+}
+
+.bre-keys-add:disabled { opacity: 0.55; cursor: default; }
+
+.bre-keys-add-mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+.bre-keys .bre-effort-message { font-size: 11px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .bre-editor-tab { transition: none; }
+  .bre-key-eye { transition: none; }
+  .bre-keys-mark, .bre-keys-actions, .bre-keys-add { transition: none; }
 }
 `

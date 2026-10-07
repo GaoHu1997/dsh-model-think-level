@@ -13,6 +13,7 @@ import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { EffortEditor, clearedCompatKeys, compatClearIntent, type EffortEditorProps } from '../src/client/EffortEditor.js'
 import type { SuggestReply, WriteEffortsReply, EffortEditorApi } from '../src/client/types.js'
+import { requestAutoEffort } from '../src/client/auto-effort.js'
 import { en } from '../src/client/locales.js'
 import type { ReasoningEfforts } from '../src/knowledge.js'
 
@@ -780,5 +781,121 @@ describe('EffortEditor thinking switch', () => {
     expect(checkboxes(container)[4]!.checked).toBe(true)
     const wires = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="text"]'))
     expect(wires[1]!.value).toBe('high')
+  })
+})
+
+/**
+ * The provider-wide auto-adapt seat (user request ⑤) hands its work to these
+ * components: the catalogue head is plain DOM outside React, so it publishes a
+ * document event and each mounted editor answers it for its own route.
+ *
+ * Every test here uses a route no other test in this file uses. The suite's
+ * afterEach clears the body but never unmounts a root, so an editor mounted by
+ * an earlier test is still listening — a shared route would make these
+ * assertions depend on the rest of the file's run order.
+ */
+describe('EffortEditor auto-adapt requests', () => {
+  const A_LADDER = {
+    ok: true,
+    suggestion: {
+      efforts: { off: null, low: 'low', medium: 'medium', high: 'high' },
+      matched: false,
+      source: 'endpoint:supported_features',
+      confidence: 'medium',
+    },
+  } satisfies SuggestReply
+
+  /** Let the request's queue chain (and React's own work) run to completion. */
+  const settle = async (): Promise<void> => {
+    await act(async () => { await new Promise(resolve => { setTimeout(resolve, 0) }) })
+  }
+
+  it('adapts the row when the request names its route', async () => {
+    const api = baseApi()
+    api.suggest.mockResolvedValue(A_LADDER)
+    const { container } = await renderEditor(baseProps({ route: 'auto-spec-a', api }))
+
+    await act(async () => { requestAutoEffort('auto-spec-a') })
+
+    expect(api.suggest).toHaveBeenCalledWith('auto-spec-a', 'qwen-max', undefined)
+    // The draft followed the suggestion, exactly as a click on the link would.
+    expect(checkboxes(container)[2]!.checked).toBe(true)
+    expect(container.querySelector('.bre-effort-note')?.textContent).toContain('endpoint:supported_features')
+  })
+
+  it('leaves every other provider alone', async () => {
+    const api = baseApi()
+    const { container } = await renderEditor(baseProps({ route: 'auto-spec-b', api }))
+
+    await act(async () => { requestAutoEffort('auto-spec-c') })
+    await settle()
+
+    expect(api.suggest).not.toHaveBeenCalled()
+    expect(checkboxes(container)[2]!.checked).toBe(false)
+  })
+
+  it('adapts a row whose thinking switch is off, where the link is not even rendered', async () => {
+    // This is the whole reason the seat asks the COMPONENT instead of clicking
+    // the Auto-adapt links: with thinking off there is no effort card at all,
+    // so there is no link to click — yet those are exactly the rows that most
+    // need a declared ladder.
+    const api = baseApi()
+    api.suggest.mockResolvedValue(A_LADDER)
+    const { container } = await renderEditor(baseProps({ route: 'auto-spec-d', efforts: false, api }))
+    expect(container.querySelector('.bre-effort-card')).toBeNull()
+    expect(hasButton(container, t('autoAdapt'))).toBe(false)
+
+    await act(async () => { requestAutoEffort('auto-spec-d') })
+
+    expect(api.suggest).toHaveBeenCalledWith('auto-spec-d', 'qwen-max', undefined)
+    expect(thinkingSwitch(container).checked).toBe(true)
+    expect(container.querySelector('.bre-effort-card')).not.toBeNull()
+  })
+
+  it('never writes a read-only row', async () => {
+    // The link is `disabled` for a read-only row, but the request reaches
+    // autoAdapt() directly and would otherwise bypass that gate.
+    const api = baseApi()
+    api.suggest.mockResolvedValue(A_LADDER)
+    await renderEditor(baseProps({ route: 'auto-spec-e', api, readOnly: true }))
+
+    await act(async () => { requestAutoEffort('auto-spec-e') })
+    await settle()
+
+    expect(api.suggest).not.toHaveBeenCalled()
+    expect(api.commit).not.toHaveBeenCalled()
+  })
+
+  it('answers for the route it is mounted with NOW, not the one it started with', async () => {
+    // A create card lets the user retype its Provider ID while the row is on
+    // screen, so the subscription has to follow the prop.
+    const api = baseApi()
+    api.suggest.mockResolvedValue(A_LADDER)
+    const props = baseProps({ route: 'auto-spec-f', api })
+    const { setProps } = await renderEditor(props)
+    await setProps({ ...props, route: 'auto-spec-g' })
+
+    await act(async () => { requestAutoEffort('auto-spec-f') })
+    await settle()
+    expect(api.suggest).not.toHaveBeenCalled()
+
+    await act(async () => { requestAutoEffort('auto-spec-g') })
+    expect(api.suggest).toHaveBeenCalledWith('auto-spec-g', 'qwen-max', undefined)
+  })
+
+  it('answers every request, one after another', async () => {
+    // One click of the seat is one request, so a provider whose rows all arrive
+    // after the click still adapts completely.
+    const api = baseApi()
+    api.suggest.mockResolvedValue(A_LADDER)
+    await renderEditor(baseProps({ route: 'auto-spec-h', api }))
+
+    await act(async () => {
+      requestAutoEffort('auto-spec-h')
+      requestAutoEffort('auto-spec-h')
+    })
+    await settle()
+
+    expect(api.suggest).toHaveBeenCalledTimes(2)
   })
 })

@@ -43,6 +43,7 @@ import {
   visualRows,
 } from '../src/client/injection/provider-order-drag.js'
 import { ComposerSlider } from '../src/client/ComposerSlider.js'
+import { STYLES } from '../src/client/styles.js'
 import type { HostLabels } from '../src/client/injection/models-page-editor.js'
 import type { ModelDirectoryLike, ModelDirectoryStateLike } from '../src/client/types.js'
 
@@ -252,6 +253,32 @@ describe('provider row identity', () => {
     host.appendChild(foreign)
     row.appendChild(host)
     ;(row.querySelector('button') as HTMLElement).setAttribute('aria-label', 'Not a provider label')
+    expect(providerIdOfRow(row, LABELS)).toBeUndefined()
+  })
+
+  it('still reads the id while a state mark of ours sits on the row', () => {
+    const list = officialPage([{ id: 'deepseek-official', name: 'DeepSeek' }])
+    const row = list.children[0] as HTMLElement
+    // `bre-tabbed` is state this plugin paints on the OFFICIAL row while that
+    // card's editor is open. It is not ownership, so it must not hide the id:
+    // the row's own seat, switch and drag handle are all keyed on it.
+    row.className = '_3nPmjq_rowCard bre-tabbed'
+    expect(providerIdOfRow(row, LABELS)).toBe('deepseek-official')
+  })
+
+  it('still ignores our own controls however deep they sit in the card', () => {
+    const list = officialPage([{ id: 'deepseek-official', name: 'DeepSeek' }])
+    const row = list.children[0] as HTMLElement
+    row.className = '_3nPmjq_rowCard bre-tabbed'
+    const host = document.createElement('div')
+    host.className = 'bre-headers-host'
+    const inner = document.createElement('div')
+    const foreign = document.createElement('button')
+    foreign.setAttribute('aria-label', 'Edit Fake (fake)')
+    inner.appendChild(foreign)
+    host.appendChild(inner)
+    ;(row.querySelector('button') as HTMLElement).setAttribute('aria-label', 'Not a provider label')
+    row.appendChild(host)
     expect(providerIdOfRow(row, LABELS)).toBeUndefined()
   })
 
@@ -624,5 +651,16 @@ describe('composer provider column', () => {
     await act(async () => { syncProviderOrder(['aliyun', 'deepseek-official', 'moonshot']) })
     expect(names()).toEqual(['Aliyun', 'DeepSeek', 'Moonshot'])
     await act(async () => { root.unmount() })
+  })
+})
+
+describe('the drag layers contract with the stylesheet', () => {
+  it('draws the insertion line above the settings dialog the list lives in', () => {
+    // The same layer stack the key panel needs: the provider list is inside the
+    // settings dialog, whose overlay is a fixed, opaque mask at z-index 1000. A
+    // line below that is drawn behind the dialog, and the drag loses its only
+    // cue for the side the row would land on.
+    expect(STYLES).toContain('.bre-drop-line {\n  position: fixed;\n  display: none;')
+    expect(STYLES).toContain('  pointer-events: none;\n  z-index: 1200;\n}')
   })
 })

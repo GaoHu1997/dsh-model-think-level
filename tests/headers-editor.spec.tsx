@@ -9,7 +9,8 @@
 
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, createElement } from 'react'
+import { act, createElement, useLayoutEffect, useRef } from 'react'
+import type { ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { HeadersEditor, headersFromDraft, type HeadersEditorProps } from '../src/client/HeadersEditor.js'
@@ -101,7 +102,10 @@ const CLEAN_ENVIRONMENT = {
  * exercise a state the real page never produces. The row stands in for the
  * official `.rowCard`.
  */
-async function renderEditor(props: HeadersEditorProps): Promise<{ container: HTMLElement; row: HTMLElement; unmount(): Promise<void> }> {
+async function renderEditor(
+  props: HeadersEditorProps,
+  options?: { tabbed?: 'during-mount' | 'after-mount' },
+): Promise<{ container: HTMLElement; row: HTMLElement; section: HTMLElement; unmount(): Promise<void> }> {
   const row = document.createElement('li')
   row.className = 'rowCard'
   document.body.appendChild(row)
@@ -110,16 +114,45 @@ async function renderEditor(props: HeadersEditorProps): Promise<{ container: HTM
   let root: Root | undefined
   await act(async () => {
     root = createRoot(container)
-    root.render(createElement(HeadersEditor, props))
+    root.render(options?.tabbed === 'during-mount'
+      ? createElement(TabbedMarker, null, createElement(HeadersEditor, props))
+      : createElement(HeadersEditor, props))
   })
+  // `after-mount` models the usual order: the takeover pass writes its mark into
+  // an already-mounted section, so the observer (not the mount-time read) is
+  // what has to catch it.
+  if (options?.tabbed === 'after-mount') {
+    await act(async () => { sectionOf(container).setAttribute('data-bre-region', 'advanced') })
+  }
   return {
     container,
     row,
+    section: sectionOf(container),
     async unmount() {
       await act(async () => { root!.unmount() })
       row.remove()
     },
   }
+}
+
+function sectionOf(container: HTMLElement): HTMLElement {
+  const hit = container.querySelector<HTMLElement>('.bre-headers')
+  if (hit === null) throw new Error('no headers section')
+  return hit
+}
+
+/**
+ * Writes the takeover's `data-bre-region="advanced"` mark from a parent LAYOUT
+ * effect, which runs before the child's passive effects: the mark is therefore
+ * in place when the section's own effect first runs, exactly as it is when the
+ * official commit and the takeover land in one microtask.
+ */
+function TabbedMarker({ children }: { children: ReactNode }): ReactNode {
+  const ref = useRef<HTMLDivElement | null>(null)
+  useLayoutEffect(() => {
+    ref.current?.querySelector('.bre-headers')?.setAttribute('data-bre-region', 'advanced')
+  }, [])
+  return <div ref={ref}>{children}</div>
 }
 
 function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
@@ -243,6 +276,57 @@ describe('HeadersEditor', () => {
       expect(editor.container.querySelector('.bre-headers-count')).toBeNull()
       await expand(editor.container)
       expect(editor.container.textContent).toContain(en.headersEmpty)
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('expands itself while the tab takeover makes it the advanced pane', async () => {
+    // The 高级配置 pane holds this section and nothing else, so a disclosure
+    // pill there would hide the only thing the pane is for. The takeover's own
+    // mark on the section's root is the signal, and it also has to work when
+    // the mark arrives after the section has already mounted.
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const editor = await renderEditor({ route: 'aliyun', api, t }, { tabbed: 'after-mount' })
+    try {
+      expect(editor.container.querySelector('.bre-headers-disclosure')).toBeNull()
+      expect(editor.container.querySelectorAll('.bre-headers-row')).toHaveLength(1)
+      expect(editor.container.textContent).toContain(en.headersHint)
+      // Reaches its own edit affordances without a disclosure click.
+      expect(editor.container.textContent).toContain(en.headersEdit)
+
+      // Leaving the pane (another tab → the attribute is dropped, or full
+      // teardown) restores the collapsed card section.
+      await act(async () => { editor.section.removeAttribute('data-bre-region') })
+      expect(editor.container.querySelector('.bre-headers-disclosure')).not.toBeNull()
+      expect(editor.container.querySelectorAll('.bre-headers-row')).toHaveLength(0)
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('reads the pane mark that landed before its first effect', async () => {
+    // The mark is written in the microtask carrying the official commit, so it
+    // can be there before this component ever runs an effect: the mount-time
+    // read is what catches that order (no mutation is delivered for it).
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const editor = await renderEditor({ route: 'aliyun', api, t }, { tabbed: 'during-mount' })
+    try {
+      expect(editor.container.querySelector('.bre-headers-disclosure')).toBeNull()
+      expect(editor.container.querySelectorAll('.bre-headers-row')).toHaveLength(1)
+      expect(editor.container.textContent).toContain(en.headersHint)
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('keeps the disclosure, and stays collapsed, without the pane mark', async () => {
+    // The single-column card path is untouched: no mark → the pill is the way in.
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const editor = await renderEditor({ route: 'aliyun', api, t })
+    try {
+      expect(editor.container.querySelector('.bre-headers-disclosure')).not.toBeNull()
+      expect(editor.container.querySelectorAll('.bre-headers-row')).toHaveLength(0)
     } finally {
       await editor.unmount()
     }

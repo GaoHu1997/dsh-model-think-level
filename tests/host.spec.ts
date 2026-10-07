@@ -4,7 +4,12 @@
  * active profile entry, and there is deliberately no get().
  */
 
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { keyIndexFilePath, readKeyIndex, writeKeyIndex } from '../src/key-index.js'
+import { maskKeyValue } from '../src/key-refs.js'
 
 type HostCtx = Parameters<typeof import('../src/index.js').apply>[0]
 
@@ -13,7 +18,9 @@ function fakeSettings(providers: Record<string, unknown> | undefined) {
   let revision = 3
   let current = providers
   let describeCalls = 0
+  let failNextMutation = 0
   const updates: Array<{ patch: object; expectedRevision: number | undefined }> = []
+  const mutations: Array<{ ops: unknown[]; expectedRevision: number | undefined }> = []
   return {
     describe(): Array<{ ns: string; revision: number; value?: unknown; user?: unknown }> {
       describeCalls += 1
@@ -31,8 +38,48 @@ function fakeSettings(providers: Record<string, unknown> | undefined) {
       updates.push({ patch, expectedRevision })
       revision += 1
     },
+    /**
+     * The path-op face the key manager writes through. Only the `providers`
+     * subtree is modelled — one field on one route — which is exactly what
+     * enabling a key does. The revision fence behaves like the real service,
+     * and `failNextMutation` throws the conflict code `isConflictError` looks
+     * for, so the retry path is reachable from a test.
+     */
+    async mutate(ns: string, ops: unknown[], expectedRevision?: number): Promise<void> {
+      if (failNextMutation > 0) {
+        failNextMutation -= 1
+        const conflict = new Error('the settings document moved') as Error & { code?: string }
+        conflict.code = 'SETTINGS_CONFLICT'
+        throw conflict
+      }
+      if (expectedRevision !== undefined && expectedRevision !== revision) {
+        throw new Error(`settings namespace "${String(ns)}" changed since it was read (expected ${expectedRevision}, now ${revision})`)
+      }
+      const next: Record<string, unknown> = { ...(current ?? {}) }
+      for (const candidate of Array.isArray(ops) ? ops : []) {
+        if (typeof candidate !== 'object' || candidate === null) continue
+        const op = candidate as Record<string, unknown>
+        const path = op['path']
+        if (!Array.isArray(path) || path.length !== 3 || path[0] !== 'providers') continue
+        const route = String(path[1])
+        const field = String(path[2])
+        const existing = next[route]
+        if (typeof existing !== 'object' || existing === null) continue
+        const profile = { ...(existing as Record<string, unknown>) }
+        if (op['op'] === 'set') profile[field] = op['value']
+        else if (op['op'] === 'unset') delete profile[field]
+        next[route] = profile
+      }
+      current = next
+      mutations.push({ ops: Array.isArray(ops) ? ops : [], expectedRevision })
+      revision += 1
+    },
     updates,
+    mutations,
     describeCalls: () => describeCalls,
+    /** Make the next `count` mutates lose a race, the way a competing writer does. */
+    failNextMutation: (count = 1): void => { failNextMutation = count },
+    providers: () => current,
     register(namespace: string, next?: Record<string, unknown>): void {
       void namespace
       if (next !== undefined) current = next
@@ -46,7 +93,15 @@ const hostCleanups: Array<() => void> = []
 /** Minimal cordis context face capturing what apply() touches. */
 function fakeHost(
   settings: ReturnType<typeof fakeSettings>,
-  options?: { credentials?: { resolve(ref: string): Promise<{ value?: string } | undefined> }; llm?: unknown },
+  options?: {
+    credentials?: {
+      resolve(ref: string): Promise<{ value?: string } | undefined>
+      describe?(refs: string[]): Promise<unknown>
+      set?(ref: string, value: string): Promise<unknown>
+      unset?(ref: string): Promise<unknown>
+    }
+    llm?: unknown
+  },
 ): {
   ctx: HostCtx
   emitUpdated: (ns: unknown) => void
@@ -814,6 +869,707 @@ describe('apply() probe route', () => {
       // The marker survives: the absence stays a decision.
       expect(model.inputUnset).toBe(true)
     })
+  })
+})
+
+describe('apply() provider-key route', () => {
+  const KEY_PATH = '/dsh-model-think-level/provider-key'
+
+  /** The probe's fake response, but this one KEEPS the headers: the route's
+   * whole promise is that a shown key is never cacheable. */
+  function fakeRes(): {
+    res: unknown
+    headers: Record<string, string>
+    out: () => { status: number; body: Record<string, unknown> }
+  } {
+    let status = 0
+    let raw = ''
+    const headers: Record<string, string> = {}
+    const res = {
+      set statusCode(value: number) { status = value },
+      get statusCode(): number { return status },
+      setHeader(key: string, value: string): void { headers[key.toLowerCase()] = value },
+      end(body?: string): void { raw = body ?? '' },
+    }
+    return {
+      res,
+      headers,
+      out: () => ({ status, body: JSON.parse(raw.length > 0 ? raw : '{}') as Record<string, unknown> }),
+    }
+  }
+
+  function fakeReq(overrides?: { method?: string; url?: string; headers?: Record<string, string> }): unknown {
+    return {
+      method: 'GET',
+      url: '?route=aliyun',
+      headers: { host: '127.0.0.1:3080' },
+      ...overrides,
+    }
+  }
+
+  const profile = { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', apiKeyEnv: 'ALIYUN_KEY', models: [] }
+
+  /** apply() against a fake host, answering with the registered route. */
+  async function routeFor(
+    providers: Record<string, unknown>,
+    credentials?: { resolve(ref: string): Promise<{ value?: string } | undefined> },
+  ): Promise<(req: unknown, res: unknown) => Promise<void>> {
+    const settings = fakeSettings(providers)
+    const { ctx, routes } = fakeHost(settings, credentials === undefined ? undefined : { credentials })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(KEY_PATH)
+    expect(handler).toBeDefined()
+    return handler!
+  }
+
+  it('answers with the stored credential under a path the client pins', async () => {
+    const credentials = { resolve: async (ref: string) => ({ value: ref === 'ALIYUN_KEY' ? 'sk-secret' : undefined }) }
+    const handler = await routeFor({ aliyun: profile }, credentials)
+
+    const { res, headers, out } = fakeRes()
+    await handler(fakeReq(), res)
+
+    const reply = out()
+    expect(reply.status).toBe(200)
+    expect(reply.body['ok']).toBe(true)
+    expect(reply.body['key']).toBe('sk-secret')
+    // The one route here that hands a value to the page has to be uncacheable.
+    expect(headers['cache-control']).toBe('no-store')
+  })
+
+  it('reports a credential that is not configured', async () => {
+    const credentials = { resolve: async () => undefined }
+    const handler = await routeFor({ aliyun: profile }, credentials)
+
+    const { res, headers, out } = fakeRes()
+    await handler(fakeReq(), res)
+
+    expect(out().status).toBe(404)
+    expect(String(out().body['error'])).toContain('ALIYUN_KEY')
+    expect(headers['cache-control']).toBe('no-store')
+  })
+
+  it('reports a profile that names no credential reference', async () => {
+    const handler = await routeFor({ local: { api: 'openai-completions', baseURL: 'http://localhost:11434/v1' } })
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ url: '?route=local' }), res)
+
+    expect(out().status).toBe(404)
+    expect(String(out().body['error'])).toContain('stores no credential reference')
+  })
+
+  it('refuses a route the settings do not name', async () => {
+    const handler = await routeFor({ aliyun: profile })
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ url: '?route=nope' }), res)
+
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('no llm-pi-ai provider route "nope"')
+  })
+
+  it('refuses a cross-site caller before it looks anything up', async () => {
+    const resolve = vi.fn(async () => ({ value: 'sk-secret' }))
+    const handler = await routeFor({ aliyun: profile }, { resolve })
+
+    const { res, headers, out } = fakeRes()
+    await handler(fakeReq({ headers: { host: '10.0.0.5:3080', 'sec-fetch-site': 'cross-site' } }), res)
+
+    expect(out().status).toBe(403)
+    expect(resolve).not.toHaveBeenCalled()
+    expect(headers['cache-control']).toBe('no-store')
+  })
+
+  it('answers a non-GET with 405', async () => {
+    const handler = await routeFor({ aliyun: profile })
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST' }), res)
+
+    expect(out().status).toBe(405)
+  })
+
+  it('leaves the settings document untouched', async () => {
+    const settings = fakeSettings({ aliyun: profile })
+    const credentials = { resolve: async () => ({ value: 'sk-secret' }) }
+    const { ctx, routes } = fakeHost(settings, { credentials })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(KEY_PATH)!
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq(), res)
+
+    expect(out().status).toBe(200)
+    // Showing a key is a read: the reveal must never become a write.
+    expect(settings.updates).toHaveLength(0)
+  })
+})
+
+describe('apply() key-index route', () => {
+  const INDEX_PATH = '/dsh-model-think-level/key-index'
+
+  /** The index lives under the harness home; point it at a temp dir per test. */
+  const savedHome = process.env['DSH_HOME']
+  let home = ''
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'bre-host-index-'))
+    process.env['DSH_HOME'] = home
+  })
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env['DSH_HOME']
+    else process.env['DSH_HOME'] = savedHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  /** The fake response that also keeps the headers: this route must never be cached. */
+  function fakeRes(): {
+    res: unknown
+    headers: Record<string, string>
+    out: () => { status: number; body: Record<string, unknown> }
+  } {
+    let status = 0
+    let raw = ''
+    const headers: Record<string, string> = {}
+    const res = {
+      set statusCode(value: number) { status = value },
+      get statusCode(): number { return status },
+      setHeader(key: string, value: string): void { headers[key.toLowerCase()] = value },
+      end(body?: string): void { raw = body ?? '' },
+    }
+    return {
+      res,
+      headers,
+      out: () => ({ status, body: JSON.parse(raw.length > 0 ? raw : '{}') as Record<string, unknown> }),
+    }
+  }
+
+  /** A request whose body is the async iterable the route reads it as. */
+  function fakeReq(overrides?: {
+    method?: string
+    url?: string
+    headers?: Record<string, string>
+    body?: unknown
+  }): unknown {
+    const text = overrides?.body === undefined ? '' : JSON.stringify(overrides.body)
+    const req: Record<string | symbol, unknown> = {
+      method: 'GET',
+      url: '?route=aliyun',
+      headers: { host: '127.0.0.1:3080' },
+      ...overrides,
+    }
+    if (text.length > 0) {
+      req[Symbol.asyncIterator] = async function* () { yield text }
+    }
+    return req
+  }
+
+  /** The credential face the route uses, tracking values in memory. */
+  interface Store {
+    resolve(ref: string): Promise<{ value?: string } | undefined>
+    describe?(refs: string[]): Promise<unknown>
+    set?(ref: string, value: string): Promise<unknown>
+    unset?(ref: string): Promise<unknown>
+  }
+
+  function credentialStore(held?: Record<string, string>): Store & { values: Record<string, string> } {
+    const values: Record<string, string> = { ...(held ?? {}) }
+    return {
+      values,
+      async resolve(ref: string) {
+        const value = values[ref]
+        return value === undefined ? undefined : { value }
+      },
+      async set(ref: string, value: string) {
+        values[ref] = value
+        return { ok: true }
+      },
+      async unset(ref: string) {
+        delete values[ref]
+        return { ok: true }
+      },
+    }
+  }
+
+  const profile = { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', apiKeyEnv: 'ALIYUN_KEY', models: [] }
+  const indexFile = (): string => keyIndexFilePath(home)
+
+  async function mounted(
+    providers: Record<string, unknown>,
+    credentials?: Store,
+  ): Promise<{ handler: (req: unknown, res: unknown) => Promise<void>; settings: ReturnType<typeof fakeSettings> }> {
+    const settings = fakeSettings(providers)
+    const { ctx, routes } = fakeHost(settings, credentials === undefined ? undefined : { credentials })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(INDEX_PATH)
+    expect(handler).toBeDefined()
+    return { handler: handler!, settings }
+  }
+
+  it('lists the reference in use when the index is still empty', async () => {
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-secret' })
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, headers, out } = fakeRes()
+    await handler(fakeReq(), res)
+
+    const reply = out()
+    expect(reply.status).toBe(200)
+    expect(headers['cache-control']).toBe('no-store')
+    expect(reply.body['route']).toBe('aliyun')
+    expect(reply.body['enabledRef']).toBe('ALIYUN_KEY')
+    // The value can be read, so the row carries its display form as well.
+    expect(reply.body['entries']).toEqual([
+      { ref: 'ALIYUN_KEY', enabled: true, configured: true, masked: maskKeyValue('sk-secret') },
+    ])
+    // Showing the list is a read: it must not create the index file at all.
+    expect(existsSync(indexFile())).toBe(false)
+  })
+
+  it('lists stored keys in order, with their labels and badges', async () => {
+    writeKeyIndex(
+      { version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY_2', alias: 'spare' }, { ref: 'ALIYUN_KEY' }] } },
+      indexFile(),
+    )
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-secret' })
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq(), res)
+
+    expect(out().body['entries']).toEqual([
+      { ref: 'ALIYUN_KEY_2', enabled: false, configured: false, alias: 'spare' },
+      { ref: 'ALIYUN_KEY', enabled: true, configured: true, masked: maskKeyValue('sk-secret') },
+    ])
+  })
+
+  it('merges a reference the index does not know into the list', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY_2' }] } }, indexFile())
+    const { handler } = await mounted({ aliyun: profile }, credentialStore())
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq(), res)
+
+    const entries = out().body['entries'] as Array<{ ref: string; enabled: boolean; configured: boolean | null }>
+    expect(entries.map(row => row.ref)).toEqual(['ALIYUN_KEY_2', 'ALIYUN_KEY'])
+    expect(entries[1]?.['enabled']).toBe(true)
+    // The store cannot say, through either face, whether ALIYUN_KEY_2 is held.
+    expect(entries[0]?.['configured']).toBe(false)
+  })
+
+  it('previews a held value as its masked display form, and shows nothing for a ref it cannot read', async () => {
+    writeKeyIndex(
+      { version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY_2' }, { ref: 'ALIYUN_KEY_3' }] } },
+      indexFile(),
+    )
+    // One long value (head and tail), one too short to trim (flat mask), and one
+    // the store holds nothing for (no preview at all).
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-live-secret-value', ALIYUN_KEY_3: 'sk-short' })
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq(), res)
+
+    const entries = out().body['entries'] as Array<Record<string, unknown>>
+    expect(entries).toEqual([
+      { ref: 'ALIYUN_KEY_2', enabled: false, configured: false },
+      { ref: 'ALIYUN_KEY_3', enabled: false, configured: true, masked: '••••••••' },
+      { ref: 'ALIYUN_KEY', enabled: true, configured: true, masked: 'sk-l...alue' },
+    ])
+    // A row with no readable value carries no preview key at all, rather than an
+    // empty one the panel would render as a mask.
+    expect(entries[0]).not.toHaveProperty('masked')
+  })
+
+  it('reports a route the settings do not name', async () => {
+    const { handler } = await mounted({ aliyun: profile })
+
+    const { res, headers, out } = fakeRes()
+    await handler(fakeReq({ url: '?route=nope' }), res)
+
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('no llm-pi-ai provider route "nope"')
+    expect(headers['cache-control']).toBe('no-store')
+  })
+
+  it('reports a missing route parameter', async () => {
+    const { handler } = await mounted({ aliyun: profile })
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ url: '' }), res)
+
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('no llm-pi-ai provider route ""')
+  })
+
+  it('refuses a cross-site caller before it reads the settings', async () => {
+    const { handler, settings } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'sk-secret' }))
+    const reads = settings.describeCalls()
+
+    const { res, headers, out } = fakeRes()
+    await handler(fakeReq({ headers: { host: '10.0.0.5:3080', 'sec-fetch-site': 'cross-site' } }), res)
+
+    expect(out().status).toBe(403)
+    expect(out().body['error']).toBe('forbidden')
+    expect(settings.describeCalls()).toBe(reads)
+    expect(headers['cache-control']).toBe('no-store')
+  })
+
+  it('answers a method that is neither GET nor POST with 405', async () => {
+    const { handler } = await mounted({ aliyun: profile })
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'DELETE' }), res)
+
+    expect(out().status).toBe(405)
+    expect(out().body['error']).toBe('method not allowed')
+  })
+
+  it('stores a new key, labels it and leaves the one in use alone', async () => {
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-secret' })
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-spare', alias: 'spare' } }), res)
+
+    const reply = out()
+    expect(reply.status).toBe(200)
+    expect(reply.body['enabledRef']).toBe('ALIYUN_KEY')
+    expect(credentials.values['ALIYUN_API_KEY']).toBe('sk-spare')
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_API_KEY', alias: 'spare' }])
+    expect(reply.body['entries']).toEqual([
+      { ref: 'ALIYUN_API_KEY', enabled: false, configured: true, alias: 'spare', masked: maskKeyValue('sk-spare') },
+      { ref: 'ALIYUN_KEY', enabled: true, configured: true, masked: maskKeyValue('sk-secret') },
+    ])
+  })
+
+  it('makes the first key on a route that names none the one in use', async () => {
+    const credentials = credentialStore()
+    const { handler, settings } = await mounted(
+      { aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', models: [] } },
+      credentials,
+    )
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-first' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(out().body['enabledRef']).toBe('ALIYUN_API_KEY')
+    const providers = settings.providers() as Record<string, Record<string, unknown>>
+    expect(providers['aliyun']?.['apiKeyEnv']).toBe('ALIYUN_API_KEY')
+    expect(settings.mutations).toHaveLength(1)
+  })
+
+  it('refuses a key value that is not printable ASCII before writing anything', async () => {
+    const credentials = credentialStore()
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk with space' } }), res)
+
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('printable ASCII')
+    expect(Object.keys(credentials.values)).toEqual([])
+    expect(existsSync(indexFile())).toBe(false)
+  })
+
+  it('surfaces a credential store that refuses the value, and indexes nothing', async () => {
+    const credentials: Store = {
+      ...credentialStore(),
+      set: async () => ({ ok: false, error: 'the store is read-only' }),
+    }
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-new' } }), res)
+
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('read-only')
+    // A reference the index lists but the store cannot hold is unusable, so the
+    // index must not have learned about it.
+    expect(existsSync(indexFile())).toBe(false)
+  })
+
+  it('mints a reference that skips the ones the index already holds', async () => {
+    writeKeyIndex(
+      { version: 1, providers: { aliyun: [{ ref: 'ALIYUN_API_KEY' }, { ref: 'ALIYUN_API_KEY_2' }] } },
+      indexFile(),
+    )
+    const credentials = credentialStore({ ALIYUN_KEY: 'a' })
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-third' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(credentials.values['ALIYUN_API_KEY_3']).toBe('sk-third')
+  })
+
+  it('enables a listed key by writing the profile reference the adapter resolves', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] } }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'a', ALIYUN_KEY_2: 'b' })
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'enable', ref: 'ALIYUN_KEY_2' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(out().body['enabledRef']).toBe('ALIYUN_KEY_2')
+    expect(settings.mutations[0]?.ops).toEqual([
+      { op: 'set', path: ['providers', 'aliyun', 'apiKeyEnv'], value: 'ALIYUN_KEY_2' },
+    ])
+    const providers = settings.providers() as Record<string, Record<string, unknown>>
+    expect(providers['aliyun']?.['apiKeyEnv']).toBe('ALIYUN_KEY_2')
+  })
+
+  it('keeps the key it switched away from on the list', async () => {
+    // The seat leaving a key the index never listed must not take that key off
+    // the list: it was a row a moment ago, unlisted it falls out of reach, and
+    // the name it held is then free for a later add to mint over its value.
+    const running = { ...profile, apiKeyEnv: 'ALIYUN_API_KEY' }
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_API_KEY_2' }] } }, indexFile())
+    const credentials = credentialStore({ ALIYUN_API_KEY: 'sk-old', ALIYUN_API_KEY_2: 'sk-new' })
+    const { handler } = await mounted({ aliyun: running }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'enable', ref: 'ALIYUN_API_KEY_2' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([
+      { ref: 'ALIYUN_API_KEY_2' },
+      { ref: 'ALIYUN_API_KEY' },
+    ])
+    const rows = (out().body['entries'] as Array<Record<string, unknown>>).map(entry => entry['ref'])
+    expect(rows).toEqual(['ALIYUN_API_KEY_2', 'ALIYUN_API_KEY'])
+
+    const added = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-third' } }), added.res)
+    expect(added.out().status).toBe(200)
+    expect(credentials.values['ALIYUN_API_KEY']).toBe('sk-old')
+    expect(credentials.values['ALIYUN_API_KEY_3']).toBe('sk-third')
+  })
+
+  it('refuses to enable or rename a key the provider does not list', async () => {
+    const { handler, settings } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'a' }))
+
+    const enabling = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'enable', ref: 'NOPE_KEY' } }), enabling.res)
+    expect(enabling.out().status).toBe(400)
+    expect(String(enabling.out().body['error'])).toContain('not listed for this provider')
+
+    const renaming = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'rename', ref: 'NOPE_KEY', alias: 'x' } }), renaming.res)
+    expect(renaming.out().status).toBe(400)
+
+    const removing = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'remove', ref: 'NOPE_KEY' } }), removing.res)
+    expect(removing.out().status).toBe(400)
+
+    expect(settings.mutations).toHaveLength(0)
+    expect(existsSync(indexFile())).toBe(false)
+  })
+
+  it('adds a spare key beside the running one instead of overwriting it', async () => {
+    // The profile names the reference the plugin would have minted itself, which
+    // is the ordinary case for a card the official page configured: a list made
+    // from the index alone hands that very name back, and the new secret lands
+    // on top of the key the provider is running on.
+    const running = { ...profile, apiKeyEnv: 'ALIYUN_API_KEY' }
+    const credentials = credentialStore({ ALIYUN_API_KEY: 'sk-running' })
+    const { handler } = await mounted({ aliyun: running }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-spare' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(credentials.values['ALIYUN_API_KEY']).toBe('sk-running')
+    expect(credentials.values['ALIYUN_API_KEY_2']).toBe('sk-spare')
+  })
+
+  it('labels the key the provider is running on, listing it for the first time', async () => {
+    // Nothing has ever been listed, so the profile alone names the key in use —
+    // and that is the row a user most wants a name for.
+    const { handler } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'a' }))
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'rename', ref: 'ALIYUN_KEY', alias: 'prod' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY', alias: 'prod' }])
+    const entries = out().body['entries'] as Array<Record<string, unknown>>
+    expect(entries[0]?.['ref']).toBe('ALIYUN_KEY')
+    expect(entries[0]?.['alias']).toBe('prod')
+    expect(entries[0]?.['enabled']).toBe(true)
+  })
+
+  it('renames a listed key without moving it in the list', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] } }, indexFile())
+    const { handler } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'a' }))
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'rename', ref: 'ALIYUN_KEY_2', alias: '  spare  ' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([
+      { ref: 'ALIYUN_KEY' },
+      { ref: 'ALIYUN_KEY_2', alias: 'spare' },
+    ])
+    const entries = out().body['entries'] as Array<Record<string, unknown>>
+    expect(entries[1]?.['alias']).toBe('spare')
+  })
+
+  it('replaces the stored secret of a listed key without touching its name or seat', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] } }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-old', ALIYUN_KEY_2: 'sk-spare' })
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'value', ref: 'ALIYUN_KEY', value: 'sk-new-secret' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(out().body['enabledRef']).toBe('ALIYUN_KEY')
+    // The adapter resolves the profile's reference, so that is now the new value.
+    expect(credentials.values['ALIYUN_KEY']).toBe('sk-new-secret')
+    // Only the secret moved: the index still lists the same name in the same seat.
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }])
+    expect(settings.mutations).toHaveLength(0)
+  })
+
+  it('refuses to replace a key the provider does not list, or one that was not named at all', async () => {
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-secret' })
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    const unknown = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'value', ref: 'NOPE_KEY', value: 'sk-other' } }), unknown.res)
+    expect(unknown.out().status).toBe(400)
+    expect(unknown.out().body['error']).toBe('that key is not listed for this provider')
+
+    const unnamed = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'value', value: 'sk-other' } }), unnamed.res)
+    expect(unnamed.out().status).toBe(400)
+    expect(unnamed.out().body['error']).toBe('that key is not listed for this provider')
+
+    expect(credentials.values['NOPE_KEY']).toBeUndefined()
+    expect(credentials.values['ALIYUN_KEY']).toBe('sk-secret')
+    expect(existsSync(indexFile())).toBe(false)
+  })
+
+  it('refuses a replacement value that is not printable ASCII before writing anything', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-secret' })
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    for (const value of ['sk with space', '']) {
+      const { res, out } = fakeRes()
+      await handler(fakeReq({ method: 'POST', body: { op: 'value', ref: 'ALIYUN_KEY', value } }), res)
+      expect(out().status).toBe(400)
+      expect(out().body['error']).toBe('a key must be printable ASCII without spaces')
+    }
+    expect(credentials.values['ALIYUN_KEY']).toBe('sk-secret')
+  })
+
+  it('replaces the key in use even when the index has never listed it', async () => {
+    // The profile names a reference the index does not (written by the official
+    // page, or by hand). It is still the key the adapter resolves, so it is
+    // still the row a replacement may target.
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-old' })
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'value', ref: 'ALIYUN_KEY', value: 'sk-new' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(out().body['enabledRef']).toBe('ALIYUN_KEY')
+    expect(credentials.values['ALIYUN_KEY']).toBe('sk-new')
+    expect(out().body['entries']).toEqual([
+      { ref: 'ALIYUN_KEY', enabled: true, configured: true, masked: maskKeyValue('sk-new') },
+    ])
+    // Nothing to index: the reference was already in use, never listed.
+    expect(existsSync(indexFile())).toBe(false)
+  })
+
+  it('hands the seat over before it forgets the key that held it', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] } }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'a', ALIYUN_KEY_2: 'b' })
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'remove', ref: 'ALIYUN_KEY' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(out().body['enabledRef']).toBe('ALIYUN_KEY_2')
+    expect(credentials.values['ALIYUN_KEY']).toBeUndefined()
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY_2' }])
+    // One write only: the profile never names a reference the store just lost.
+    expect(settings.mutations).toHaveLength(1)
+  })
+
+  it('clears the profile reference when the last key on a route is removed', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'a' })
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'remove', ref: 'ALIYUN_KEY' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(out().body['enabledRef']).toBeNull()
+    expect(out().body['entries']).toEqual([])
+    expect(settings.mutations[0]?.ops).toEqual([{ op: 'unset', path: ['providers', 'aliyun', 'apiKeyEnv'] }])
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toBeUndefined()
+  })
+
+  it('re-reads and retries a settings write that lost a race', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] } }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'a', ALIYUN_KEY_2: 'b' })
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+
+    settings.failNextMutation()
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'enable', ref: 'ALIYUN_KEY_2' } }), res)
+
+    expect(out().status).toBe(200)
+    expect(out().body['enabledRef']).toBe('ALIYUN_KEY_2')
+    expect(settings.mutations).toHaveLength(1)
+  })
+
+  it('gives up on a write that keeps losing the race', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
+    const { handler, settings } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'a' }))
+
+    // Two failed attempts exhaust the retry budget.
+    settings.failNextMutation(2)
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'enable', ref: 'ALIYUN_KEY' } }), res)
+
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('the settings document moved')
+    expect(settings.mutations).toHaveLength(0)
+  })
+
+  it('reports an operation it does not serve', async () => {
+    const { handler } = await mounted({ aliyun: profile }, credentialStore())
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'nope' } }), res)
+
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('unknown key operation "nope"')
+  })
+
+  it('reports an empty body as an unknown operation rather than throwing', async () => {
+    const { handler } = await mounted({ aliyun: profile }, credentialStore())
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST' }), res)
+
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('unknown key operation ""')
   })
 })
 

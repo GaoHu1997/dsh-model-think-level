@@ -7,7 +7,7 @@
 
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createScanState, effectiveStagedIntents, flushOnUnload, queueWriteInto, reconcile, stageEffortsInto, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
+import { adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, queueWriteInto, reconcile, stageEffortsInto, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
 import { suggestEfforts, type ReasoningEfforts } from '../src/knowledge.js'
 import type { RemoteApi } from '../src/client/types.js'
 
@@ -1577,5 +1577,161 @@ describe('batch writes (one route, one mutate)', () => {
     // retry re-sends the same complete array.
     expect(deps.mutate).toHaveBeenCalledTimes(1)
     expect(state.queued.get('aliyun')?.size).toBe(2)
+  })
+})
+
+/**
+ * The provider-wide auto-adapt seat (user request ⑤) rides the same scan that
+ * finds the model rows: one control per card, seated in that card's catalogue
+ * head, naming the route the card edits. What happens on a click is the
+ * editors' business (see editor.spec.tsx); what the injector owes is a seat
+ * that shows up with the rows, is not duplicated by its own reconciles, and
+ * leaves when the rows do.
+ */
+describe('the auto-adapt seat', () => {
+  it('seats one control per card, naming the route that card edits', async () => {
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+
+    await settle(() => reconcile(root, deps, state), state)
+
+    const seats = Array.from(root.querySelectorAll<HTMLButtonElement>('.bre-auto-effort'))
+    // Two model rows, one catalogue: exactly one control.
+    expect(seats).toHaveLength(1)
+    expect(seats[0]!.getAttribute('data-bre-auto-effort')).toBe('aliyun')
+    expect(seats[0]!.textContent).toBe('autoAdaptAll')
+    expect(seats[0]!.title).toBe('autoAdaptAllHint')
+    // This fixture's catalogue renders no head, so it becomes the head.
+    expect(seats[0]!.parentElement?.className).toBe('modelCatalog')
+  })
+
+  it('seats beside the official fetch link when the head renders one', async () => {
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    root.querySelector('.modelCatalog')!.insertAdjacentHTML(
+      'afterbegin',
+      '<div class="modelListHead"><button class="linkButton" type="button">获取可用模型</button></div>',
+    )
+
+    await settle(() => reconcile(root, deps, state), state)
+
+    const head = root.querySelector('.modelListHead')!
+    expect(head.lastElementChild?.className).toBe('bre-link-button bre-auto-effort')
+    expect(head.lastElementChild?.previousElementSibling?.className).toBe('linkButton')
+  })
+
+  it('is idempotent: its own scan does not seat a second control', async () => {
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    await settle(() => reconcile(root, deps, state), state)
+    await settle(() => reconcile(root, deps, state), state)
+    expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(1)
+  })
+
+  it('takes the seat away when the open card has no models left', async () => {
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    // The card has to stay OPEN across the second pass, and the host's own
+    // action row is what says so: with the models gone and no action row, the
+    // scan reads the page as "no card", lands idle work and returns before it
+    // ever reaches the seat.
+    root.querySelector('.editor')!.insertAdjacentHTML(
+      'beforeend',
+      '<div class="editorActions"><button type="button">Apply</button></div>',
+    )
+    await settle(() => reconcile(root, deps, state), state)
+    expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(1)
+
+    // A card with no rows has nothing to adapt, and the seat is this plugin's
+    // OWN DOM: no React unmount would ever take it away.
+    for (const entry of Array.from(root.querySelectorAll('.modelEntry'))) entry.remove()
+    await settle(() => reconcile(root, deps, state), state)
+    expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(0)
+  })
+
+  it('keeps the seat while every model row is collapsed', async () => {
+    // The regression this covers (m04987): a collapsed row renders no
+    // `modelAdvanced` container, and the scan used to drop every row that had
+    // none — so the provider-wide control appeared only AFTER the user
+    // unfolded a model, which is the opposite of what it is for.
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    for (const advanced of Array.from(root.querySelectorAll('.modelAdvanced'))) advanced.remove()
+
+    await settle(() => reconcile(root, deps, state), state)
+
+    expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(1)
+    // There is nowhere to mount yet: the editors arrive the moment a chevron
+    // renders a container, and the next scan picks them up.
+    expect(deps.mount).not.toHaveBeenCalled()
+  })
+
+  it('adapts every model of the provider on one click, collapsed rows included', async () => {
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    for (const advanced of Array.from(root.querySelectorAll('.modelAdvanced'))) advanced.remove()
+    await settle(() => reconcile(root, deps, state), state)
+
+    // The click has to reach the rows nothing on screen can answer for: the
+    // seat publishes the document request (the mounted editors' channel) AND
+    // hands the route to the settings-document walk.
+    root.querySelector<HTMLButtonElement>('.bre-auto-effort')!.click()
+    for (let tick = 0; tick < 40 && (state.queued.get('aliyun')?.size ?? 0) < 2; tick += 1) {
+      await new Promise(resolve => { setTimeout(resolve, 0) })
+    }
+
+    const held = state.queued.get('aliyun')
+    expect(held?.size).toBe(2)
+    // The knowledge base's generic `qwen` entry: an off/high ladder, text-only.
+    expect(held?.get('qwen-max')?.efforts).toEqual({ off: null, high: 'high' })
+    expect(held?.get('qwen-turbo')?.efforts).toEqual({ off: null, high: 'high' })
+    expect(held?.get('qwen-turbo')?.input).toEqual(['text'])
+    // Held, not written: an open official card owns the document, and its own
+    // Save is what lands this (issue #7 / C2).
+    expect(deps.mutate).not.toHaveBeenCalled()
+  })
+
+  it('leaves the rows that have their own editor to that editor', async () => {
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    // Unfold ONLY the first row. Its editor holds the user's in-flight draft,
+    // which the document-side walk cannot see, so the walk must skip it while
+    // still adapting the collapsed row beside it.
+    root.querySelectorAll('.modelAdvanced')[1]!.remove()
+    await settle(() => reconcile(root, deps, state), state)
+    expect(deps.mount).toHaveBeenCalledTimes(1)
+
+    await adaptEveryModel(state, deps, 'aliyun')
+
+    const held = state.queued.get('aliyun')
+    expect(held?.has('qwen-turbo')).toBe(true)
+    expect(held?.has('qwen-max')).toBe(false)
+  })
+
+  it('adapts nothing on a read-only page', async () => {
+    const deps = makeDeps({ describeNamespace: async () => ({ ...join, writable: false }) })
+    const state = createScanState()
+
+    await adaptEveryModel(state, deps, 'aliyun')
+
+    expect(state.queued.size).toBe(0)
+  })
+
+  it('ignores a route the settings document does not declare', async () => {
+    // A create card's typed Provider ID names a route nothing can be held
+    // against yet: its own rows stage, and the staging lands with the route.
+    const deps = makeDeps()
+    const state = createScanState()
+
+    await adaptEveryModel(state, deps, 'acme-gateway')
+
+    expect(state.queued.size).toBe(0)
   })
 })

@@ -9,6 +9,42 @@ export const PLUGIN_ID = 'dsh-model-think-level'
 
 /** Same-origin host route that proxies a provider's RAW /models listing. */
 export const PROBE_PATH = '/dsh-model-think-level/raw-models'
+/** Read-only diagnostics for the request-header takeover. */
+export const DIAG_PATH = '/dsh-model-think-level/header-bridge'
+
+/**
+ * Same-origin host route that resolves one provider profile's stored
+ * credential, so the API-key field's eye can show a SAVED key.
+ *
+ * The harness keeps provider keys write-only on purpose: the settings document
+ * carries only the profile's `apiKeyEnv` reference, and the credential service
+ * reports `{ configured, source, writable }` through `describe()` — never the
+ * value. Only the host can read it (`credentials.resolve()`), and it does so
+ * for the request adapters; the browser normally never sees a stored key at
+ * all. This route is the plugin's deliberate exception: an explicit,
+ * user-initiated, same-fence read that answers with the value and is never
+ * cached, so the eye can put it back into the official field.
+ */
+export const PROVIDER_KEY_PATH = '/dsh-model-think-level/provider-key'
+
+/**
+ * Same-origin host route that owns a provider's list of API keys: their
+ * references, their labels, and which one is in use.
+ *
+ * The harness has no notion of "several keys for one provider": a profile names
+ * exactly one reference (`apiKeyEnv`) and a credential store holds exactly one
+ * value per reference, with no enumeration and no label. Both facts are
+ * deliberate — a configuration surface learns which references exist from its
+ * settings schema — so a list of keys can only be plugin-owned state. It lives
+ * in the harness home (`<DSH_HOME>/dsh-model-think-level/key-index.json`) rather
+ * than in the pi-ai profile, so the official add-provider card, which writes the
+ * WHOLE profile at `providers.<route>`, cannot drop it.
+ *
+ * The route both reads and writes: the values themselves still go to the
+ * credential store through the host's own `credentials` service, so the browser
+ * never needs a new Remote face.
+ */
+export const KEY_INDEX_PATH = '/dsh-model-think-level/key-index'
 
 /**
  * Same-origin host route that reports this plugin's autofill switches. The

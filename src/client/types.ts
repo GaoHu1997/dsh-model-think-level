@@ -314,6 +314,38 @@ export interface PendingWrite {
   defaultEffort?: DefaultEffortIntent
 }
 
+/**
+ * The parts {@link pendingWriteOf} assembles into one {@link PendingWrite}:
+ * the already-resolved ladder and modality intents plus the compat triple the
+ * merge needs. Shared by the two writers of a suggestion — the row's own
+ * editor and the injector's provider-wide adapt — so one suggestion can never
+ * produce two different documents.
+ */
+export interface PendingWriteParts {
+  /** The ladder intent, exactly as the caller resolved it ('keep' = touch nothing). */
+  efforts: EffortWriteIntent
+  /** The modality intent, when this write made one. */
+  input?: InputIntent
+  /**
+   * The compat fields the caller assembled by hand. A row whose editor never
+   * touched them passes the row's OWN stored compat: a hand-tuned field the
+   * suggestion does not carry must survive the write, not be cleared by it.
+   */
+  manualCompat?: CompatSuggestion
+  /** The compat block of an applied suggestion, which the manual fields override. */
+  appliedCompat?: CompatSuggestion
+  /** The route's wire protocol: what decides the owned (clearable) compat keys. */
+  routeApi?: string
+  /**
+   * The row's stored compat, read only for the thinking-budget default: an
+   * openai-completions endpoint that already supports a budget but names no
+   * field gets the conventional `thinking_token_budget`.
+   */
+  initialCompat?: CompatSuggestion
+  /** The per-model default-effort intent, when this write made one. */
+  defaultEffort?: DefaultEffortIntent
+}
+
 /** The write seam the effort editor needs. */
 export interface EffortEditorApi {
   /** Ask for a knowledge-base / protocol suggestion for one model. */

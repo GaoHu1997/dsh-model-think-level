@@ -28,10 +28,12 @@ import {
   LEVEL_ORDER,
   sameEfforts,
   type DraftLevels,
+  type EffortIntent,
 } from './effort.js'
 import { defaultWireRisk } from './wire-preview.js'
 import { suggestEfforts } from '../knowledge.js'
-import type { EffortEditorApi } from './types.js'
+import { listenAutoEffort, queueAutoEffort } from './auto-effort.js'
+import type { EffortEditorApi, EffortWriteIntent, PendingWrite, PendingWriteParts } from './types.js'
 
 /** Thousands-grouped token counts, matching the official capacity inputs. */
 const COUNT = new Intl.NumberFormat('en-US')
@@ -100,7 +102,7 @@ export interface EffortEditorProps {
 }
 
 /** Draft state of the modality part: declared or inheriting, image or not. */
-interface DraftModality {
+export interface DraftModality {
   declared: boolean
   image: boolean
 }
@@ -108,13 +110,13 @@ interface DraftModality {
 /** Read the stored declaration into a draft. Empty mirrors undefined: the
  * resolved settings layer materializes absent arrays as [], and core reads
  * that as "no answer here" -- never as a phantom text-only declaration. */
-function modalityFrom(input: InputModalities | undefined): DraftModality {
+export function modalityFrom(input: InputModalities | undefined): DraftModality {
   if (input === undefined || input.length === 0) return { declared: false, image: false }
   return { declared: true, image: input.includes('image') }
 }
 
 /** Resolve a modality draft to the write intent (null = durably unset). */
-function buildModalityIntent(draft: DraftModality): InputModalities | null {
+export function buildModalityIntent(draft: DraftModality): InputModalities | null {
   if (!draft.declared) return null
   return draft.image ? ['text', 'image'] : ['text']
 }
@@ -165,10 +167,92 @@ export function compatClearIntent(
 }
 
 /** Semantic equality between a modality draft and a stored declaration. */
-function sameModality(draft: DraftModality, stored: InputModalities | undefined): boolean {
+export function sameModality(draft: DraftModality, stored: InputModalities | undefined): boolean {
   if (!draft.declared) return stored === undefined
   if (stored === undefined) return false
   return draft.image ? stored.includes('image') : !stored.includes('image')
+}
+
+/**
+ * The ladder part of a write, from a switch state and the draft it resolves to.
+ *
+ * `'keep'` when nothing is armed and nothing is stored: that is a no-op, NOT an
+ * unset — an undefined there would stamp the durable unset marker onto a
+ * never-declared model and silence host auto-fill.
+ * @param nextThinking - the (pre-update) switch state the edit resolved to.
+ * @param built - `buildIntent` of the draft the edit resolved to, which is the
+ *   explicit `false` when the only armed level is 'off'.
+ * @param initialEfforts - the row's stored declaration.
+ * @returns the ladder intent to write.
+ */
+export function ladderIntent(
+  nextThinking: boolean,
+  built: EffortIntent,
+  initialEfforts: EffortWriteIntent | undefined,
+): EffortWriteIntent {
+  const next = nextThinking ? built : false
+  return nextThinking && next === undefined && initialEfforts === undefined ? 'keep' : next
+}
+
+/**
+ * The compat draft a FRESH editor on this row would hold.
+ *
+ * The editor's three compat inputs are seeded from the stored block, so an
+ * untouched editor's draft is exactly the stored block restricted to the three
+ * fields it shows. The injector's provider-wide adapt has no editor to ask for
+ * a draft, so it derives the same value here: a hand-tuned field the UI does
+ * not show stays untouchable, and one it does show survives the write.
+ * @param compat - the row's stored compat block.
+ * @returns the draft, or undefined when it holds no field at all.
+ */
+export function compatDraftOf(compat: CompatSuggestion | undefined): CompatSuggestion | undefined {
+  const out: CompatSuggestion = {}
+  const budgetField = compat?.thinkingTokenBudgetField ?? ''
+  // The cast is the same one the editor's own compatDraft applies to its state
+  // string: the stored block is already typed, and a hand-tuned spelling the
+  // plugin's union does not name must survive the round trip unchanged.
+  if (budgetField !== '') out.thinkingTokenBudgetField = budgetField as CompatSuggestion['thinkingTokenBudgetField']
+  const priorityText = compat?.vllmPriority === undefined ? '' : String(compat.vllmPriority)
+  const pruned = priorityText.trim()
+  if (pruned !== '' && /^-?\d+$/.test(pruned)) out.vllmPriority = Number.parseInt(pruned, 10)
+  const maxOutput = compat?.supportsMaxOutputTokens === undefined ? '' : String(compat.supportsMaxOutputTokens)
+  if (maxOutput === 'true') out.supportsMaxOutputTokens = true
+  else if (maxOutput === 'false') out.supportsMaxOutputTokens = false
+  return Object.keys(out).length === 0 ? undefined : out
+}
+
+/**
+ * Assemble one complete pending write from the parts a caller resolved: the
+ * compat merge (the applied suggestion's block with the caller's own fields on
+ * top), the thinking-budget default an openai-completions endpoint needs, and
+ * the clear list for the fields this write OWNS and left empty.
+ *
+ * The single implementation of that assembly: the row's own editor reports the
+ * user's edits through it, and the injector's provider-wide adapt reports
+ * collapsed rows through it, so the same suggestion always writes the same
+ * bytes whichever path applied it.
+ * @param parts - the resolved parts (see {@link PendingWriteParts}).
+ * @returns the write to hand the injector's ledger.
+ */
+export function pendingWriteOf(parts: PendingWriteParts): PendingWrite {
+  const baseCompat = parts.appliedCompat
+  const manualCompat = parts.manualCompat
+  let writeCompat = baseCompat !== undefined ? { ...baseCompat, ...(manualCompat ?? {}) } : manualCompat
+  if (
+    parts.initialCompat?.supportsThinkingTokenBudget === true
+    && parts.initialCompat?.thinkingTokenBudgetField === undefined
+    && writeCompat?.thinkingTokenBudgetField === undefined
+    && (parts.routeApi ?? '').toLowerCase() === 'openai-completions'
+  ) {
+    writeCompat = { ...(writeCompat ?? {}), thinkingTokenBudgetField: 'thinking_token_budget' }
+  }
+  return {
+    efforts: parts.efforts,
+    ...(writeCompat === undefined ? {} : { compat: writeCompat }),
+    ...(parts.input === undefined ? {} : { input: parts.input }),
+    ...compatClearIntent(parts.routeApi, writeCompat),
+    ...(parts.defaultEffort === undefined ? {} : { defaultEffort: parts.defaultEffort }),
+  }
 }
 
 /**
@@ -219,6 +303,23 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   const previousEfforts = useRef<false | ReasoningEfforts | undefined>(initialEfforts)
   const previousInput = useRef<InputModalities | undefined>(initialInput)
   const previousDefaultEffort = useRef<string | undefined>(initialDefaultEffort)
+  // The auto-adapt closure of the LATEST render, for the listener below: that
+  // closure reads this render's props and state, but the subscription has to
+  // outlive them, so the listener reaches it through a ref instead of
+  // re-subscribing on every render.
+  const autoAdaptRef = useRef<(() => Promise<void>) | undefined>(undefined)
+
+  // The catalogue head's "adapt every model" seat (user request ⑤) publishes
+  // one request per provider. This row answers it with the same autoAdapt()
+  // its own link runs, so every model of the provider adapts exactly as it
+  // would from N clicks — including the rows whose thinking switch is off,
+  // where the link itself is not rendered at all. Queued, because every adapt
+  // reads the provider's own model list.
+  useEffect(() => listenAutoEffort((target) => {
+    if (target !== route) return
+    const run = autoAdaptRef.current
+    if (run !== undefined) queueAutoEffort(run)
+  }), [route])
 
   useEffect(() => {
     if (!sameEfforts(previousEfforts.current, initialEfforts)) {
@@ -331,33 +432,33 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   ): void => {
     // OFF is the explicit `false` declaration, whatever the draft still holds
     // (the draft is deliberately left alone, so flipping back loses no edits).
-    const next = nextThinking ? buildIntent(nextDraft) : false
-    const effortsIntent = nextThinking && next === undefined && initialEfforts === undefined
-      ? 'keep' as const
-      : next
+    const effortsIntent = ladderIntent(nextThinking, buildIntent(nextDraft), initialEfforts)
     // The modality part travels ONLY when this edit actually changed it: an
     // untouched row must omit the intent entirely -- a null would stamp the
     // durable inputUnset marker onto modalities the user never decided about.
     const nextInput = sameModality(nextModality, initialInput) ? undefined : buildModalityIntent(nextModality)
-    const manualCompat = compatDraft()
-    const baseCompat = appliedCompatRef.current
-    let writeCompat = baseCompat !== undefined ? { ...baseCompat, ...(manualCompat ?? {}) } : manualCompat
-    if (initialCompat?.supportsThinkingTokenBudget === true && initialCompat?.thinkingTokenBudgetField === undefined && writeCompat?.thinkingTokenBudgetField === undefined && (routeApi ?? '').toLowerCase() === 'openai-completions') {
-      writeCompat = { ...(writeCompat ?? {}), thinkingTokenBudgetField: 'thinking_token_budget' }
-    }
     const defaultEffortOut = nextDefaultEffort === (initialDefaultEffort ?? '')
       ? undefined
       : nextDefaultEffort === '' ? null : nextDefaultEffort
-    const signature = JSON.stringify([effortsIntent, nextInput, writeCompat ?? null, defaultEffortOut ?? null])
+    // The compat merge, the owned-key clear list and the thinking-budget
+    // default live in ONE place ({@link pendingWriteOf}), shared with the
+    // injector's provider-wide adapt: a suggestion must write the same bytes
+    // whichever path applied it.
+    const write = pendingWriteOf({
+      efforts: effortsIntent,
+      input: nextInput,
+      defaultEffort: defaultEffortOut,
+      manualCompat: compatDraft(),
+      appliedCompat: appliedCompatRef.current,
+      routeApi,
+      initialCompat,
+    })
+    // The payload IS the identity: two edits that resolve to the same write are
+    // the same report, whatever draft states produced them.
+    const signature = JSON.stringify(write)
     if (lastCommitRef.current === signature) return
     lastCommitRef.current = signature
-    api.commit(route, modelId, {
-      efforts: effortsIntent,
-      ...(writeCompat === undefined ? {} : { compat: writeCompat }),
-      ...(nextInput === undefined ? {} : { input: nextInput }),
-      ...compatClearIntent(routeApi, writeCompat),
-      ...(defaultEffortOut === undefined ? {} : { defaultEffort: defaultEffortOut }),
-    })
+    api.commit(route, modelId, write)
     // "Modified" is DERIVED, never messaged: every handler below clears the
     // message in the same batch, so a pending-save message set here would be
     // overwritten on the very turn it became true (React folds both updates).
@@ -493,6 +594,12 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   }
 
   const autoAdapt = async (): Promise<void> => {
+    // The link that normally calls this is `disabled` while the row is
+    // read-only or already working, so the gate had to be the button's. The
+    // provider-wide seat request (user request ⑤) calls THIS directly and
+    // bypasses the button entirely, so the same gate has to live here or a
+    // read-only row would be written.
+    if (readOnly || busy) return
     setBusy(true)
     setMessage(undefined)
     try {
@@ -512,6 +619,10 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
       setBusy(false)
     }
   }
+
+  // Hand the listener above the closure of this render. An effect rather than a
+  // write during render: React may discard a render it never commits.
+  useEffect(() => { autoAdaptRef.current = autoAdapt })
 
   const reset = (): void => {
     // Back to the SAVED declarations, not to "everything off": Reset means
