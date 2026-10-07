@@ -1,12 +1,16 @@
-# A pushed v* tag IS the release decision; this workflow only turns it into
-# the GitHub release page, so a tag can never again land without its release.
-# When a body file exists for the tag (.github/releases/<tag>.md) it becomes
-# the release notes verbatim; otherwise GitHub's generated notes apply.
+# A pushed v* tag IS the release decision; this workflow turns it into the
+# npm publish and the GitHub release page, so a tag can never again land
+# without its release.
 #
-# That body file is a LOCAL draft: .gitignore excludes .github/releases/, and
-# it stays excluded. Never `git add -f` it to "make the notes available" --
-# this workflow already falls back to generated notes, so force-adding only
-# publishes a document the repository deliberately does not carry.
+# Publishing is guarded the way dsh-git-branch learned to: an empty or
+# truncated NPM_TOKEN fails loudly before any build, and a `pnpm whoami`
+# preflight distinguishes a rejected credential from a missing package, so a
+# 404 after auth is never misread as a permission problem.
+#
+# When a body file exists for the tag (.github/releases/<tag>.md) it becomes
+# the release notes verbatim; otherwise GitHub's generated notes apply. That
+# body file is a LOCAL draft: .gitignore excludes .github/releases/, and it
+# stays excluded -- the workflow's fallback makes force-adding pointless.
 name: release
 
 on:
@@ -22,6 +26,51 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      # .npmrc pins legacy-peer-deps=true (see ci.yml); `npm ci` also runs the
+      # `prepare` script, so a broken build fails before publish.
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Guard the publish credential
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::secret NPM_TOKEN is not set — publishing is refused (set it to an npm Automation token, or a granular token with bypass-2FA enabled)"
+            exit 1
+          fi
+          if [ "${#NPM_TOKEN}" -lt 30 ]; then
+            echo "::warning::NPM_TOKEN is only ${#NPM_TOKEN} characters — an npm access token is about 40, so this looks truncated"
+          fi
+      - name: Preflight the npm identity
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          NPMRC="$(mktemp)"
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$NPMRC"
+          NPM_CONFIG_USERCONFIG="$NPMRC" npm whoami --registry https://registry.npmjs.org/ > /tmp/npm-user 2>&1 \
+            || { echo "::error::NPM_TOKEN was rejected by npm: $(cat /tmp/npm-user)"; exit 1; }
+          echo "Authenticated on npm as: $(cat /tmp/npm-user)"
+          rm -f "$NPMRC"
+      - name: Publish to npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_USERCONFIG: /tmp/publish.npmrc
+        run: |
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > /tmp/publish.npmrc
+          # The tag must equal v${package.json.version}: publishing a version
+          # the tag does not name would divorce the release page from npm.
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$PKG_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version v$PKG_VERSION"
+            exit 1
+          fi
+          npm publish --registry https://registry.npmjs.org/ --tag latest
+          rm -f /tmp/publish.npmrc
       - name: Create the GitHub release for the pushed tag
         env:
           GH_TOKEN: ${{ github.token }}
