@@ -257,8 +257,17 @@ export const STYLES = `
 }
 /* The official trigger keeps ownership of its model/effort children. The
    provider prefix is a pseudo-element so host React updates, focus handling and
-   the click target remain untouched. */
-button[data-bre-provider]::before {
+   the click target remain untouched.
+
+   Scoped to the composer, which owns the only button that carries this stamp.
+   The settings sidebar's account button is ALSO an [aria-haspopup="menu"]
+   button, so an unscoped rule paints the prefix onto the account row the
+   moment a stale stamp lands there — and a stamp that escaped the composer
+   must render nothing rather than relabel a host control. The seat anchor is
+   listed too, so a shell that renders the trigger outside the card body still
+   gets the prefix. */
+[data-composer-card] button[data-bre-provider]::before,
+[data-slot="conversation.input.model"] button[data-bre-provider]::before {
   content: attr(data-bre-provider) " · ";
   flex: none;
   color: var(--dsw-alias-label-secondary);

@@ -65,6 +65,26 @@ function buildComposerMenu(): HTMLElement {
   return card
 }
 
+/**
+ * The settings sidebar's account row: the shell's OTHER menu trigger.
+ *
+ * It is a plain `button[aria-haspopup="menu"]` living outside any composer
+ * card, and the shell renders it on every page — the plugin pages included.
+ */
+function buildAccountRow(): HTMLButtonElement {
+  const row = document.createElement('div')
+  row.className = 'footArea'
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.setAttribute('aria-label', 'menu')
+  button.setAttribute('aria-haspopup', 'menu')
+  button.setAttribute('aria-expanded', 'false')
+  button.innerHTML = '<span class="avatar"></span><span class="label">奋斗的小高</span>'
+  row.appendChild(button)
+  document.body.appendChild(row)
+  return button
+}
+
 /** The models page add area (the toggle never mounts there). */
 function buildAddBlock(): HTMLElement {
   const section = document.createElement('div')
@@ -544,6 +564,44 @@ describe('client apply()', () => {
       h.disposeAll()
       // Fiber disposal restores the directory's original select.
       expect(directory.select).toBe(originalSelect)
+    }
+  })
+
+  it('never stamps a menu button outside the composer card (the settings sidebar account row)', async () => {
+    // Regression: the decoration pass asked the finder for "the" menu trigger.
+    // With the composer unmounted (the plugin pages) the document-wide search
+    // answered with the sidebar's account button, so the provider prefix was
+    // painted onto the account row — "商汤 · 奋斗的小高".
+    const account = buildAccountRow()
+    const directory = directoryFixture()
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => directory },
+      },
+    })
+    try {
+      const card = buildComposerMenu()
+      const seat = card.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+
+      // Positive control: the pass runs and stamps OUR seat, so the directory
+      // is resolved and the account row has been visible to every pass since.
+      await waitFor(() => seat.dataset['breProvider'] === 'Aliyun')
+      expect(account.hasAttribute('data-bre-provider')).toBe(false)
+
+      // Now the reported shape: the composer is gone (the user clicked into the
+      // plugin pages) while the account row stays. Waiting for the seat's stamp
+      // to be dropped proves a pass ran WITHOUT a composer card — the pass that
+      // used to relabel the account row.
+      card.remove()
+      await waitFor(() => seat.dataset['breProvider'] === undefined)
+      expect(account.hasAttribute('data-bre-provider')).toBe(false)
+      expect(account.textContent).toBe('奋斗的小高')
+    } finally {
+      h.disposeAll()
     }
   })
 

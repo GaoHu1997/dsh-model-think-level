@@ -91,6 +91,29 @@ describe('findModelMenu', () => {
 
     expect(findModelMenu()).toBeUndefined()
   })
+
+  it('ignores an open menu belonging to another surface when no composer is mounted', () => {
+    // The settings sidebar's account button is a menu trigger the shell renders
+    // on every page — including the plugin pages, where no composer exists. Its
+    // open menu is NOT the seat's popover.
+    const account = trigger('account-menu')
+    account.setAttribute('aria-label', 'menu')
+    document.body.appendChild(account)
+    document.body.appendChild(menu('account-menu'))
+
+    expect(findModelMenu()).toBeUndefined()
+  })
+
+  it('ignores another surface menu while a composer card without a seat is mounted', () => {
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    card.appendChild(trigger(null))
+    document.body.appendChild(card)
+    document.body.appendChild(menu('account-menu'))
+    document.body.appendChild(trigger('account-menu'))
+
+    expect(findModelMenu()).toBeUndefined()
+  })
 })
 
 describe('findModelTrigger', () => {
@@ -124,5 +147,64 @@ describe('findModelTrigger', () => {
     document.body.appendChild(card)
 
     expect(findModelTrigger()).toBe(seat)
+  })
+
+  it('never returns a menu trigger outside the composer card', () => {
+    // No composer mounted: the decoration pass still runs on every mutation
+    // burst, and the sidebar's account button is the only menu trigger around.
+    const account = trigger('account-menu')
+    account.setAttribute('aria-label', 'menu')
+    document.body.appendChild(account)
+    document.body.appendChild(menu('account-menu'))
+
+    expect(findModelTrigger()).toBeUndefined()
+  })
+
+  it('prefers the trigger inside the model slot anchor over an earlier menu trigger', () => {
+    // The composer card also hosts the permission selector, itself a
+    // button[aria-haspopup="menu"], rendered BEFORE the trailing row the seat
+    // lives in. The seat's slot anchor names it without relying on order.
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const permission = trigger(null)
+    permission.setAttribute('aria-label', 'Permission')
+    card.appendChild(permission)
+    const anchor = document.createElement('div')
+    anchor.setAttribute('data-slot', 'conversation.input.model')
+    const seat = trigger(null)
+    anchor.appendChild(seat)
+    card.appendChild(anchor)
+    document.body.appendChild(card)
+
+    expect(findModelTrigger()).toBe(seat)
+  })
+
+  it('falls back to the last card menu trigger when no slot anchor is rendered', () => {
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const permission = trigger(null)
+    permission.setAttribute('aria-label', 'Permission')
+    card.appendChild(permission)
+    const seat = trigger(null)
+    card.appendChild(seat)
+    document.body.appendChild(card)
+
+    expect(findModelTrigger()).toBe(seat)
+  })
+
+  it('keeps the linked open menu authoritative over the slot anchor', () => {
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const anchor = document.createElement('div')
+    anchor.setAttribute('data-slot', 'conversation.input.model')
+    const seat = trigger('tid-menu')
+    anchor.appendChild(seat)
+    card.appendChild(anchor)
+    document.body.appendChild(card)
+    const open = menu('tid-menu')
+    document.body.appendChild(open)
+
+    expect(findModelTrigger()).toBe(seat)
+    expect(findModelMenu()).toBe(open)
   })
 })
