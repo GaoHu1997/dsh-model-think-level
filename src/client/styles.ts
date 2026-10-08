@@ -1589,12 +1589,13 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   display: none;
 }
 
-/* With the heading gone the head holds nothing but controls, so they group at
-   the start of the row (the official rule spreads them to opposite edges) and
-   centre against each other — the host's links are 28px tall, the seat is not.
-   The official gap is left alone: the seat's own 4px margin tops it up. */
+/* With the heading gone the head holds nothing but controls, so they group as
+   ONE centred cluster (the official rule spreads them to opposite edges, which
+   strands the two links at the far left of a full-width card) and centre
+   against each other — the host's links are 28px tall, the seat is not. The
+   official gap is left alone: the seat's own 4px margin tops it up. */
 .bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] {
-  justify-content: flex-start;
+  justify-content: center;
   align-items: center;
 }
 

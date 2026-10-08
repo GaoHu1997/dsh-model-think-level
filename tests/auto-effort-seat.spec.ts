@@ -321,11 +321,13 @@ describe('reconcileAutoEffortSeats', () => {
     // so the rule above cannot take them — and the seat is anchored to them.
     expect(STYLES).not.toContain("[class*='modelCatalogTitle']")
     expect(STYLES).not.toContain("[class*='modelCatalogMeta']")
-    // With the heading gone the head holds only controls: they group at its
-    // start instead of being spread to opposite edges by the official rule.
+    // With the heading gone the head holds only controls: they group as ONE
+    // centred cluster instead of being spread to opposite edges by the
+    // official rule — a flex-start row strands the two links at the far left
+    // of a full-width card, which reads as a misaligned, unfinished row.
     expect(STYLES).toContain(
       ".bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] {\n" +
-      '  justify-content: flex-start;\n' +
+      '  justify-content: center;\n' +
       '  align-items: center;\n' +
       '}',
     )
