@@ -16,7 +16,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest'
 import { AUTO_EFFORT_EVENT, type AutoEffortDetail } from '../src/client/auto-effort.js'
-import { reconcileAutoEffortSeats, teardownAutoEffortSeats, type AutoEffortSeatTarget } from '../src/client/injection/auto-effort-seat.js'
+import { cataloguesOf, reconcileAutoEffortSeats, teardownAutoEffortSeats, type AutoEffortSeatTarget } from '../src/client/injection/auto-effort-seat.js'
 import { STYLES } from '../src/client/styles.js'
 
 afterEach(() => { document.body.innerHTML = ''; teardownAutoEffortSeats() })
@@ -43,6 +43,35 @@ function catalogue(links: readonly string[] = ['获取可用模型']): { section
   section.insertAdjacentHTML('beforeend', '<div class="_3nPmjq_modelList"></div>')
   document.body.append(section)
   return { section, head }
+}
+
+/**
+ * The catalogue AS THE HOST REALLY RENDERS IT (client.js ModelsSection): the
+ * head carries a heading box whose title and meta are class-name matches of
+ * `modelCatalog` themselves. The plain {@link catalogue} fixture above omits
+ * them, which is exactly why the four-match bug went unnoticed — every
+ * enumeration of `[class*="modelCatalog"]` saw only the section.
+ */
+function headingCatalogue(): { section: HTMLElement; head: HTMLElement; heading: HTMLElement } {
+  const section = document.createElement('section')
+  section.className = '_3nPmjq_modelCatalog'
+  section.setAttribute('aria-label', '模型目录')
+  section.innerHTML = `
+    <div class="_3nPmjq_modelListHead">
+      <div class="_3nPmjq_modelCatalogHeading">
+        <span class="_3nPmjq_modelCatalogTitle">模型目录</span>
+        <span class="_3nPmjq_modelCatalogMeta">已自定义模型目录</span>
+      </div>
+      <button type="button" class="_3nPmjq_linkButton">恢复默认模型</button>
+      <button type="button" class="_3nPmjq_linkButton">获取可用模型</button>
+    </div>
+    <p class="_3nPmjq_modelEmpty">模型选择器中将不显示任何模型；目录外 ID 仍可直接发送。</p>`
+  document.body.append(section)
+  return {
+    section,
+    head: section.querySelector<HTMLElement>('._3nPmjq_modelListHead')!,
+    heading: section.querySelector<HTMLElement>('._3nPmjq_modelCatalogHeading')!,
+  }
 }
 
 const seats = (): HTMLButtonElement[] => Array.from(document.querySelectorAll<HTMLButtonElement>('.bre-auto-effort'))
@@ -219,8 +248,86 @@ describe('reconcileAutoEffortSeats', () => {
     expect(seats()).toHaveLength(0)
   })
 
+  it('finds the catalogue CONTAINER, not the heading nested inside it', () => {
+    // The class-name stem is a SUBSTRING probe, and the official heading, its
+    // title and its meta all carry it too. Only the outermost element is a
+    // catalogue: enumerating the rest seats controls inside the heading, and
+    // the official column-flex text then collapses to a character per line —
+    // the empty-catalogue layout break (deleting a provider's last model).
+    const { section, heading } = headingCatalogue()
+    // Scoped from an ancestor (the panel root, a card) the section is the ONE
+    // container; the three nested matches are dropped.
+    expect(cataloguesOf(document.body)).toEqual([section])
+    // The nested matches are real: this is exactly what the old probe
+    // enumerated, three of them inside the heading box.
+    expect(section.querySelectorAll('[class*="modelCatalog"]')).toHaveLength(3)
+    expect(heading.querySelectorAll('[class*="modelCatalog"]')).toHaveLength(2)
+    // A scope that IS the catalogue finds no container: the probe looks at
+    // descendants, and callers pass a card or the panel root, never a section.
+    expect(cataloguesOf(section)).toEqual([])
+  })
+
+  it('seats ONE control beside the head controls of a real heading catalogue', () => {
+    const { section, head, heading } = headingCatalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], deps)
+    // One seat for the card — not four, one per class-name match.
+    expect(seats()).toHaveLength(1)
+    // Beside the host's own links, in the head, and OUTSIDE the heading box
+    // whose text must stay at its natural width.
+    expect(head.lastElementChild).toBe(seat())
+    expect(heading.querySelector('.bre-auto-effort')).toBeNull()
+    expect(seat().previousElementSibling?.className).toBe('_3nPmjq_linkButton')
+    expect(seat().textContent).toBe('autoAdaptAll')
+  })
+
+  it('reduces an already-broken card to one seat and takes the nested ones out', () => {
+    // A card a previous build broke holds four seats, three of them inside the
+    // heading. The head-level seat is re-used, so a pass that only re-seated
+    // would leave the nested ones beside it — the sweep has to enforce one
+    // seat per catalogue.
+    const { section, head, heading } = headingCatalogue()
+    for (const nested of [heading, heading.firstElementChild!, heading.lastElementChild!]) {
+      const stray = document.createElement('button')
+      stray.className = 'bre-link-button bre-auto-effort'
+      stray.setAttribute('data-bre-auto-effort', 'aliyun')
+      stray.textContent = '自动获取思考等级'
+      nested.append(stray)
+    }
+    expect(seats()).toHaveLength(3)
+
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], deps)
+
+    expect(seats()).toHaveLength(1)
+    expect(head.lastElementChild).toBe(seat())
+    expect(heading.querySelector('.bre-auto-effort')).toBeNull()
+  })
+
   it('styles the seat as one more control of the official head', () => {
     expect(STYLES).toContain('.bre-auto-effort {')
     expect(STYLES).toContain('margin-left: 4px;')
+  })
+
+  it('hides the official catalogue heading, and leaves the head controls in place', () => {
+    // "模型目录" names the pane the Models tab has already named, and
+    // "已自定义模型目录" says nothing at all — the rows below ARE the
+    // customized catalogue. Both are the host's own strings, so they go by
+    // class stem; the heading takes its title and meta with it.
+    expect(STYLES).toContain(
+      ".bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelCatalogHeading'] {\n" +
+      '  display: none;\n' +
+      '}',
+    )
+    // 恢复默认模型 / 获取可用模型 are the heading's SIBLINGS, not its children,
+    // so the rule above cannot take them — and the seat is anchored to them.
+    expect(STYLES).not.toContain("[class*='modelCatalogTitle']")
+    expect(STYLES).not.toContain("[class*='modelCatalogMeta']")
+    // With the heading gone the head holds only controls: they group at its
+    // start instead of being spread to opposite edges by the official rule.
+    expect(STYLES).toContain(
+      ".bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] {\n" +
+      '  justify-content: flex-start;\n' +
+      '  align-items: center;\n' +
+      '}',
+    )
   })
 })

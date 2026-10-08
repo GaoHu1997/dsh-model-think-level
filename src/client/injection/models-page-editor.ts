@@ -41,7 +41,7 @@ import {
 } from '../EffortEditor.js'
 import { compatOf, createEditorApi, defaultEffortOf, effortsOf, inputOf, nameOf, providersOf, writeModelRows, type RowIntent } from '../ops.js'
 import type { EffortEditorApi, EffortWriteIntent, HeldWrite, RemoteApi, SettingsJoin } from '../types.js'
-import { reconcileAutoEffortSeats, type AutoEffortSeatTarget } from './auto-effort-seat.js'
+import { cataloguesOf, reconcileAutoEffortSeats, type AutoEffortSeatTarget } from './auto-effort-seat.js'
 import { panelRoot } from './mount.js'
 
 export type { SettingsJoin }
@@ -1114,7 +1114,11 @@ function emptyCatalogTargets(
   labels: HostLabels,
 ): AutoEffortSeatTarget[] {
   const targets: AutoEffortSeatTarget[] = []
-  for (const catalogue of Array.from(root.querySelectorAll<HTMLElement>('[class*="modelCatalog"]'))) {
+  // The CONTAINERS, not every element whose class name carries the stem: the
+  // heading, the title and the meta are matches too, and seating inside them
+  // collapses the official heading to one character per line. See
+  // {@link cataloguesOf}.
+  for (const catalogue of cataloguesOf(root)) {
     const card = cardOf(catalogue)
     if (card === undefined) continue
     const resolved = routeOfCard(card, providers, labels)
@@ -1136,8 +1140,8 @@ function autoEffortTargets(
     seen.add(model.card)
     const resolved = routeOfCard(model.card, providers, labels)
     if (resolved === undefined) continue
-    const catalogue = model.card.querySelector<HTMLElement>('[class*="modelCatalog"]')
-    if (catalogue === null) continue
+    const [catalogue] = cataloguesOf(model.card)
+    if (catalogue === undefined) continue
     targets.push({ catalogue, route: resolved.route })
   }
   return targets

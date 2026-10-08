@@ -61,6 +61,27 @@ export interface AutoEffortSeatDeps {
 }
 
 /**
+ * The catalogue CONTAINERS inside a scope: the outermost matches only.
+ *
+ * {@link CATALOG_PROBE} is a class-name SUBSTRING, and the official catalogue
+ * renders three more elements whose class names carry it — the heading, the
+ * title and the meta nested inside the section. Only the outermost match IS a
+ * catalogue, so the container is defined structurally here instead of by a
+ * second list of class names to keep in step: seating a control in one of the
+ * other three drops a button inside the heading, and the official
+ * column-flex text then collapses to a character per line (the
+ * empty-catalogue layout break).
+ *
+ * The sweep in {@link reconcileAutoEffortSeats} deliberately asks the NEAREST
+ * match instead: a seat a previous pass left inside the heading belongs to no
+ * catalogue this pass names, so it comes out.
+ */
+export function cataloguesOf(scope: HTMLElement): HTMLElement[] {
+  return Array.from(scope.querySelectorAll<HTMLElement>(CATALOG_PROBE))
+    .filter(candidate => (candidate.parentElement?.closest(CATALOG_PROBE) ?? null) === null)
+}
+
+/**
  * Give every target's catalogue head an auto-adapt seat. Idempotent: a head
  * that already has one is only relabelled and re-seated, and a seat whose
  * catalogue this pass no longer names is taken out.
@@ -93,9 +114,19 @@ export function reconcileAutoEffortSeats(
   }
   // The target set is the only state the seat set may hold: a seat whose
   // catalogue is gone — or that a React re-render moved out of one — comes out.
+  // The NEAREST match answers, so a seat a previous pass left inside the
+  // heading (whose own class name carries the stem, but which is not a
+  // catalogue) belongs to nothing this pass names and goes. One head holds one
+  // seat: the loop above re-homes a nested seat to head level, which would
+  // otherwise leave it beside the seat that was already there.
+  const seated = new Set<HTMLElement>()
   for (const seat of Array.from(root.querySelectorAll<HTMLElement>(`[${SEAT_ATTR}]`))) {
     const catalogue = seat.closest<HTMLElement>(CATALOG_PROBE)
-    if (catalogue === null || !wanted.has(catalogue)) seat.remove()
+    if (catalogue === null || !wanted.has(catalogue) || seated.has(catalogue)) {
+      seat.remove()
+      continue
+    }
+    seated.add(catalogue)
   }
 }
 

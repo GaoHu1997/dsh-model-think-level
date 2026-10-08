@@ -1578,6 +1578,26 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   padding-top: 0;
 }
 
+/* The catalogue heading names a box this pane has already named for the user:
+   the Models tab IS the catalogue, so "模型目录" says it twice, and
+   "已自定义模型目录" (the meta line beside it) says nothing at all — the rows
+   below ARE the customized catalogue. Both strings are the host's own, so they
+   go by class stem, and the heading takes its title and meta with it. The
+   head's own controls (恢复默认模型 / 获取可用模型) are siblings of the heading,
+   not children, so they stay — the auto-adapt seat is anchored to them. */
+.bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelCatalogHeading'] {
+  display: none;
+}
+
+/* With the heading gone the head holds nothing but controls, so they group at
+   the start of the row (the official rule spreads them to opposite edges) and
+   centre against each other — the host's links are 28px tall, the seat is not.
+   The official gap is left alone: the seat's own 4px margin tops it up. */
+.bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] {
+  justify-content: flex-start;
+  align-items: center;
+}
+
 /* The API-key eye. The official key field is a plain flex column whose input is
    its last in-flow child, so the button hangs on the field's own box and is
    measured against the input's 32px row — the official markup offers no

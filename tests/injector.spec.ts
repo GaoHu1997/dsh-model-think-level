@@ -1658,6 +1658,49 @@ describe('the auto-adapt seat', () => {
     expect(root.querySelector('.modelListHead')?.lastElementChild?.classList.contains('bre-auto-effort')).toBe(true)
   })
 
+  it('seats ONE control when the empty card renders the real catalogue heading', async () => {
+    // The regression this covers: the official heading, its title and its meta
+    // are class-name matches of `modelCatalog` themselves, so the
+    // empty-catalogue enumeration saw FOUR "catalogues" per card and seated a
+    // control inside each — which collapsed the heading to one character per
+    // line and strung the extra seats across the card. It only fired on the
+    // empty-catalogue branch, i.e. exactly when the last model was deleted.
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    root.querySelector('.editor')!.insertAdjacentHTML(
+      'beforeend',
+      '<div class="editorActions"><button type="button">Apply</button></div>',
+    )
+    const catalog = root.querySelector('.modelCatalog')!
+    catalog.insertAdjacentHTML(
+      'afterbegin',
+      '<div class="modelListHead">' +
+        '<div class="modelCatalogHeading">' +
+        '<span class="modelCatalogTitle">模型目录</span>' +
+        '<span class="modelCatalogMeta">已自定义模型目录</span>' +
+        '</div>' +
+        '<button class="linkButton" type="button">恢复默认模型</button>' +
+        '<button class="linkButton" type="button">获取可用模型</button>' +
+        '</div>',
+    )
+    // Delete every model: the host keeps the head, drops the rows.
+    for (const entry of Array.from(root.querySelectorAll('.modelEntry'))) entry.remove()
+
+    await settle(() => reconcile(root, deps, state), state)
+
+    expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(1)
+    const head = root.querySelector('.modelListHead')!
+    const heading = root.querySelector('.modelCatalogHeading')!
+    // Beside the host's links, in the head, and OUTSIDE the heading box whose
+    // text must keep its natural width.
+    expect(head.lastElementChild?.classList.contains('bre-auto-effort')).toBe(true)
+    expect(heading.querySelector('.bre-auto-effort')).toBeNull()
+    // A settled second pass stays idempotent with the heading present.
+    await settle(() => reconcile(root, deps, state), state)
+    expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(1)
+  })
+
   it('keeps the seat while every model row is collapsed', async () => {
     // The regression this covers (m04987): a collapsed row renders no
     // `modelAdvanced` container, and the scan used to drop every row that had

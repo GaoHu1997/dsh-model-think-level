@@ -342,4 +342,21 @@ describe('the seat contract with the stylesheet', () => {
       '}',
     )
   })
+
+  it('hides the official catalogue heading, keeping its sibling controls', () => {
+    // "模型目录" is the pane the Models tab already names, and
+    // "已自定义模型目录" says nothing at all: the rows below ARE the customized
+    // catalogue. Both strings belong to the host's locale, so they are hidden
+    // by class stem rather than edited.
+    expect(STYLES).toContain(
+      ".bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelCatalogHeading'] {\n" +
+      '  display: none;\n' +
+      '}',
+    )
+    // 恢复默认模型 and 获取可用模型 are the heading's siblings, never its
+    // children, so hiding the heading cannot take them — and the auto-adapt
+    // seat is anchored to them.
+    expect(STYLES).not.toContain("[class*='modelCatalogTitle']")
+    expect(STYLES).not.toContain("[class*='modelCatalogMeta']")
+  })
 })
