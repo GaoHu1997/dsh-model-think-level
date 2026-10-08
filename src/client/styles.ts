@@ -57,11 +57,31 @@ export const STYLES = `
 .bre-link-button:hover { text-decoration: underline; }
 .bre-link-button:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 .bre-auto-effort {
-  /* Seated in the OFFICIAL catalogue head, beside the host's own fetch link:
-     it borrows the plugin's link metrics and only adds the gap the head's own
-     controls are spaced by, so it reads as one more control of that row. */
-  margin-left: 4px;
+  /* Seated in the OFFICIAL catalogue head, among the host's own controls, so it
+     wears THEIR metrics instead of the plugin's blue underlined link look
+     (user request: "不要超链接样式，跟另外两个保持一致"). These values mirror
+     the host's own linkButton rule; the seat cannot simply take that class,
+     because it would then answer the probe that finds the anchor it sits after.
+     No extra margin: the head's own 12px gap already spaces it exactly like the
+     controls beside it. */
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--dsw-radius-sm, 8px);
+  background: none;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
   flex: none;
+}
+.bre-auto-effort:hover {
+  background: var(--dsw-alias-interactive-bg-hover, #2631480f);
+  color: var(--dsw-alias-label-secondary, #374151);
 }
 .bre-effort-grid {
   /* Exactly two equal columns mirroring the official capacity pair the editor

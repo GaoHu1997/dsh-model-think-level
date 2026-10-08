@@ -1601,7 +1601,8 @@ describe('the auto-adapt seat', () => {
     expect(seats).toHaveLength(1)
     expect(seats[0]!.getAttribute('data-bre-auto-effort')).toBe('aliyun')
     expect(seats[0]!.textContent).toBe('autoAdaptAll')
-    expect(seats[0]!.title).toBe('autoAdaptAllHint')
+    // No tooltip: the seat reads as one more control of the host's own head.
+    expect(seats[0]!.getAttribute('title')).toBeNull()
     // This fixture's catalogue renders no head, so it becomes the head.
     expect(seats[0]!.parentElement?.className).toBe('modelCatalog')
   })
@@ -1618,7 +1619,7 @@ describe('the auto-adapt seat', () => {
     await settle(() => reconcile(root, deps, state), state)
 
     const head = root.querySelector('.modelListHead')!
-    expect(head.lastElementChild?.className).toBe('bre-link-button bre-auto-effort')
+    expect(head.lastElementChild?.className).toBe('bre-auto-effort')
     expect(head.lastElementChild?.previousElementSibling?.className).toBe('linkButton')
   })
 

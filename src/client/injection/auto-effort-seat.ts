@@ -44,8 +44,14 @@ const HEAD_PROBE = '[class*="modelListHead"]'
 /** The host's own link-shaped control, probed the same way. */
 const LINK_PROBE = 'button[class*="linkButton"]'
 
-/** The seat's class: `bre-link-button` gives it the shared link metrics. */
-const SEAT_CLASS = 'bre-link-button bre-auto-effort'
+/**
+ * The seat's class.
+ *
+ * It carries no plugin link class: the seat stands among the host's own head
+ * controls and wears THEIR metrics, not the plugin's underlined link look
+ * (user request: "不要超链接样式，跟另外两个保持一致").
+ */
+const SEAT_CLASS = 'bre-auto-effort'
 
 /** The bubble's class, and the phase it carries for the sheet. */
 const NOTE_CLASS = 'bre-auto-effort-note'
@@ -79,7 +85,7 @@ export interface AutoEffortSeatTarget {
 export type AutoAdaptAnswer = AutoAdaptReport | void | Promise<AutoAdaptReport | void>
 
 export interface AutoEffortSeatDeps {
-  /** The plugin's own translator, for the label and the tooltip. */
+  /** The plugin's own translator, for the label the seat carries. */
   t: (key: string, params?: Record<string, string | number>) => string
   /**
    * Adapt every model of the route that has no on-screen editor, and REPORT
@@ -95,7 +101,7 @@ export interface AutoEffortSeatDeps {
  * What the seat says about the last click on one route.
  *
  * A verdict is FEEDBACK, not state, and it is not painted onto the control: the
- * head's button keeps its label, its tooltip and its enabledness, because a
+ * head's button keeps its label and its enabledness, because a
  * button that rewrites itself into "已适配 3 个" is a different control every
  * time the user looks at it — and the next click has to be readable as the same
  * action as the last one. The verdict appears in a bubble at the top of the
@@ -174,7 +180,6 @@ export function reconcileAutoEffortSeats(
     wanted.set(target.catalogue, target.route)
   }
   const label = deps.t('autoAdaptAll')
-  const hint = deps.t('autoAdaptAllHint')
   for (const [catalogue, route] of wanted) {
     const head = catalogue.querySelector<HTMLElement>(HEAD_PROBE) ?? catalogue
     const seat = head.querySelector<HTMLButtonElement>(`[${SEAT_ATTR}]`) ?? createSeat(deps)
@@ -186,7 +191,7 @@ export function reconcileAutoEffortSeats(
     } else if (head.lastElementChild !== seat) {
       head.append(seat)
     }
-    syncSeat(seat, route, label, hint)
+    syncSeat(seat, route, label)
   }
   // The target set is the only state the seat set may hold: a seat whose
   // catalogue is gone — or that a React re-render moved out of one — comes out.
@@ -377,14 +382,14 @@ function wordsOf(outcome: SeatOutcome, deps: AutoEffortSeatDeps): { text: string
 }
 
 /** Make the seat stand for this route, compare-before-write on every field. */
-function syncSeat(seat: HTMLElement, route: string, label: string, hint: string): void {
+function syncSeat(seat: HTMLElement, route: string, label: string): void {
   if (seat.getAttribute(SEAT_ATTR) !== route) seat.setAttribute(SEAT_ATTR, route)
   // Guarded: the page's observer watches childList, and replacing the seat's
   // text node on every scan would make each pass feed the next one. The label
   // is the IDLE label and never the verdict: see the module comment.
   if (seat.textContent !== label) seat.textContent = label
-  // The label IS the accessible name (a text button names itself), so the
-  // scope goes in the tooltip only: an aria-label that replaced the visible
-  // word would break "click 自动获取思考等级" for voice control (WCAG 2.5.3).
-  if (seat.getAttribute('title') !== hint) seat.setAttribute('title', hint)
+  // No tooltip: the seat reads as one more control of the host's own head, and
+  // the host gives ITS controls none unless they can be blocked (user request:
+  // "也不要鼠标悬浮提示"). The label alone names the action, as it does there.
+  if (seat.getAttribute('title') !== null) seat.removeAttribute('title')
 }

@@ -98,7 +98,7 @@ describe('reconcileAutoEffortSeats', () => {
     reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], deps)
     expect(seats()).toHaveLength(1)
     const only = seat()
-    expect(only.className).toBe('bre-link-button bre-auto-effort')
+    expect(only.className).toBe('bre-auto-effort')
     expect(only.type).toBe('button')
     expect(only.textContent).toBe('autoAdaptAll')
     // Beside the link, not inside it: the link's own click must stay the host's.
@@ -122,8 +122,10 @@ describe('reconcileAutoEffortSeats', () => {
     // The text content IS the accessible name, and it stays the visible word.
     expect(only.textContent).toBe('autoAdaptAll')
     expect(only.getAttribute('aria-label')).toBeNull()
-    // The scope (every model of this provider, not just this card) is a tooltip.
-    expect(only.getAttribute('title')).toBe('autoAdaptAllHint')
+    // And no tooltip either: the host gives its own head controls none, so one
+    // here would be the plugin speaking in a row that is otherwise the host's.
+    expect(only.getAttribute('title')).toBeNull()
+    expect(only.title).toBe('')
   })
 
   it('is idempotent: a settled second pass writes nothing at all', async () => {
@@ -288,7 +290,7 @@ describe('reconcileAutoEffortSeats', () => {
     const { section, head, heading } = headingCatalogue()
     for (const nested of [heading, heading.firstElementChild!, heading.lastElementChild!]) {
       const stray = document.createElement('button')
-      stray.className = 'bre-link-button bre-auto-effort'
+      stray.className = 'bre-auto-effort'
       stray.setAttribute('data-bre-auto-effort', 'aliyun')
       stray.textContent = '自动获取思考等级'
       nested.append(stray)
@@ -303,8 +305,21 @@ describe('reconcileAutoEffortSeats', () => {
   })
 
   it('styles the seat as one more control of the official head', () => {
+    // The host's own linkButton rule, mirrored: a 28px inline-flex control with
+    // the tertiary label colour and a hover BACKGROUND. It is mirrored rather
+    // than borrowed, because the seat cannot carry the host's own class name
+    // without answering the probe that finds the link it sits after.
     expect(STYLES).toContain('.bre-auto-effort {')
-    expect(STYLES).toContain('margin-left: 4px;')
+    expect(STYLES).toContain('  height: 28px;\n')
+    expect(STYLES).toContain('  padding: 0 10px;\n')
+    expect(STYLES).toContain('  display: inline-flex;\n')
+    expect(STYLES).toContain('  color: var(--dsw-alias-label-tertiary, #6b7280);\n')
+    expect(STYLES).toContain('.bre-auto-effort:hover {')
+    expect(STYLES).toContain('  background: var(--dsw-alias-interactive-bg-hover, #2631480f);\n')
+    // Not the plugin's link look, and no gap compensation of its own: the
+    // head's own 12px gap spaces it exactly like the controls beside it.
+    expect(STYLES).toContain('.bre-auto-effort')
+    expect(STYLES).not.toContain('margin-left: 4px;\n  flex: none;')
   })
 
   it('hides the official catalogue heading, and leaves the head controls in place', () => {
@@ -392,9 +407,10 @@ describe('auto-adapt seat feedback', () => {
     // they land only when the user saves the card.
     expect(detail()).toBe('autoAdaptDoneHint:3')
     expect(note().getAttribute('data-bre-auto-effort-phase')).toBe('done')
-    // The control the user aimed at is EXACTLY as it was.
+    // The control the user aimed at is EXACTLY as it was: same label, no
+    // tooltip of its own, still enabled.
     expect(seat().textContent).toBe('autoAdaptAll')
-    expect(seat().getAttribute('title')).toBe('autoAdaptAllHint')
+    expect(seat().getAttribute('title')).toBeNull()
     expect(seat().disabled).toBe(false)
   })
 
@@ -537,7 +553,7 @@ describe('auto-adapt seat feedback', () => {
     await flush()
     expect(notes()).toHaveLength(0)
     expect(seat().textContent).toBe('autoAdaptAll')
-    expect(seat().getAttribute('title')).toBe('autoAdaptAllHint')
+    expect(seat().getAttribute('title')).toBeNull()
     expect(seat().disabled).toBe(false)
   })
 
