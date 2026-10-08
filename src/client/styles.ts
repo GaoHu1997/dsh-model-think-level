@@ -1619,7 +1619,9 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    inside that dialog. Pointer-events none keeps it out of the way, the phase
    colours the headline so the outcome reads before the words do, and the
    hold/fade pair is timed by --bre-note-hold, which the script sets from the
-   same constant it uses for the dismissal. */
+   same constant it uses for the dismissal. The fade is counted INSIDE that
+   hold, so the bubble is gone when the clock says it is, rather than fading
+   after it. */
 .bre-auto-effort-note {
   position: fixed;
   top: 40px;
@@ -1638,7 +1640,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   line-height: 20px;
   pointer-events: none;
   transform: translateX(-50%);
-  animation: bre-note-in 160ms ease-out, bre-note-out 400ms ease var(--bre-note-hold, 8000ms) forwards;
+  animation: bre-note-in 160ms ease-out, bre-note-out 400ms ease calc(var(--bre-note-hold, 3000ms) - 400ms) forwards;
   z-index: 1200;
 }
 /* A pass in flight has no lifetime of its own: it is replaced by its verdict,
@@ -1655,7 +1657,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 @media (prefers-reduced-motion: reduce) {
   .bre-auto-effort-note {
-    animation: bre-note-out 400ms ease var(--bre-note-hold, 8000ms) forwards;
+    animation: bre-note-out 400ms ease calc(var(--bre-note-hold, 3000ms) - 400ms) forwards;
   }
   .bre-auto-effort-note[data-bre-auto-effort-phase='working'] { animation: none; }
 }

@@ -491,7 +491,7 @@ describe('auto-adapt seat feedback', () => {
     expect(said()).toBe('autoAdaptDone:1')
   })
 
-  it('takes the note away once the verdict has been read', async () => {
+  it('takes the bubble away once the verdict has been read', async () => {
     vi.useFakeTimers()
     try {
       reporting.onRequest = () => ({ held: 1, unsuggested: 0 })
@@ -500,9 +500,15 @@ describe('auto-adapt seat feedback', () => {
       seat().click()
       await vi.advanceTimersByTimeAsync(0)
       expect(said()).toBe('autoAdaptDone:1')
+      // The stylesheet times its fade from the same number the script dismisses
+      // on, so the bubble cannot fade early or linger faded (user request
+      // 悬浮时间太长了，3秒以内即可).
+      expect(note().style.getPropertyValue('--bre-note-hold')).toBe('3000ms')
+      await vi.advanceTimersByTimeAsync(2999)
+      expect(notes()).toHaveLength(1)
       // The result is feedback, not state: a chip left floating over the card
       // the user has moved on to would be in the way of the work.
-      await vi.advanceTimersByTimeAsync(8000)
+      await vi.advanceTimersByTimeAsync(1)
       expect(notes()).toHaveLength(0)
       expect(seat().textContent).toBe('autoAdaptAll')
     } finally {
@@ -568,5 +574,8 @@ describe('auto-adapt seat feedback', () => {
     // Raised from inside the settings dialog, whose overlay is z-index 1000:
     // the host's own toast layer (1100) would be drawn behind it.
     expect(STYLES).toContain('  z-index: 1200;\n')
+    // The fade is counted inside the hold, and the fallback matches the script's
+    // own constant, so the sheet is never the one keeping the bubble up.
+    expect(STYLES).toContain('calc(var(--bre-note-hold, 3000ms) - 400ms)')
   })
 })

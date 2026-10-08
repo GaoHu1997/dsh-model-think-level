@@ -58,9 +58,10 @@ const NOTE_DETAIL_CLASS = 'bre-auto-effort-note-detail'
  *
  * A result is feedback, not state: it answers the click the user just made, and
  * the setting it describes is visible in the rows themselves. A bubble that
- * outlives the moment would sit over the card the user is now working in.
+ * outlives the moment would sit over the card the user is now working in — so
+ * it lives as long as the host's own toast does, and no longer.
  */
-const OUTCOME_TTL_MS = 8000
+const OUTCOME_TTL_MS = 3000
 
 /** One card's catalogue, paired with the route that card edits. */
 export interface AutoEffortSeatTarget {
