@@ -834,11 +834,11 @@ describe('EffortEditor auto-adapt requests', () => {
     expect(checkboxes(container)[2]!.checked).toBe(false)
   })
 
-  it('adapts a row whose thinking switch is off, where the link is not even rendered', async () => {
-    // This is the whole reason the seat asks the COMPONENT instead of clicking
-    // the Auto-adapt links: with thinking off there is no effort card at all,
-    // so there is no link to click — yet those are exactly the rows that most
-    // need a declared ladder.
+  it('does not overwrite a row whose thinking is already configured, even when the switch is off', async () => {
+    // `false` is a stored decision ("this model does not reason"), not an
+    // empty row. Bulk adapt fills gaps and must leave that decision alone.
+    // The row's own link is not rendered while the switch is off; that link
+    // is a separate, per-row action and is not what this request is.
     const api = baseApi()
     api.suggest.mockResolvedValue(A_LADDER)
     const { container } = await renderEditor(baseProps({ route: 'auto-spec-d', efforts: false, api }))
@@ -846,10 +846,11 @@ describe('EffortEditor auto-adapt requests', () => {
     expect(hasButton(container, t('autoAdapt'))).toBe(false)
 
     await act(async () => { requestAutoEffort('auto-spec-d') })
+    await settle()
 
-    expect(api.suggest).toHaveBeenCalledWith('auto-spec-d', 'qwen-max', undefined)
-    expect(thinkingSwitch(container).checked).toBe(true)
-    expect(container.querySelector('.bre-effort-card')).not.toBeNull()
+    expect(api.suggest).not.toHaveBeenCalled()
+    expect(api.commit).not.toHaveBeenCalled()
+    expect(thinkingSwitch(container).checked).toBe(false)
   })
 
   it('never writes a read-only row', async () => {

@@ -36,6 +36,7 @@ import type {
   InputModalities,
   InputSource,
   ReasoningEfforts,
+  ThinkingLevel,
 } from '../knowledge.js'
 
 /** The settings answer envelope, in the official `RemoteResult` shape. */
@@ -222,6 +223,12 @@ export type SuggestReply =
         efforts: ReasoningEfforts | false
         /** The compat block to write alongside, if any. */
         compat?: CompatSuggestion
+        /**
+         * The vendor's own default level, when the knowledge base names one
+         * and the suggested ladder carries it. The row's auto-adapt and the
+         * provider-wide seat both write it as the model's starting effort.
+         */
+        defaultEffort?: ThinkingLevel
         /** Request modalities to declare, when derivable. */
         input?: InputModalities
         /** Where the modality part came from -- its confidence rides this. */

@@ -308,15 +308,20 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   // outlive them, so the listener reaches it through a ref instead of
   // re-subscribing on every render.
   const autoAdaptRef = useRef<(() => Promise<void>) | undefined>(undefined)
+  // The SAVED ladder, not the in-flight draft. Bulk adapt must not overwrite a
+  // model whose thinking levels are already configured; the row's own 自动适配
+  // link still may, because that click is about this one row.
+  const savedEffortsRef = useRef(initialEfforts)
+  savedEffortsRef.current = initialEfforts
 
   // The catalogue head's "adapt every model" seat (user request ⑤) publishes
-  // one request per provider. This row answers it with the same autoAdapt()
-  // its own link runs, so every model of the provider adapts exactly as it
-  // would from N clicks — including the rows whose thinking switch is off,
-  // where the link itself is not rendered at all. Queued, because every adapt
-  // reads the provider's own model list.
+  // one request per provider. An unconfigured row answers it with the same
+  // autoAdapt() its own link runs. A row that already has a stored ladder
+  // (including an explicit "does not reason") does not: bulk adapt fills the
+  // gaps and leaves configured levels alone. The row's own link is unaffected.
   useEffect(() => listenAutoEffort((target) => {
     if (target !== route) return
+    if (savedEffortsRef.current !== undefined) return
     const run = autoAdaptRef.current
     if (run !== undefined) queueAutoEffort(run)
   }), [route])
@@ -564,6 +569,7 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
       inputSource?: InputSource
       contextWindow?: number
       maxTokens?: number
+      defaultEffort?: string
     },
   ): void => {
     markDirty()
@@ -577,6 +583,12 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     // The suggestion's own modality, when it carries one; else the draft's.
     const nextModality = parts.input === undefined ? modality : modalityFrom(parts.input)
     if (parts.input !== undefined) setModality(nextModality)
+    // A blank pick takes the vendor default. A pick the user already chose
+    // stays: auto-adapt must not overwrite a level they set by hand.
+    const nextDefault = defaultEffort === '' && parts.defaultEffort !== undefined
+      ? parts.defaultEffort
+      : defaultEffort
+    if (nextDefault !== defaultEffort) setDefaultEffort(nextDefault)
     setSuggested(parts.efforts)
     setSuggestedSource(parts.source)
     setSuggestedConfidence(parts.confidence)
@@ -590,7 +602,7 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     })
     // One commit for the whole suggestion, so the ledger never holds the
     // ladder without the compat block that makes its wire spellings work.
-    commitPending(nextDraft, nextModality, defaultEffort, nextThinking)
+    commitPending(nextDraft, nextModality, nextDefault, nextThinking)
   }
 
   const autoAdapt = async (): Promise<void> => {

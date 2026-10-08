@@ -1081,6 +1081,49 @@ function officialInputTypesOf(container: HTMLElement): boolean {
  * catalogue, paired with the route that card edits. Deduped by card, because
  * every model row of a card shares the one catalogue head.
  */
+/**
+ * Seat the auto-adapt control on an open card whose model list is empty.
+ *
+ * The host keeps the catalogue head (获取可用模型) after the last row is
+ * deleted. The seat has to stay beside that link, or the link jumps. A card
+ * whose route cannot be read keeps whatever seat the previous pass left: a
+ * settings read that has not landed yet must not flash the control away.
+ */
+function seatEmptyCatalog(
+  root: HTMLElement,
+  deps: InjectorDeps,
+  state: ScanState,
+  join: SettingsJoin,
+  labels: HostLabels,
+): void {
+  if (!root.isConnected) return
+  if (officialCardOf(root) === undefined) return
+  const stillEmpty = !Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
+    .some(button => labels.capacity.some(label => (button.getAttribute('aria-label') ?? '').startsWith(label)))
+  if (!stillEmpty) return
+  reconcileAutoEffortSeats(root, emptyCatalogTargets(root, providersOf(join.namespace), labels), {
+    t: deps.t,
+    onRequest: route => { void adaptEveryModel(state, deps, route) },
+  })
+}
+
+/** One seat per catalogue whose card still has a head and a readable route. */
+function emptyCatalogTargets(
+  root: HTMLElement,
+  providers: Record<string, Record<string, unknown>>,
+  labels: HostLabels,
+): AutoEffortSeatTarget[] {
+  const targets: AutoEffortSeatTarget[] = []
+  for (const catalogue of Array.from(root.querySelectorAll<HTMLElement>('[class*="modelCatalog"]'))) {
+    const card = cardOf(catalogue)
+    if (card === undefined) continue
+    const resolved = routeOfCard(card, providers, labels)
+    if (resolved === undefined || resolved.staged) continue
+    targets.push({ catalogue, route: resolved.route })
+  }
+  return targets
+}
+
 function autoEffortTargets(
   found: readonly FoundModel[],
   providers: Record<string, Record<string, unknown>>,
@@ -1115,9 +1158,13 @@ function autoEffortTargets(
  * while an official card holds the document; the write is held on the route
  * and the card's own Save commits it (issue #7 / C2).
  *
- * The rows that ARE on screen keep answering for themselves: their editors
- * hold the user's unsaved draft, which this document walk cannot see, and two
- * writers for one row would let whichever ran last overwrite the other.
+ * An expanded row answers for itself when its editor is mounted. A row the
+ * user already configured (a stored ladder, an explicit "does not reason",
+ * or a deliberate unset) is left alone — bulk adapt must not overwrite that.
+ * A row that is expanded but still has no thinking-level declaration is not
+ * configured: this walk adapts it too. Two writers never share one row,
+ * because a configured expanded row is skipped here and an unconfigured one
+ * has no in-flight ladder draft to protect.
  * @param state - mutable scan state: the adapting guard and the held ledger.
  * @param deps - the injection dependencies.
  * @param route - the provider route whose models are adapted.
@@ -1142,9 +1189,13 @@ export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, rout
     if (models.length === 0) return
     const profile = providers[route] ?? {}
     const routeApi = typeof profile['api'] === 'string' ? profile['api'] as string : undefined
+    // Expanded rows whose stored ladder is already a decision. An expanded row
+    // with no declaration is NOT covered: the user asked bulk adapt to fill
+    // exactly those, the same as a collapsed row.
     const covered = new Set<string>()
     for (const entry of state.mounted.values()) {
-      if (entry.props.route === route) covered.add(entry.props.modelId)
+      if (entry.props.route !== route) continue
+      if (entry.props.efforts !== undefined) covered.add(entry.props.modelId)
     }
     const api = createEditorApi(
       deps.api,
@@ -1158,8 +1209,13 @@ export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, rout
       const modelId = typeof model['id'] === 'string' ? model['id'] : ''
       if (modelId.length === 0 || covered.has(modelId)) continue
       const initialEfforts = effortsOf(models, modelId)
+      // A collapsed row has no editor, so the document is the only record.
+      // Same rule as the expanded skip above: a stored ladder, `false`, or the
+      // durable unset marker is a decision and must survive this click.
+      if (initialEfforts !== undefined || model[UNSET_MARKER] === true) continue
       const initialInput = inputOf(models, modelId)
       const initialCompat = compatOf(models, modelId)
+      const initialDefault = defaultEffortOf(models, modelId) ?? ''
       const reply = await api.suggest(route, modelId, nameOf(models, modelId))
       // 'no-suggestion' is the normal outcome for a model with no knowledge
       // match (the seat is a bulk convenience, not a promise): leave that row
@@ -1169,11 +1225,18 @@ export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, rout
       const nextThinking = parts.efforts !== false
       // The draft a fresh editor would hold, mapped exactly as its own commit
       // maps it: an untouched ladder and an untouched modality stay out of the
-      // write rather than stamping an unset marker onto the row.
+      // write rather than stamping an unset marker onto the row. The vendor
+      // default travels the same way the row's own auto-adapt does: a fresh
+      // editor starts from the stored pick and only reports a change.
       const nextModality = parts.input === undefined ? modalityFrom(initialInput) : modalityFrom(parts.input)
+      const nextDefault = parts.defaultEffort ?? initialDefault
+      const defaultEffort = nextDefault === initialDefault
+        ? undefined
+        : nextDefault === '' ? null : nextDefault
       api.commit(route, modelId, pendingWriteOf({
         efforts: ladderIntent(nextThinking, buildIntent(draftFrom(parts.efforts)), initialEfforts),
         input: sameModality(nextModality, initialInput) ? undefined : buildModalityIntent(nextModality),
+        defaultEffort,
         manualCompat: compatDraftOf(initialCompat),
         appliedCompat: parts.compat,
         routeApi,
@@ -1430,14 +1493,20 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   }
   state.editing = true
   // An open card showing no model row has nothing to equip: the idle pass
-  // stays fenced until the card goes away (or a row appears).
+  // stays fenced until the card goes away (or a row appears). The catalogue
+  // head stays, though — the host still renders 获取可用模型 there — so the
+  // auto-adapt seat stays beside it. Taking the seat out is what made that
+  // link jump the moment the last model was deleted.
   if (!hasCapacityRows) {
-    // ...and the auto-adapt seat has nothing to adapt either. It has to come
-    // out HERE: this path returns before the row scan, so nothing else would
-    // ever sweep it, and the editors still mounted for the rows the user just
-    // deleted are detached but listening — a seat left behind would answer
-    // each click with a write for rows that are no longer on screen.
-    reconcileAutoEffortSeats(root, [], { t: deps.t })
+    for (const [, entry] of state.mounted) entry.editor.unmount()
+    state.mounted.clear()
+    state.describePromise ??= deps.describeNamespace()
+    const seatLabels = labels
+    void state.describePromise.then(join => {
+      seatEmptyCatalog(root, deps, state, join, seatLabels)
+    }).catch(error => {
+      console.error(`[bre] empty-catalog seat failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
     return
   }
   // Fold the describe request across scans (one wire read per wave). A

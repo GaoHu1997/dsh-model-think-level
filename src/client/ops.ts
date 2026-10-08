@@ -225,6 +225,8 @@ export function createEditorApi(
           // is what makes off/thinking dispatch work on deepseek/qwen/zai
           // endpoints.)
           ...(suggestion.compat === undefined ? {} : { compat: suggestion.compat }),
+          ...(suggestion.defaultEffort === undefined ? {} : { defaultEffort: suggestion.defaultEffort }),
+          ...(suggestion.defaultEffort === undefined ? {} : { defaultEffort: suggestion.defaultEffort }),
           ...(suggestion.input === undefined ? {} : { input: suggestion.input }),
           ...(suggestion.inputSource === undefined ? {} : { inputSource: suggestion.inputSource }),
           ...(suggestion.contextWindow === undefined ? {} : { contextWindow: suggestion.contextWindow }),

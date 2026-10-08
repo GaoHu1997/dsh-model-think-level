@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-think-level",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Thinking levels, vision badges and request headers for third-party models in DeepSeek Harness: pick a provider and a model inside the composer menu, gate a model's reasoning with one switch in the official Models page card, and configure per-route request headers.",
   "license": "MIT",
   "author": "GaoHu1997 <gaohu9712@163.com>",

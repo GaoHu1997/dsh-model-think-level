@@ -1631,26 +1631,31 @@ describe('the auto-adapt seat', () => {
     expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(1)
   })
 
-  it('takes the seat away when the open card has no models left', async () => {
+  it('keeps the seat when the open card has no models left', async () => {
     const deps = makeDeps()
     const state = createScanState()
     const root = buildModelsDom()
     // The card has to stay OPEN across the second pass, and the host's own
     // action row is what says so: with the models gone and no action row, the
-    // scan reads the page as "no card", lands idle work and returns before it
-    // ever reaches the seat.
+    // scan reads the page as "no card" and takes the seat out.
     root.querySelector('.editor')!.insertAdjacentHTML(
       'beforeend',
       '<div class="editorActions"><button type="button">Apply</button></div>',
     )
+    const catalog = root.querySelector('.modelCatalog')!
+    catalog.insertAdjacentHTML(
+      'afterbegin',
+      '<div class="modelListHead"><button class="linkButton" type="button">获取可用模型</button></div>',
+    )
     await settle(() => reconcile(root, deps, state), state)
     expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(1)
 
-    // A card with no rows has nothing to adapt, and the seat is this plugin's
-    // OWN DOM: no React unmount would ever take it away.
+    // The host keeps the catalogue head after the last row is deleted. The
+    // seat has to stay beside 获取可用模型, or that link jumps.
     for (const entry of Array.from(root.querySelectorAll('.modelEntry'))) entry.remove()
     await settle(() => reconcile(root, deps, state), state)
-    expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(0)
+    expect(root.querySelectorAll('.bre-auto-effort')).toHaveLength(1)
+    expect(root.querySelector('.modelListHead')?.lastElementChild?.classList.contains('bre-auto-effort')).toBe(true)
   })
 
   it('keeps the seat while every model row is collapsed', async () => {
@@ -1697,13 +1702,13 @@ describe('the auto-adapt seat', () => {
     expect(deps.mutate).not.toHaveBeenCalled()
   })
 
-  it('leaves the rows that have their own editor to that editor', async () => {
+  it('adapts an expanded row that has no thinking levels yet, and leaves a configured one', async () => {
     const deps = makeDeps()
     const state = createScanState()
     const root = buildModelsDom()
-    // Unfold ONLY the first row. Its editor holds the user's in-flight draft,
-    // which the document-side walk cannot see, so the walk must skip it while
-    // still adapting the collapsed row beside it.
+    // Unfold ONLY the first row. It is on screen, but the document still has
+    // no ladder for it, so bulk adapt must fill it — an expanded-but-empty
+    // editor is not a configured model.
     root.querySelectorAll('.modelAdvanced')[1]!.remove()
     await settle(() => reconcile(root, deps, state), state)
     expect(deps.mount).toHaveBeenCalledTimes(1)
@@ -1712,7 +1717,28 @@ describe('the auto-adapt seat', () => {
 
     const held = state.queued.get('aliyun')
     expect(held?.has('qwen-turbo')).toBe(true)
+    expect(held?.has('qwen-max')).toBe(true)
+  })
+
+  it('does not overwrite a model whose thinking levels are already configured', async () => {
+    const configured = structuredClone(join)
+    const layers = [
+      configured.namespace!.value as { providers: { aliyun: { models: Array<Record<string, unknown>> } } },
+      configured.namespace!.user as { providers: { aliyun: { models: Array<Record<string, unknown>> } } },
+    ]
+    for (const layer of layers) {
+      layer.providers.aliyun.models[0] = { ...layer.providers.aliyun.models[0], reasoningEfforts: { high: 'high' } }
+    }
+    const deps = makeDeps({ describeNamespace: async () => configured })
+    const state = createScanState()
+    const root = buildModelsDom()
+    await settle(() => reconcile(root, deps, state), state)
+
+    await adaptEveryModel(state, deps, 'aliyun')
+
+    const held = state.queued.get('aliyun')
     expect(held?.has('qwen-max')).toBe(false)
+    expect(held?.has('qwen-turbo')).toBe(true)
   })
 
   it('adapts nothing on a read-only page', async () => {
