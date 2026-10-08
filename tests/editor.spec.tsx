@@ -853,6 +853,18 @@ describe('EffortEditor auto-adapt requests', () => {
     expect(thinkingSwitch(container).checked).toBe(false)
   })
 
+  it('preserves an explicitly unset thinking declaration on a mounted row', async () => {
+    const api = baseApi()
+    api.suggest.mockResolvedValue(A_LADDER)
+    await renderEditor(baseProps({ route: 'auto-spec-unset', effortsUnset: true, api }))
+
+    await act(async () => { requestAutoEffort('auto-spec-unset') })
+    await settle()
+
+    expect(api.suggest).not.toHaveBeenCalled()
+    expect(api.commit).not.toHaveBeenCalled()
+  })
+
   it('never writes a read-only row', async () => {
     // The link is `disabled` for a read-only row, but the request reaches
     // autoAdapt() directly and would otherwise bypass that gate.

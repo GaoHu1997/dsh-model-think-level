@@ -1745,6 +1745,63 @@ describe('the auto-adapt seat', () => {
     expect(deps.mutate).not.toHaveBeenCalled()
   })
 
+  it('saves every unconfigured collapsed model with thinking and vision while preserving configured models', async () => {
+    const configured = structuredClone(join)
+    for (const layer of ['value', 'user'] as const) {
+      const models = (configured.namespace![layer] as { providers: { aliyun: { models: Array<Record<string, unknown>> } } }).providers.aliyun.models
+      models[0] = { ...models[0], reasoningEfforts: { high: 'high' }, input: ['text'] }
+      models.push(
+        { id: 'gpt-4o-mini' },
+        { id: 'deepseek-flash' },
+        { id: 'gpt-4.1', reasoningEfforts: false, input: ['text', 'image'] },
+        { id: 'gpt-4.1-mini', reasoningEffortsUnset: true, input: ['text'] },
+      )
+    }
+    const deps = makeDeps({ describeNamespace: async () => configured })
+    const state = createScanState()
+    const root = buildModelsDom()
+    for (const advanced of Array.from(root.querySelectorAll('.modelAdvanced'))) advanced.remove()
+    root.querySelector('.editor')!.insertAdjacentHTML('beforeend', `
+      <div class="editorActions">
+        <button type="button" class="secondaryButton">Cancel</button>
+        <button type="button" class="primaryButton">Apply</button>
+      </div>`)
+    await settle(() => reconcile(root, deps, state), state)
+
+    root.querySelector<HTMLButtonElement>('.bre-auto-effort')!.click()
+    for (let tick = 0; tick < 40 && (state.queued.get('aliyun')?.size ?? 0) < 3; tick += 1) {
+      await new Promise(resolve => { setTimeout(resolve, 0) })
+    }
+    const held = state.queued.get('aliyun')
+    expect([...held!.keys()]).toEqual(['qwen-turbo', 'gpt-4o-mini', 'deepseek-flash'])
+    expect(held?.get('qwen-turbo')?.input).toEqual(['text'])
+    expect(held?.get('gpt-4o-mini')?.efforts).toBe(false)
+    expect(held?.get('gpt-4o-mini')?.input).toEqual(['text', 'image'])
+    expect(held?.get('deepseek-flash')?.efforts).toEqual({ off: 'none', low: 'low', high: 'high', max: 'max' })
+    expect(held?.get('deepseek-flash')?.input).toEqual(['text', 'image'])
+    expect(deps.mutate).not.toHaveBeenCalled()
+    expect(state.signalsUnavailable).toBe(false)
+
+    // No expanded disclosure is available to wire the official Save button.
+    // The provider-wide action must still authorize the queued write.
+    root.querySelector<HTMLButtonElement>('.editorActions .primaryButton')!.click()
+    expect(state.committing.has('aliyun')).toBe(true)
+    await settleIdle(deps, state)
+    expect(deps.mutate).toHaveBeenCalledTimes(1)
+    const ops = deps.mutate.mock.calls[0]![1] as Array<{ path: string[]; value: Array<Record<string, unknown>> }>
+    expect(ops[0]!.path).toEqual(['providers', 'aliyun', 'models'])
+    const saved = ops[0]!.value
+    expect(saved.find(model => model['id'] === 'qwen-turbo')?.['input']).toEqual(['text'])
+    expect(saved.find(model => model['id'] === 'gpt-4o-mini')).toMatchObject({ reasoningEfforts: false, input: ['text', 'image'] })
+    expect(saved.find(model => model['id'] === 'deepseek-flash')).toMatchObject({
+      reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' }, input: ['text', 'image'],
+    })
+    expect(saved.find(model => model['id'] === 'qwen-max')).toEqual({ id: 'qwen-max', name: 'Qwen Max', reasoningEfforts: { high: 'high' }, input: ['text'] })
+    expect(saved.find(model => model['id'] === 'gpt-4.1')).toEqual({ id: 'gpt-4.1', reasoningEfforts: false, input: ['text', 'image'] })
+    expect(saved.find(model => model['id'] === 'gpt-4.1-mini')).toEqual({ id: 'gpt-4.1-mini', reasoningEffortsUnset: true, input: ['text'] })
+    expect(state.queued.size).toBe(0)
+  })
+
   it('adapts an expanded row that has no thinking levels yet, and leaves a configured one', async () => {
     const deps = makeDeps()
     const state = createScanState()

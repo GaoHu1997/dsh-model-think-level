@@ -70,6 +70,8 @@ export interface EffortEditorProps {
   modelName?: string
   /** The model's current reasoningEfforts declaration. */
   efforts?: false | ReasoningEfforts
+  /** A deliberate unset is also a configured decision bulk adapt must preserve. */
+  effortsUnset?: boolean
   /** The model's current input-modality declaration. */
   input?: InputModalities
   /** The model's stored compat block (passthrough; suggestions merge over it). */
@@ -260,7 +262,7 @@ export function pendingWriteOf(parts: PendingWriteParts): PendingWrite {
  * checkboxes, the modality toggle, the auto-adapt action, and the
  * apply/reset actions that own both sections.
  */
-export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName, efforts: initialEfforts, input: initialInput, compat: initialCompat, defaultEffort: initialDefaultEffort, index, staged = false, officialInputTypes = false, api, readOnly, t }: EffortEditorProps): ReactNode {
+export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName, efforts: initialEfforts, effortsUnset = false, input: initialInput, compat: initialCompat, defaultEffort: initialDefaultEffort, index, staged = false, officialInputTypes = false, api, readOnly, t }: EffortEditorProps): ReactNode {
   const [draft, setDraft] = useState<DraftLevels>(() => draftFrom(initialEfforts))
   const [modality, setModality] = useState<DraftModality>(() => modalityFrom(initialInput))
   // The master thinking switch. OFF reports the ladder as `false` — the row's
@@ -313,15 +315,18 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   // link still may, because that click is about this one row.
   const savedEffortsRef = useRef(initialEfforts)
   savedEffortsRef.current = initialEfforts
+  const effortsUnsetRef = useRef(effortsUnset)
+  effortsUnsetRef.current = effortsUnset
 
   // The catalogue head's "adapt every model" seat (user request ⑤) publishes
   // one request per provider. An unconfigured row answers it with the same
   // autoAdapt() its own link runs. A row that already has a stored ladder
-  // (including an explicit "does not reason") does not: bulk adapt fills the
-  // gaps and leaves configured levels alone. The row's own link is unaffected.
+  // (including an explicit "does not reason" or a durable unset) does not:
+  // bulk adapt fills gaps and leaves configured levels alone. The row's own
+  // link is unaffected.
   useEffect(() => listenAutoEffort((target) => {
     if (target !== route) return
-    if (savedEffortsRef.current !== undefined) return
+    if (savedEffortsRef.current !== undefined || effortsUnsetRef.current) return
     const run = autoAdaptRef.current
     if (run !== undefined) queueAutoEffort(run)
   }), [route])

@@ -179,6 +179,8 @@ export interface EditorMountProps {
   modelName?: string
   /** The model's current reasoningEfforts declaration. */
   efforts?: false | ReasoningEfforts
+  /** Whether the saved model explicitly opted out of an effort declaration. */
+  effortsUnset?: boolean
   /** The model's current input-modality declaration. */
   input?: InputModalities
   /** The model's stored compat block (passthrough; the editor merges suggestions over it). */
@@ -1284,6 +1286,7 @@ function sameProps(a: EditorMountProps, b: EditorMountProps): boolean {
     // The official capability can appear/disappear across an HMR or host
     // update; the modality section must follow it.
     && a.officialInputTypes === b.officialInputTypes
+    && a.effortsUnset === b.effortsUnset
     && sameEfforts(a.efforts, b.efforts)
     && sameInput(a.input, b.input)
     && sameCompat(a.compat, b.compat)
@@ -1608,6 +1611,38 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       state.missedScans = missing
     }
 
+    // The action row belongs to the CARD, not to an expanded model disclosure.
+    // Wire it even when every model is collapsed: the provider-wide button can
+    // hold declarations for those models, and only the official Save may land
+    // them once the card releases its frozen settings revision.
+    const cards = new Set(found.map(target => target.card))
+    for (const card of cards) {
+      const resolved = routeOfCard(card, providers, labels)
+      if (resolved === undefined) continue
+      const route = resolved.route
+      const actions = actionsOf(card, labels)
+      if (actions === undefined) {
+        state.signalsUnavailable = true
+      } else {
+        // A readable row is positive evidence the signal works: clear the
+        // degrade flag so one transient unreadable card does not disable the
+        // "commits with the official Save" gate for the rest of the session.
+        state.signalsUnavailable = false
+        // Resolve the route AT CLICK TIME: a create card's Provider ID can be
+        // (re)typed after the buttons were first wired, and React reuses the
+        // button element -- a captured route would mark / clear the wrong one.
+        wireOnce(actions.submit, state.submitWired, () => {
+          const live = routeOfCard(card, providers, labels)?.route ?? route
+          state.committing.add(live)
+          persistLedger(state)
+        })
+        wireOnce(actions.cancel, state.cancelWired, () => {
+          const live = routeOfCard(card, providers, labels)?.route ?? route
+          forgetRoute(state, live)
+        })
+      }
+    }
+
     found.forEach((target, index) => {
       // A collapsed row has nowhere to mount: its editor appears the moment
       // the official chevron unfolds it and the next scan sees the container.
@@ -1634,6 +1669,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       const efforts = staged
         ? (stagedEfforts === 'keep' ? undefined : stagedEfforts)
         : effortsOf(models, target.modelId)
+      const effortsUnset = !staged && models.some(model => model['id'] === target.modelId && model[UNSET_MARKER] === true)
       const input = staged
         ? state.pending.get(route)?.get(target.modelId)?.input
         : inputOf(models, target.modelId)
@@ -1651,34 +1687,6 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       const modelName = staged ? (typedName.length > 0 ? typedName : undefined) : nameOf(models, target.modelId)
       const typedApi = routeStaged ? inputValueByLabel(target.card, labels.apiProtocol) : ''
       const typedBaseURL = routeStaged ? inputValueByLabel(target.card, labels.baseUrl) : ''
-      // The official action row is the signal this row's landing write hangs
-      // on (C2): wire its two buttons. A row whose buttons no tier can name
-      // flips the global degrade flag, so the landing decision falls back to
-      // "the card went away, write it" instead of silently dropping the edit.
-      // No guard on the route's current markers: a REOPENED card is a new
-      // element whose buttons must be wired again, and `wireOnce`'s WeakSet
-      // already collapses every repeat within one element.
-      const actions = actionsOf(target.card, labels)
-      if (actions === undefined) {
-        state.signalsUnavailable = true
-      } else {
-        // A readable row is positive evidence the signal works: clear the
-        // degrade flag so one transient unreadable card does not disable the
-        // "commits with the official Save" gate for the rest of the session.
-        state.signalsUnavailable = false
-        // Resolve the route AT CLICK TIME: a create card's Provider ID can be
-        // (re)typed after the buttons were first wired, and React reuses the
-        // button element -- a captured route would mark / clear the wrong one.
-        wireOnce(actions.submit, state.submitWired, () => {
-          const live = routeOfCard(target.card, providers, labels)?.route ?? route
-          state.committing.add(live)
-          persistLedger(state)
-        })
-        wireOnce(actions.cancel, state.cancelWired, () => {
-          const live = routeOfCard(target.card, providers, labels)?.route ?? route
-          forgetRoute(state, live)
-        })
-      }
       const routeApi = routeStaged && typedApi.length > 0
         ? typedApi
         : typeof profile['api'] === 'string' ? profile['api'] as string : undefined
@@ -1697,6 +1705,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         modelId: target.modelId,
         ...modelName === undefined ? {} : { modelName },
         ...efforts === undefined ? {} : { efforts },
+        ...effortsUnset ? { effortsUnset } : {},
         ...input === undefined ? {} : { input },
         ...compat === undefined ? {} : { compat },
         ...defaultEffort === undefined ? {} : { defaultEffort },
