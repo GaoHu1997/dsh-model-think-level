@@ -333,10 +333,10 @@ describe('reconcileAutoEffortSeats', () => {
 
 /**
  * The click's answer (user request: "点击自动获取思考等级没有反馈", then
- * "点击反馈浮动提示即可，不要变更按钮本身").
+ * "点击反馈浮动提示即可，不要变更按钮本身", then "直接在顶部气泡提示，然后消失即可").
  *
  * The seat has no message area of its own and its work happens in another
- * module, so the answer is a FLOATING NOTE beside the control — the control
+ * module, so the answer is a BUBBLE at the top of the window — the control
  * itself keeps its label, its tooltip and its enabledness, because a button
  * that rewrites itself is a different control every time the user looks at it.
  * These tests drive `onRequest` by hand: the injector's own suite covers what
@@ -349,16 +349,16 @@ describe('auto-adapt seat feedback', () => {
     onRequest: () => undefined,
   }
 
-  /** The one note on the page, or a throw — every case here expects exactly one. */
+  /** The one bubble on the page, or a throw — every case here expects exactly one. */
   const note = (): HTMLElement => {
     const [only] = Array.from(document.querySelectorAll<HTMLElement>('.bre-auto-effort-note'))
-    if (only === undefined) throw new Error('no note')
+    if (only === undefined) throw new Error('no bubble')
     return only
   }
   const notes = (): HTMLElement[] => Array.from(document.querySelectorAll<HTMLElement>('.bre-auto-effort-note'))
-  /** The note's headline (its first line). */
+  /** The bubble's headline (its first line). */
   const said = (): string => note().querySelector<HTMLElement>('.bre-auto-effort-note-text')?.textContent ?? ''
-  /** The note's detail line, or '' when it is hidden. */
+  /** The bubble's detail line, or '' when it is hidden. */
   const detail = (): string => {
     const line = note().querySelector<HTMLElement>('.bre-auto-effort-note-detail')
     if (line === null || line.hidden) return ''
@@ -535,16 +535,38 @@ describe('auto-adapt seat feedback', () => {
     expect(seat().disabled).toBe(false)
   })
 
-  it('takes every note down on teardown, since nothing else owns them', async () => {
+  it('takes every bubble down on teardown, since nothing else owns them', async () => {
     reporting.onRequest = () => ({ held: 1, unsuggested: 0 })
     const { section } = catalogue()
     reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
     seat().click()
     await flush()
     expect(notes()).toHaveLength(1)
-    // The note is this plugin's own DOM OUTSIDE the seat: a dispose that only
-    // removed seats would leave the chip on the page forever.
+    // The bubble is this plugin's own DOM OUTSIDE the seat: a dispose that only
+    // removed seats would leave it on the page forever.
     teardownAutoEffortSeats()
     expect(notes()).toHaveLength(0)
+  })
+
+  it('raises the bubble at the top of the page rather than beside the control', async () => {
+    reporting.onRequest = () => ({ held: 1, unsuggested: 0 })
+    const { section, head } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    await flush()
+    // The host's head is a flex row: a fourth child there would be a fourth
+    // item in its layout, so the answer hangs off the body instead.
+    expect(note().parentElement).toBe(document.body)
+    expect(head.contains(note())).toBe(false)
+    expect(seat().nextElementSibling).toBeNull()
+    // The scroll/resize following that a seat-anchored note needed is gone with
+    // it: the placement is the sheet's, not measured per click.
+    expect(STYLES).toContain('.bre-auto-effort-note {')
+    expect(STYLES).toContain('  top: 40px;\n')
+    expect(STYLES).toContain('  left: 50%;\n')
+    expect(STYLES).toContain('  transform: translateX(-50%);\n')
+    // Raised from inside the settings dialog, whose overlay is z-index 1000:
+    // the host's own toast layer (1100) would be drawn behind it.
+    expect(STYLES).toContain('  z-index: 1200;\n')
   })
 })

@@ -1608,43 +1608,69 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   margin-left: auto;
 }
 
-/* The click's answer, as a chip floating beside the seat. The control itself
-   is left alone on purpose: its label is what the user aimed at, and a button
-   that rewrites itself is a button that moved. The chip is a fixed overlay on
-   the body — not a child of the head, which is the host's flex row and would
-   take a fourth item — and it clears the settings dialog's opaque overlay for
-   the same reason the drop line does. Pointer-events none keeps it out of the
-   way of the very button it reports on, and the phase colours the headline so
-   the outcome is readable before the words are. */
+/* The click's answer, as a bubble at the top of the window that takes itself
+   away again. The control is left alone on purpose: its label is what the user
+   aimed at, and a button that rewrites itself is a button that moved. The
+   bubble is a fixed overlay on the body — not a child of the head, which is the
+   host's flex row and would take a fourth item — and it clears the settings
+   dialog's opaque overlay for the same reason the drop line does. It follows
+   the host's own toast in placement and tone, but not in z-index: the settings
+   dialog's overlay outranks the toast layer, and this bubble is raised from
+   inside that dialog. Pointer-events none keeps it out of the way, the phase
+   colours the headline so the outcome reads before the words do, and the
+   hold/fade pair is timed by --bre-note-hold, which the script sets from the
+   same constant it uses for the dismissal. */
 .bre-auto-effort-note {
   position: fixed;
+  top: 40px;
+  left: 50%;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-width: 320px;
-  padding: 6px 10px;
-  border: 1px solid var(--dsw-alias-border-secondary, #e6e8eb);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-elevated, #ffffff);
-  box-shadow: 0 6px 18px #0000002e;
-  color: var(--dsw-alias-label-primary, #17181a);
-  font-size: 12px;
-  line-height: 16px;
+  width: max-content;
+  max-width: min(640px, calc(100vw - 48px));
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--dsw-alias-toast-bg, #2b2f36);
+  color: var(--dsw-alias-toast-label, #f9fafb);
+  box-shadow: var(--dsw-shadow-lv3, 0 6px 24px #00000029);
+  font-size: 13px;
+  line-height: 20px;
   pointer-events: none;
+  transform: translateX(-50%);
+  animation: bre-note-in 160ms ease-out, bre-note-out 400ms ease var(--bre-note-hold, 8000ms) forwards;
   z-index: 1200;
 }
+/* A pass in flight has no lifetime of its own: it is replaced by its verdict,
+   which restarts both animations because the phase changes the rule. */
+.bre-auto-effort-note[data-bre-auto-effort-phase='working'] {
+  animation: bre-note-in 160ms ease-out;
+}
+@keyframes bre-note-in {
+  from { opacity: 0; transform: translate(-50%, -6px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes bre-note-out {
+  to { opacity: 0; visibility: hidden; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bre-auto-effort-note {
+    animation: bre-note-out 400ms ease var(--bre-note-hold, 8000ms) forwards;
+  }
+  .bre-auto-effort-note[data-bre-auto-effort-phase='working'] { animation: none; }
+}
 .bre-auto-effort-note-text { font-weight: 500; }
-.bre-auto-effort-note-detail { color: var(--dsw-alias-label-tertiary, #81858c); }
+.bre-auto-effort-note-detail { opacity: .72; }
 /* The attribute is the visibility switch, so it must beat the flex column above. */
 .bre-auto-effort-note-detail[hidden] { display: none; }
 .bre-auto-effort-note[data-bre-auto-effort-phase='working'] .bre-auto-effort-note-text {
-  color: var(--dsw-alias-link);
+  color: var(--dsw-alias-state-business-primary, #6ea8fe);
 }
 .bre-auto-effort-note[data-bre-auto-effort-phase='done'] .bre-auto-effort-note-text {
   color: var(--dsw-alias-state-success-primary, #22c55e);
 }
 .bre-auto-effort-note[data-bre-auto-effort-phase='failed'] .bre-auto-effort-note-text {
-  color: var(--dsw-alias-state-error-primary, #ec1313);
+  color: var(--dsw-alias-state-error-secondary, #ff8a80);
 }
 
 /* The API-key eye. The official key field is a plain flex column whose input is

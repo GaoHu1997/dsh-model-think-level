@@ -21,10 +21,11 @@
  * therefore holds no write path of its own, and neither answer stages a
  * document the open card is already holding.
  *
- * What the click DID is reported in a floating note beside the seat
+ * What the click DID is reported in a bubble at the top of the window
  * ({@link showNote}), never by rewriting the control: the head's button is the
  * host's layout, and a button whose label and enabledness change under the
- * pointer is a different control every time the user looks at it.
+ * pointer is a different control every time the user looks at it. The bubble
+ * takes itself away again, because a verdict is feedback and not state.
  *
  * @module dsh-model-think-level/client/injection/auto-effort-seat
  */
@@ -46,26 +47,20 @@ const LINK_PROBE = 'button[class*="linkButton"]'
 /** The seat's class: `bre-link-button` gives it the shared link metrics. */
 const SEAT_CLASS = 'bre-link-button bre-auto-effort'
 
-/** The floating note's class, and the phase it carries for the sheet. */
+/** The bubble's class, and the phase it carries for the sheet. */
 const NOTE_CLASS = 'bre-auto-effort-note'
 const NOTE_PHASE_ATTR = 'data-bre-auto-effort-phase'
 const NOTE_TEXT_CLASS = 'bre-auto-effort-note-text'
 const NOTE_DETAIL_CLASS = 'bre-auto-effort-note-detail'
 
 /**
- * How long a verdict stays beside the control before it goes away.
+ * How long a verdict stays on screen before it goes away.
  *
  * A result is feedback, not state: it answers the click the user just made, and
- * the setting it describes is visible in the rows themselves. A note that
+ * the setting it describes is visible in the rows themselves. A bubble that
  * outlives the moment would sit over the card the user is now working in.
  */
 const OUTCOME_TTL_MS = 8000
-
-/** The gap between the seat's box and the note, in pixels. */
-const NOTE_GAP = 6
-
-/** The least margin the note keeps from any viewport edge, in pixels. */
-const NOTE_EDGE = 8
 
 /** One card's catalogue, paired with the route that card edits. */
 export interface AutoEffortSeatTarget {
@@ -102,12 +97,12 @@ export interface AutoEffortSeatDeps {
  * head's button keeps its label, its tooltip and its enabledness, because a
  * button that rewrites itself into "已适配 3 个" is a different control every
  * time the user looks at it — and the next click has to be readable as the same
- * action as the last one. The verdict appears in a floating note beside the
- * seat instead (see {@link showNote}) and goes away on its own.
+ * action as the last one. The verdict appears in a bubble at the top of the
+ * window instead (see {@link showNote}) and goes away on its own.
  */
 type SeatPhase = 'working' | 'done' | 'empty' | 'unsuggested' | 'blocked' | 'failed'
 
-/** One route's last verdict, in the words the note renders. */
+/** One route's last verdict, in the words the bubble renders. */
 interface SeatOutcome {
   readonly phase: SeatPhase
   /** Unconfigured models the pass held an adaptation for. */
@@ -206,9 +201,9 @@ export function reconcileAutoEffortSeats(
     const route = seat.getAttribute(SEAT_ATTR) ?? ''
     if (catalogue === null || !wanted.has(catalogue) || seated.has(catalogue)) {
       seat.remove()
-      // A route this pass no longer names is a card that CLOSED, so its note
+      // A route this pass no longer names is a card that CLOSED, so its bubble
       // goes with it; a route that is merely re-rendered is still in `routes`,
-      // which is what keeps a note up across the host's own renders.
+      // which is what keeps a bubble up across the host's own renders.
       if (route.length > 0 && !routes.has(route)) hideNote(route)
       continue
     }
@@ -216,14 +211,13 @@ export function reconcileAutoEffortSeats(
   }
 }
 
-/** Take down one route's note and its pending fade (the card is gone). */
+/** Take down one route's bubble and its pending dismissal (the card is gone). */
 function hideNote(route: string): void {
   const entry = notes.get(route)
   if (entry === undefined) return
   if (entry.timer !== null) clearTimeout(entry.timer)
   entry.note.remove()
   notes.delete(route)
-  releasePlacement()
 }
 
 /** Take every seat out again (plugin dispose, HMR teardown). */
@@ -231,14 +225,13 @@ export function teardownAutoEffortSeats(): void {
   for (const seat of Array.from(document.querySelectorAll<HTMLElement>(`[${SEAT_ATTR}]`))) {
     seat.remove()
   }
-  // Notes belong to the page that was up, and the note elements are this
+  // Bubbles belong to the page that was up, and the bubble elements are this
   // plugin's OWN DOM outside the seat — nothing else would ever unmount them.
   for (const entry of notes.values()) {
     if (entry.timer !== null) clearTimeout(entry.timer)
     entry.note.remove()
   }
   notes.clear()
-  releasePlacement()
 }
 
 /** The head's own fetch link: the LAST link-shaped button it renders. */
@@ -262,23 +255,23 @@ function createSeat(deps: AutoEffortSeatDeps): HTMLButtonElement {
     // (the expanded ones), and `onRequest` covers the rows the pass could not
     // mount -- a collapsed row has no disclosure container to mount into.
     requestAutoEffort(route)
-    void runRequest(seat, route, deps)
+    void runRequest(route, deps)
   })
   return seat
 }
 
 /**
- * Ask the injector to adapt the route, and report what came back in a note.
+ * Ask the injector to adapt the route, and report what came back in a bubble.
  *
  * Without `onRequest` there is no reporter (placement-only tests, and any host
  * that mounted the seat alone): the control then says nothing instead of
  * inventing a verdict.
  */
-async function runRequest(seat: HTMLElement, route: string, deps: AutoEffortSeatDeps): Promise<void> {
+async function runRequest(route: string, deps: AutoEffortSeatDeps): Promise<void> {
   if (deps.onRequest === undefined) return
   // Shown before the await: the pass reads the settings document and probes
   // each model, which is long enough for a silent click to read as a dead one.
-  showNote(seat, route, { phase: 'working', count: 0, missed: 0, detail: '' }, deps, 0)
+  showNote(route, { phase: 'working', count: 0, missed: 0, detail: '' }, deps, 0)
   let answer: AutoAdaptReport | void
   try {
     answer = await deps.onRequest(route)
@@ -286,7 +279,7 @@ async function runRequest(seat: HTMLElement, route: string, deps: AutoEffortSeat
     answer = { held: 0, unsuggested: 0, failed: String(error) }
   }
   // A reporter that returned nothing said nothing, and one that answered
-  // `busy` only refused a double click: both retire the note, because the pass
+  // `busy` only refused a double click: both retire the bubble, because the pass
   // that IS running will put up its own verdict when it lands.
   if (answer === undefined) {
     hideNote(route)
@@ -294,29 +287,28 @@ async function runRequest(seat: HTMLElement, route: string, deps: AutoEffortSeat
   }
   const outcome = outcomeOf(answer)
   if (outcome === null) return
-  showNote(seat, route, outcome, deps, OUTCOME_TTL_MS)
+  showNote(route, outcome, deps, OUTCOME_TTL_MS)
 }
 
 /**
- * Raise (or replace) a route's note beside its seat, and — for a verdict —
- * arrange for it to retire.
+ * Raise (or replace) a route's bubble at the top of the window, and — for a
+ * verdict — arrange for it to retire.
  *
- * The note is this plugin's own DOM: it is never a child of the head, because
+ * The bubble is this plugin's own DOM: it is never a child of the head, because
  * the head is the host's flex row and a fourth child would be a fourth item in
- * its layout. It hangs off the body as a fixed overlay instead, exactly like
- * the drag ghost and the drop line, and is placed against the seat's own box.
+ * its layout. It hangs off the body as a fixed top-centre overlay instead,
+ * exactly like the host's own toast and our own drag ghost.
  */
 function showNote(
-  seat: HTMLElement,
   route: string,
   outcome: SeatOutcome,
   deps: AutoEffortSeatDeps,
   ttlMs: number,
 ): void {
   let entry = notes.get(route)
-  // A note already up for this route is REPLACED, not stacked: two passes of
-  // the same card would otherwise leave two notes over the same row. One that
-  // is no longer in the document was taken out from under us (a host that
+  // A bubble already up for this route is REPLACED, not stacked: two passes of
+  // the same card would otherwise leave two bubbles over the same page. One
+  // that is no longer in the document was taken out from under us (a host that
   // clears the body, a teardown that missed it) and is rebuilt instead of
   // being written to in vain.
   if (entry !== undefined && !entry.note.isConnected) {
@@ -334,75 +326,34 @@ function showNote(
   if (detail.textContent !== wording.detail) detail.textContent = wording.detail
   detail.hidden = wording.detail.length === 0
   if (entry === undefined) document.body.append(note)
-  // Measured BEFORE placement so the decision to sit above or below is made
-  // against the note's real size, not a guess.
-  placeNote(note, seat)
-  holdPlacement()
-  // A working note has no lifetime of its own: the pass answers and replaces it
-  // with the verdict. The clock starts when the verdict lands.
+  // A working bubble has no lifetime of its own: the pass answers and replaces
+  // it with the verdict. The clock starts when the verdict lands. The fade is
+  // declared in the sheet and timed from here, so the two can never disagree.
   const timer = ttlMs > 0 ? setTimeout(() => { hideNote(route) }, ttlMs) : null
-  notes.set(route, { note, seat, timer })
+  note.style.setProperty('--bre-note-hold', `${ttlMs}ms`)
+  notes.set(route, { note, timer })
 }
 
-/** The note's own element, empty and hidden until it is placed. */
+/** The bubble's own element, empty until it is filled. */
 function buildNote(): HTMLElement {
   const note = document.createElement('div')
   note.className = NOTE_CLASS
   // Announced, because the control the user pressed does NOT change: for a
-  // reader that cannot see the note, this is the only answer to the click.
+  // reader that cannot see the bubble, this is the only answer to the click.
   note.setAttribute('role', 'status')
   note.setAttribute('aria-live', 'polite')
   note.innerHTML = `<span class="${NOTE_TEXT_CLASS}"></span><span class="${NOTE_DETAIL_CLASS}"></span>`
   return note
 }
 
-/** Sit the note under its seat, flipping above and clamping when it must. */
-function placeNote(note: HTMLElement, seat: HTMLElement): void {
-  if (!seat.isConnected) return
-  const box = seat.getBoundingClientRect()
-  const size = note.getBoundingClientRect()
-  let top = box.bottom + NOTE_GAP
-  if (top + size.height > window.innerHeight - NOTE_EDGE) {
-    const above = box.top - NOTE_GAP - size.height
-    top = above >= NOTE_EDGE ? above : Math.max(NOTE_EDGE, window.innerHeight - NOTE_EDGE - size.height)
-  }
-  // Right-edge chips (this control sits at the card's right end) would push the
-  // note off screen if it were left-aligned to them, so it is pulled back.
-  const left = Math.max(NOTE_EDGE, Math.min(box.left, window.innerWidth - NOTE_EDGE - size.width))
-  note.style.top = `${Math.round(top)}px`
-  note.style.left = `${Math.round(left)}px`
-}
-
-/** How many notes are up: the scroll/resize listeners are worth their cost. */
-const notes = new Map<string, { note: HTMLElement; seat: HTMLElement; timer: ReturnType<typeof setTimeout> | null }>()
-
-let repositioning = false
-
 /**
- * Keep the notes glued to their seats while the page moves under them.
+ * The bubbles currently up, one per route.
  *
- * `scroll` is captured on the DOCUMENT because the settings dialog scrolls its
- * own element: without capture, a note would stay behind when the card it
- * belongs to scrolls out from under it.
+ * A route is the key rather than the element: the seat that raised a bubble is
+ * re-created by the host's own renders, and the bubble must outlive it — it is
+ * fixed at the top of the window and no longer anchored to anything.
  */
-function holdPlacement(): void {
-  if (repositioning) return
-  repositioning = true
-  window.addEventListener('scroll', repositionNotes, true)
-  window.addEventListener('resize', repositionNotes)
-}
-
-/** Drop the listeners once the last note is gone. */
-function releasePlacement(): void {
-  if (!repositioning || notes.size > 0) return
-  repositioning = false
-  window.removeEventListener('scroll', repositionNotes, true)
-  window.removeEventListener('resize', repositionNotes)
-}
-
-function repositionNotes(): void {
-  for (const entry of notes.values()) placeNote(entry.note, entry.seat)
-}
+const notes = new Map<string, { note: HTMLElement; timer: ReturnType<typeof setTimeout> | null }>()
 
 /** The note's two lines: what happened, and the part the headline omits. */
 function wordsOf(outcome: SeatOutcome, deps: AutoEffortSeatDeps): { text: string; detail: string } {
