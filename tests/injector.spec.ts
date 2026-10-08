@@ -1744,11 +1744,14 @@ describe('the auto-adapt seat', () => {
     // Save is what lands this (issue #7 / C2).
     expect(deps.mutate).not.toHaveBeenCalled()
     // And the seat says so: the click used to be completely silent, which is
-    // indistinguishable from a control that does nothing at all.
+    // indistinguishable from a control that does nothing at all. The answer is
+    // a floating note beside the control (the control itself is never touched).
     const seat = root.querySelector<HTMLButtonElement>('.bre-auto-effort')!
-    expect(seat.textContent).toBe('autoAdaptDone')
-    expect(seat.getAttribute('data-bre-auto-effort-phase')).toBe('done')
+    expect(seat.textContent).toBe('autoAdaptAll')
     expect(seat.disabled).toBe(false)
+    const said = document.querySelector('.bre-auto-effort-note-text')
+    expect(said?.textContent).toBe('autoAdaptDone')
+    expect(document.querySelector('.bre-auto-effort-note')?.getAttribute('data-bre-auto-effort-phase')).toBe('done')
   })
 
   it('answers a click with nothing to adapt instead of staying silent', async () => {
@@ -1771,8 +1774,10 @@ describe('the auto-adapt seat', () => {
 
     expect(state.queued.size).toBe(0)
     const seat = root.querySelector<HTMLButtonElement>('.bre-auto-effort')!
-    expect(seat.textContent).toBe('autoAdaptEmpty')
-    expect(seat.getAttribute('title')).toBe('autoAdaptEmptyHint')
+    expect(seat.textContent).toBe('autoAdaptAll')
+    const said = document.querySelector('.bre-auto-effort-note-text')
+    expect(said?.textContent).toBe('autoAdaptEmpty')
+    expect(document.querySelector('.bre-auto-effort-note-detail')?.textContent).toBe('autoAdaptEmptyHint')
   })
 
   it('reports a read-only click as blocked rather than as already configured', async () => {
@@ -1789,8 +1794,9 @@ describe('the auto-adapt seat', () => {
     }
 
     const seat = root.querySelector<HTMLButtonElement>('.bre-auto-effort')!
-    expect(seat.textContent).toBe('autoAdaptBlocked')
-    expect(seat.getAttribute('title')).toBe('autoAdaptBlockedHint')
+    expect(seat.textContent).toBe('autoAdaptAll')
+    expect(document.querySelector('.bre-auto-effort-note-text')?.textContent).toBe('autoAdaptBlocked')
+    expect(document.querySelector('.bre-auto-effort-note-detail')?.textContent).toBe('autoAdaptBlockedHint')
   })
 
   it('saves every unconfigured collapsed model with thinking and vision while preserving configured models', async () => {

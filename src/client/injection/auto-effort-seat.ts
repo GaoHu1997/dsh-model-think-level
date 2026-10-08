@@ -21,6 +21,11 @@
  * therefore holds no write path of its own, and neither answer stages a
  * document the open card is already holding.
  *
+ * What the click DID is reported in a floating note beside the seat
+ * ({@link showNote}), never by rewriting the control: the head's button is the
+ * host's layout, and a button whose label and enabledness change under the
+ * pointer is a different control every time the user looks at it.
+ *
  * @module dsh-model-think-level/client/injection/auto-effort-seat
  */
 
@@ -41,18 +46,26 @@ const LINK_PROBE = 'button[class*="linkButton"]'
 /** The seat's class: `bre-link-button` gives it the shared link metrics. */
 const SEAT_CLASS = 'bre-link-button bre-auto-effort'
 
-/** Carries the painted phase, so the sheet can colour a refusal or a success. */
-const PHASE_ATTR = 'data-bre-auto-effort-phase'
+/** The floating note's class, and the phase it carries for the sheet. */
+const NOTE_CLASS = 'bre-auto-effort-note'
+const NOTE_PHASE_ATTR = 'data-bre-auto-effort-phase'
+const NOTE_TEXT_CLASS = 'bre-auto-effort-note-text'
+const NOTE_DETAIL_CLASS = 'bre-auto-effort-note-detail'
 
 /**
- * How long a verdict stays on the control before it goes back to its label.
+ * How long a verdict stays beside the control before it goes away.
  *
  * A result is feedback, not state: it answers the click the user just made, and
- * the setting it describes is visible in the rows themselves. Leaving it up
- * forever would put a stale sentence in the head of every card the user has
- * ever adapted.
+ * the setting it describes is visible in the rows themselves. A note that
+ * outlives the moment would sit over the card the user is now working in.
  */
 const OUTCOME_TTL_MS = 8000
+
+/** The gap between the seat's box and the note, in pixels. */
+const NOTE_GAP = 6
+
+/** The least margin the note keeps from any viewport edge, in pixels. */
+const NOTE_EDGE = 8
 
 /** One card's catalogue, paired with the route that card edits. */
 export interface AutoEffortSeatTarget {
@@ -85,28 +98,25 @@ export interface AutoEffortSeatDeps {
 /**
  * What the seat says about the last click on one route.
  *
- * The map is keyed by ROUTE and lives for the module, not for the element: the
- * official page re-renders the catalogue head, which drops the seat's DOM and
- * re-creates it from scratch, and a verdict the user just waited for must not
- * vanish with the node.
+ * A verdict is FEEDBACK, not state, and it is not painted onto the control: the
+ * head's button keeps its label, its tooltip and its enabledness, because a
+ * button that rewrites itself into "已适配 3 个" is a different control every
+ * time the user looks at it — and the next click has to be readable as the same
+ * action as the last one. The verdict appears in a floating note beside the
+ * seat instead (see {@link showNote}) and goes away on its own.
  */
 type SeatPhase = 'working' | 'done' | 'empty' | 'unsuggested' | 'blocked' | 'failed'
 
-/** One route's last verdict, in the words {@link paintSeat} renders. */
+/** One route's last verdict, in the words the note renders. */
 interface SeatOutcome {
   readonly phase: SeatPhase
   /** Unconfigured models the pass held an adaptation for. */
   readonly count: number
-  /** Models of the same pass that had no suggestion (told in the tooltip). */
+  /** Models of the same pass that had no suggestion (told in the detail line). */
   readonly missed: number
   /** The failure text, for the `failed` phase. */
   readonly detail: string
 }
-
-const outcomes = new Map<string, SeatOutcome>()
-
-/** The pending fade-back of each route's verdict, so a new click can reset it. */
-const reverts = new Map<string, ReturnType<typeof setTimeout>>()
 
 /**
  * The seat's word for one pass, or null when the pass has nothing to say.
@@ -180,8 +190,7 @@ export function reconcileAutoEffortSeats(
     } else if (head.lastElementChild !== seat) {
       head.append(seat)
     }
-    syncSeat(seat, route)
-    paintSeat(seat, route, label, hint, deps)
+    syncSeat(seat, route, label, hint)
   }
   // The target set is the only state the seat set may hold: a seat whose
   // catalogue is gone — or that a React re-render moved out of one — comes out.
@@ -197,22 +206,24 @@ export function reconcileAutoEffortSeats(
     const route = seat.getAttribute(SEAT_ATTR) ?? ''
     if (catalogue === null || !wanted.has(catalogue) || seated.has(catalogue)) {
       seat.remove()
-      // A route this pass no longer names is a card that CLOSED, so its verdict
+      // A route this pass no longer names is a card that CLOSED, so its note
       // goes with it; a route that is merely re-rendered is still in `routes`,
-      // which is what keeps the tally alive across the host's own renders.
-      if (route.length > 0 && !routes.has(route)) forgetOutcome(route)
+      // which is what keeps a note up across the host's own renders.
+      if (route.length > 0 && !routes.has(route)) hideNote(route)
       continue
     }
     seated.add(catalogue)
   }
 }
 
-/** Drop a route's verdict and its pending fade-back (its card is gone). */
-function forgetOutcome(route: string): void {
-  const timer = reverts.get(route)
-  if (timer !== undefined) clearTimeout(timer)
-  reverts.delete(route)
-  outcomes.delete(route)
+/** Take down one route's note and its pending fade (the card is gone). */
+function hideNote(route: string): void {
+  const entry = notes.get(route)
+  if (entry === undefined) return
+  if (entry.timer !== null) clearTimeout(entry.timer)
+  entry.note.remove()
+  notes.delete(route)
+  releasePlacement()
 }
 
 /** Take every seat out again (plugin dispose, HMR teardown). */
@@ -220,11 +231,14 @@ export function teardownAutoEffortSeats(): void {
   for (const seat of Array.from(document.querySelectorAll<HTMLElement>(`[${SEAT_ATTR}]`))) {
     seat.remove()
   }
-  // Verdicts and their pending fade-backs belong to the page that was up: a
-  // teardown is a dispose, so the next mount starts from an idle label.
-  for (const timer of reverts.values()) clearTimeout(timer)
-  reverts.clear()
-  outcomes.clear()
+  // Notes belong to the page that was up, and the note elements are this
+  // plugin's OWN DOM outside the seat — nothing else would ever unmount them.
+  for (const entry of notes.values()) {
+    if (entry.timer !== null) clearTimeout(entry.timer)
+    entry.note.remove()
+  }
+  notes.clear()
+  releasePlacement()
 }
 
 /** The head's own fetch link: the LAST link-shaped button it renders. */
@@ -254,21 +268,17 @@ function createSeat(deps: AutoEffortSeatDeps): HTMLButtonElement {
 }
 
 /**
- * Ask the injector to adapt the route, and paint what came back.
+ * Ask the injector to adapt the route, and report what came back in a note.
  *
  * Without `onRequest` there is no reporter (placement-only tests, and any host
- * that mounted the seat alone): the control then keeps its idle label instead
- * of inventing a verdict.
+ * that mounted the seat alone): the control then says nothing instead of
+ * inventing a verdict.
  */
 async function runRequest(seat: HTMLElement, route: string, deps: AutoEffortSeatDeps): Promise<void> {
   if (deps.onRequest === undefined) return
-  // Painted before the await: the pass reads the settings document and probes
-  // each model, which is long enough for a silent button to read as a dead one.
-  const previous = outcomes.get(route)
-  outcomes.set(route, { phase: 'working', count: 0, missed: 0, detail: '' })
-  const label = deps.t('autoAdaptAll')
-  const hint = deps.t('autoAdaptAllHint')
-  paintSeat(seat, route, label, hint, deps)
+  // Shown before the await: the pass reads the settings document and probes
+  // each model, which is long enough for a silent click to read as a dead one.
+  showNote(seat, route, { phase: 'working', count: 0, missed: 0, detail: '' }, deps, 0)
   let answer: AutoAdaptReport | void
   try {
     answer = await deps.onRequest(route)
@@ -276,93 +286,153 @@ async function runRequest(seat: HTMLElement, route: string, deps: AutoEffortSeat
     answer = { held: 0, unsuggested: 0, failed: String(error) }
   }
   // A reporter that returned nothing said nothing, and one that answered
-  // `busy` only refused a double click: both put back whatever the seat was
-  // showing, because the pass that IS running will publish its own verdict.
-  const outcome = answer === undefined ? null : outcomeOf(answer)
-  if (outcome === null) {
-    if (previous === undefined) outcomes.delete(route)
-    else outcomes.set(route, previous)
-    paintSeat(seat, route, label, hint, deps)
+  // `busy` only refused a double click: both retire the note, because the pass
+  // that IS running will put up its own verdict when it lands.
+  if (answer === undefined) {
+    hideNote(route)
     return
   }
-  outcomes.set(route, outcome)
-  scheduleRevert(route, seat, deps)
-  paintSeat(seat, route, label, hint, deps)
-}
-
-/** Return a route's seat to its idle face once the verdict has been read. */
-function scheduleRevert(route: string, seat: HTMLElement, deps: AutoEffortSeatDeps): void {
-  const pending = reverts.get(route)
-  if (pending !== undefined) clearTimeout(pending)
-  const timer = setTimeout(() => {
-    reverts.delete(route)
-    outcomes.delete(route)
-    // The element may have been replaced by a re-render in the meantime; the
-    // next reconcile pass paints the fresh node from the (now idle) map.
-    paintSeat(seat, route, deps.t('autoAdaptAll'), deps.t('autoAdaptAllHint'), deps)
-  }, OUTCOME_TTL_MS)
-  reverts.set(route, timer)
+  const outcome = outcomeOf(answer)
+  if (outcome === null) return
+  showNote(seat, route, outcome, deps, OUTCOME_TTL_MS)
 }
 
 /**
- * Write the seat's current face: idle label, the pass in flight, or its
- * verdict. Every field is compare-before-write — the page's own observer
- * watches the head, and an unconditional write per scan would make each pass
- * feed the next one.
+ * Raise (or replace) a route's note beside its seat, and — for a verdict —
+ * arrange for it to retire.
+ *
+ * The note is this plugin's own DOM: it is never a child of the head, because
+ * the head is the host's flex row and a fourth child would be a fourth item in
+ * its layout. It hangs off the body as a fixed overlay instead, exactly like
+ * the drag ghost and the drop line, and is placed against the seat's own box.
  */
-function paintSeat(
+function showNote(
   seat: HTMLElement,
   route: string,
-  label: string,
-  hint: string,
+  outcome: SeatOutcome,
   deps: AutoEffortSeatDeps,
+  ttlMs: number,
 ): void {
-  const outcome = outcomes.get(route)
-  // 'idle' is the absence of a verdict, not one of them: the attribute carries
-  // it so the sheet can tell a settled control from a working one.
-  const phase = outcome === undefined ? 'idle' : outcome.phase
-  if (seat.getAttribute(PHASE_ATTR) !== phase) seat.setAttribute(PHASE_ATTR, phase)
-  const text = outcome === undefined ? label : faceOf(outcome, deps)
-  if (seat.textContent !== text) seat.textContent = text
-  const title = outcome === undefined ? hint : titleOf(outcome, deps, hint)
-  if (seat.getAttribute('title') !== title) seat.setAttribute('title', title)
-  // Busy is the only phase that must not take another click: every other face
-  // is a result the user may immediately want to redo (a model they just
-  // configured by hand, a probe that failed on the wire).
-  const disabled = outcome?.phase === 'working'
-  if ((seat as HTMLButtonElement).disabled !== disabled) (seat as HTMLButtonElement).disabled = disabled
-}
-
-/** The verdict's visible words. */
-function faceOf(outcome: SeatOutcome, deps: AutoEffortSeatDeps): string {
-  switch (outcome.phase) {
-    case 'working': return deps.t('autoAdaptWorking')
-    case 'done': return deps.t('autoAdaptDone', { count: outcome.count })
-    case 'empty': return deps.t('autoAdaptEmpty')
-    case 'unsuggested': return deps.t('autoAdaptUnsuggested')
-    case 'blocked': return deps.t('autoAdaptBlocked')
-    case 'failed': return deps.t('autoAdaptFailed', { message: outcome.detail })
+  let entry = notes.get(route)
+  // A note already up for this route is REPLACED, not stacked: two passes of
+  // the same card would otherwise leave two notes over the same row. One that
+  // is no longer in the document was taken out from under us (a host that
+  // clears the body, a teardown that missed it) and is rebuilt instead of
+  // being written to in vain.
+  if (entry !== undefined && !entry.note.isConnected) {
+    if (entry.timer !== null) clearTimeout(entry.timer)
+    notes.delete(route)
+    entry = undefined
   }
+  if (entry !== undefined && entry.timer !== null) clearTimeout(entry.timer)
+  const note = entry?.note ?? buildNote()
+  note.setAttribute(NOTE_PHASE_ATTR, outcome.phase)
+  const text = note.querySelector<HTMLElement>(`.${NOTE_TEXT_CLASS}`)!
+  const detail = note.querySelector<HTMLElement>(`.${NOTE_DETAIL_CLASS}`)!
+  const wording = wordsOf(outcome, deps)
+  if (text.textContent !== wording.text) text.textContent = wording.text
+  if (detail.textContent !== wording.detail) detail.textContent = wording.detail
+  detail.hidden = wording.detail.length === 0
+  if (entry === undefined) document.body.append(note)
+  // Measured BEFORE placement so the decision to sit above or below is made
+  // against the note's real size, not a guess.
+  placeNote(note, seat)
+  holdPlacement()
+  // A working note has no lifetime of its own: the pass answers and replaces it
+  // with the verdict. The clock starts when the verdict lands.
+  const timer = ttlMs > 0 ? setTimeout(() => { hideNote(route) }, ttlMs) : null
+  notes.set(route, { note, seat, timer })
 }
 
-/** The verdict's tooltip: what happened to the models the label could not hold. */
-function titleOf(outcome: SeatOutcome, deps: AutoEffortSeatDeps, idleHint: string): string {
+/** The note's own element, empty and hidden until it is placed. */
+function buildNote(): HTMLElement {
+  const note = document.createElement('div')
+  note.className = NOTE_CLASS
+  // Announced, because the control the user pressed does NOT change: for a
+  // reader that cannot see the note, this is the only answer to the click.
+  note.setAttribute('role', 'status')
+  note.setAttribute('aria-live', 'polite')
+  note.innerHTML = `<span class="${NOTE_TEXT_CLASS}"></span><span class="${NOTE_DETAIL_CLASS}"></span>`
+  return note
+}
+
+/** Sit the note under its seat, flipping above and clamping when it must. */
+function placeNote(note: HTMLElement, seat: HTMLElement): void {
+  if (!seat.isConnected) return
+  const box = seat.getBoundingClientRect()
+  const size = note.getBoundingClientRect()
+  let top = box.bottom + NOTE_GAP
+  if (top + size.height > window.innerHeight - NOTE_EDGE) {
+    const above = box.top - NOTE_GAP - size.height
+    top = above >= NOTE_EDGE ? above : Math.max(NOTE_EDGE, window.innerHeight - NOTE_EDGE - size.height)
+  }
+  // Right-edge chips (this control sits at the card's right end) would push the
+  // note off screen if it were left-aligned to them, so it is pulled back.
+  const left = Math.max(NOTE_EDGE, Math.min(box.left, window.innerWidth - NOTE_EDGE - size.width))
+  note.style.top = `${Math.round(top)}px`
+  note.style.left = `${Math.round(left)}px`
+}
+
+/** How many notes are up: the scroll/resize listeners are worth their cost. */
+const notes = new Map<string, { note: HTMLElement; seat: HTMLElement; timer: ReturnType<typeof setTimeout> | null }>()
+
+let repositioning = false
+
+/**
+ * Keep the notes glued to their seats while the page moves under them.
+ *
+ * `scroll` is captured on the DOCUMENT because the settings dialog scrolls its
+ * own element: without capture, a note would stay behind when the card it
+ * belongs to scrolls out from under it.
+ */
+function holdPlacement(): void {
+  if (repositioning) return
+  repositioning = true
+  window.addEventListener('scroll', repositionNotes, true)
+  window.addEventListener('resize', repositionNotes)
+}
+
+/** Drop the listeners once the last note is gone. */
+function releasePlacement(): void {
+  if (!repositioning || notes.size > 0) return
+  repositioning = false
+  window.removeEventListener('scroll', repositionNotes, true)
+  window.removeEventListener('resize', repositionNotes)
+}
+
+function repositionNotes(): void {
+  for (const entry of notes.values()) placeNote(entry.note, entry.seat)
+}
+
+/** The note's two lines: what happened, and the part the headline omits. */
+function wordsOf(outcome: SeatOutcome, deps: AutoEffortSeatDeps): { text: string; detail: string } {
   switch (outcome.phase) {
-    case 'working': return idleHint
+    case 'working': return { text: deps.t('autoAdaptWorking'), detail: '' }
     case 'done':
-      // Only worth a sentence when some model was left out: the label already
-      // carries the count that landed.
-      return outcome.missed > 0
-        ? `${deps.t('autoAdaptDoneHint', { count: outcome.count })} ${deps.t('autoAdaptUnsuggestedHint')}`
-        : deps.t('autoAdaptDoneHint', { count: outcome.count })
-    case 'empty': return deps.t('autoAdaptEmptyHint')
-    case 'unsuggested': return deps.t('autoAdaptUnsuggestedHint')
-    case 'blocked': return deps.t('autoAdaptBlockedHint')
-    case 'failed': return deps.t('autoAdaptFailed', { message: outcome.detail })
+      // The detail is the part the headline cannot hold: these writes are HELD
+      // for the card's own Save, and some models may have had no suggestion.
+      return {
+        text: deps.t('autoAdaptDone', { count: outcome.count }),
+        detail: outcome.missed > 0
+          ? `${deps.t('autoAdaptDoneHint', { count: outcome.count })} ${deps.t('autoAdaptUnsuggestedHint')}`
+          : deps.t('autoAdaptDoneHint', { count: outcome.count }),
+      }
+    case 'empty': return { text: deps.t('autoAdaptEmpty'), detail: deps.t('autoAdaptEmptyHint') }
+    case 'unsuggested': return { text: deps.t('autoAdaptUnsuggested'), detail: deps.t('autoAdaptUnsuggestedHint') }
+    case 'blocked': return { text: deps.t('autoAdaptBlocked'), detail: deps.t('autoAdaptBlockedHint') }
+    case 'failed': return { text: deps.t('autoAdaptFailed', { message: outcome.detail }), detail: outcome.detail }
   }
 }
 
-/** Make the seat stand for this route, compare-before-write on the attribute. */
-function syncSeat(seat: HTMLElement, route: string): void {
+/** Make the seat stand for this route, compare-before-write on every field. */
+function syncSeat(seat: HTMLElement, route: string, label: string, hint: string): void {
   if (seat.getAttribute(SEAT_ATTR) !== route) seat.setAttribute(SEAT_ATTR, route)
+  // Guarded: the page's observer watches childList, and replacing the seat's
+  // text node on every scan would make each pass feed the next one. The label
+  // is the IDLE label and never the verdict: see the module comment.
+  if (seat.textContent !== label) seat.textContent = label
+  // The label IS the accessible name (a text button names itself), so the
+  // scope goes in the tooltip only: an aria-label that replaced the visible
+  // word would break "click 自动获取思考等级" for voice control (WCAG 2.5.3).
+  if (seat.getAttribute('title') !== hint) seat.setAttribute('title', hint)
 }

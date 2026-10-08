@@ -1608,16 +1608,42 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   margin-left: auto;
 }
 
-/* The seat's verdict, so a click is never silent: the colour carries the
-   outcome the label only spells out, and a pass in flight reads as busy. */
-.bre-auto-effort[data-bre-auto-effort-phase='working'] {
-  opacity: 0.6;
-  cursor: progress;
+/* The click's answer, as a chip floating beside the seat. The control itself
+   is left alone on purpose: its label is what the user aimed at, and a button
+   that rewrites itself is a button that moved. The chip is a fixed overlay on
+   the body — not a child of the head, which is the host's flex row and would
+   take a fourth item — and it clears the settings dialog's opaque overlay for
+   the same reason the drop line does. Pointer-events none keeps it out of the
+   way of the very button it reports on, and the phase colours the headline so
+   the outcome is readable before the words are. */
+.bre-auto-effort-note {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 320px;
+  padding: 6px 10px;
+  border: 1px solid var(--dsw-alias-border-secondary, #e6e8eb);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  box-shadow: 0 6px 18px #0000002e;
+  color: var(--dsw-alias-label-primary, #17181a);
+  font-size: 12px;
+  line-height: 16px;
+  pointer-events: none;
+  z-index: 1200;
 }
-.bre-auto-effort[data-bre-auto-effort-phase='done'] {
+.bre-auto-effort-note-text { font-weight: 500; }
+.bre-auto-effort-note-detail { color: var(--dsw-alias-label-tertiary, #81858c); }
+/* The attribute is the visibility switch, so it must beat the flex column above. */
+.bre-auto-effort-note-detail[hidden] { display: none; }
+.bre-auto-effort-note[data-bre-auto-effort-phase='working'] .bre-auto-effort-note-text {
+  color: var(--dsw-alias-link);
+}
+.bre-auto-effort-note[data-bre-auto-effort-phase='done'] .bre-auto-effort-note-text {
   color: var(--dsw-alias-state-success-primary, #22c55e);
 }
-.bre-auto-effort[data-bre-auto-effort-phase='failed'] {
+.bre-auto-effort-note[data-bre-auto-effort-phase='failed'] .bre-auto-effort-note-text {
   color: var(--dsw-alias-state-error-primary, #ec1313);
 }
 

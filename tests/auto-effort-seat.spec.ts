@@ -332,12 +332,15 @@ describe('reconcileAutoEffortSeats', () => {
 })
 
 /**
- * The click's answer (user request: "点击自动获取思考等级没有反馈").
+ * The click's answer (user request: "点击自动获取思考等级没有反馈", then
+ * "点击反馈浮动提示即可，不要变更按钮本身").
  *
  * The seat has no message area of its own and its work happens in another
- * module, so the feedback IS the control: it says what it is doing, what came
- * of it, and then goes back to being a button. These tests drive `onRequest`
- * by hand — the injector's own suite covers what the pass counts.
+ * module, so the answer is a FLOATING NOTE beside the control — the control
+ * itself keeps its label, its tooltip and its enabledness, because a button
+ * that rewrites itself is a different control every time the user looks at it.
+ * These tests drive `onRequest` by hand: the injector's own suite covers what
+ * the pass counts.
  */
 describe('auto-adapt seat feedback', () => {
   /** A translator that keeps the params visible, so a count can be asserted. */
@@ -346,16 +349,31 @@ describe('auto-adapt seat feedback', () => {
     onRequest: () => undefined,
   }
 
+  /** The one note on the page, or a throw — every case here expects exactly one. */
+  const note = (): HTMLElement => {
+    const [only] = Array.from(document.querySelectorAll<HTMLElement>('.bre-auto-effort-note'))
+    if (only === undefined) throw new Error('no note')
+    return only
+  }
+  const notes = (): HTMLElement[] => Array.from(document.querySelectorAll<HTMLElement>('.bre-auto-effort-note'))
+  /** The note's headline (its first line). */
+  const said = (): string => note().querySelector<HTMLElement>('.bre-auto-effort-note-text')?.textContent ?? ''
+  /** The note's detail line, or '' when it is hidden. */
+  const detail = (): string => {
+    const line = note().querySelector<HTMLElement>('.bre-auto-effort-note-detail')
+    if (line === null || line.hidden) return ''
+    return line.textContent ?? ''
+  }
+
   /** Let a click's async arm run to its paint. */
   const flush = async (): Promise<void> => { await new Promise(resolve => { setTimeout(resolve, 0) }) }
 
-  it('says it is working, then how many models it adapted', async () => {
+  it('says it is working, then how many models it adapted — without touching the button', async () => {
     let release = (): void => {}
     const gate = new Promise<void>(resolve => { release = resolve })
     const seen: string[] = []
     reporting.onRequest = async () => {
-      seen.push(seat().textContent ?? '')
-      expect(seat().disabled).toBe(true)
+      seen.push(said())
       await gate
       return { held: 3, unsuggested: 0 }
     }
@@ -364,16 +382,20 @@ describe('auto-adapt seat feedback', () => {
     seat().click()
     await flush()
     // The pass is a document read plus one probe per model: long enough that a
-    // still button reads as a dead one.
+    // silent click reads as a dead one.
     expect(seen).toEqual(['autoAdaptWorking'])
+    expect(note().getAttribute('data-bre-auto-effort-phase')).toBe('working')
     release()
     await flush()
-    expect(seat().textContent).toBe('autoAdaptDone:3')
-    expect(seat().disabled).toBe(false)
-    // The tooltip carries what the label cannot: these writes are HELD, and
+    expect(said()).toBe('autoAdaptDone:3')
+    // The detail carries what the headline cannot: these writes are HELD, and
     // they land only when the user saves the card.
-    expect(seat().getAttribute('title')).toBe('autoAdaptDoneHint:3')
-    expect(seat().getAttribute('data-bre-auto-effort-phase')).toBe('done')
+    expect(detail()).toBe('autoAdaptDoneHint:3')
+    expect(note().getAttribute('data-bre-auto-effort-phase')).toBe('done')
+    // The control the user aimed at is EXACTLY as it was.
+    expect(seat().textContent).toBe('autoAdaptAll')
+    expect(seat().getAttribute('title')).toBe('autoAdaptAllHint')
+    expect(seat().disabled).toBe(false)
   })
 
   it('tells a fully configured provider apart from one it could not read', async () => {
@@ -384,13 +406,17 @@ describe('auto-adapt seat feedback', () => {
     await flush()
     // "nothing to do" is the pass SUCCEEDING. Reporting it as a refusal — or
     // saying nothing at all — is the silence this control exists to end.
-    expect(seat().textContent).toBe('autoAdaptEmpty')
+    expect(said()).toBe('autoAdaptEmpty')
+    expect(detail()).toBe('autoAdaptEmptyHint')
 
     reporting.onRequest = () => ({ held: 0, unsuggested: 0, blocked: 'unwritable' })
     seat().click()
     await flush()
-    expect(seat().textContent).toBe('autoAdaptBlocked')
-    expect(seat().getAttribute('title')).toBe('autoAdaptBlockedHint')
+    // A second click REPLACES the note rather than stacking a second one over
+    // the same card, and a refusal must not read as "already configured".
+    expect(notes()).toHaveLength(1)
+    expect(said()).toBe('autoAdaptBlocked')
+    expect(detail()).toBe('autoAdaptBlockedHint')
   })
 
   it('says so when no model of the route had a suggestion', async () => {
@@ -399,33 +425,47 @@ describe('auto-adapt seat feedback', () => {
     reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
     seat().click()
     await flush()
-    expect(seat().textContent).toBe('autoAdaptUnsuggested')
-    expect(seat().getAttribute('title')).toBe('autoAdaptUnsuggestedHint')
+    expect(said()).toBe('autoAdaptUnsuggested')
+    expect(detail()).toBe('autoAdaptUnsuggestedHint')
   })
 
-  it('reports a thrown pass instead of leaving the button spinning', async () => {
+  it('names what some models of a partly successful pass were left out of', async () => {
+    reporting.onRequest = () => ({ held: 2, unsuggested: 1 })
+    const { section } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    await flush()
+    expect(said()).toBe('autoAdaptDone:2')
+    // Both halves: the writes are held, AND one model had nothing to offer.
+    expect(detail()).toContain('autoAdaptDoneHint:2')
+    expect(detail()).toContain('autoAdaptUnsuggestedHint')
+  })
+
+  it('reports a thrown pass instead of leaving the click silent', async () => {
     reporting.onRequest = () => { throw new Error('wire down') }
     const { section } = catalogue()
     reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
     seat().click()
     await flush()
-    expect(seat().textContent).toBe('autoAdaptFailed:Error: wire down')
+    expect(said()).toBe('autoAdaptFailed:Error: wire down')
+    expect(note().getAttribute('data-bre-auto-effort-phase')).toBe('failed')
     expect(seat().disabled).toBe(false)
   })
 
-  it('keeps the verdict when the official page re-renders the head', async () => {
+  it('replaces the note when the official page re-renders the head', async () => {
     reporting.onRequest = () => ({ held: 2, unsuggested: 0 })
     const { section, head } = catalogue()
     reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
     seat().click()
     await flush()
-    expect(seat().textContent).toBe('autoAdaptDone:2')
+    expect(said()).toBe('autoAdaptDone:2')
     // React owns the head: the next render drops this plugin's node entirely.
     head.innerHTML = '<button type="button" class="_3nPmjq_linkButton">获取可用模型</button>'
     reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
-    // A fresh node shows the SAME verdict — it is keyed by route, not by node,
-    // so the answer the user waited for does not vanish with the element.
-    expect(seat().textContent).toBe('autoAdaptDone:2')
+    // The note is keyed by ROUTE and lives outside the head, so the answer the
+    // user waited for does not vanish with the node that asked for it.
+    expect(said()).toBe('autoAdaptDone:2')
+    expect(notes()).toHaveLength(1)
   })
 
   it('does not erase a running pass when a second click is refused', async () => {
@@ -439,18 +479,19 @@ describe('auto-adapt seat feedback', () => {
     reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
     seat().click()
     await flush()
-    // The injector refuses the second click with `busy`; the button is disabled
-    // meanwhile, but a host that fires the handler anyway must not blank it.
+    // The injector refuses the second click with `busy`: the note stays on the
+    // pass that is still running rather than blanking or double-stacking.
     reporting.onRequest = () => ({ held: 0, unsuggested: 0, blocked: 'busy' })
     seat().click()
     await flush()
-    expect(seat().textContent).toBe('autoAdaptWorking')
+    expect(said()).toBe('autoAdaptWorking')
+    expect(notes()).toHaveLength(1)
     release()
     await flush()
-    expect(seat().textContent).toBe('autoAdaptDone:1')
+    expect(said()).toBe('autoAdaptDone:1')
   })
 
-  it('goes back to its label once the verdict has been read', async () => {
+  it('takes the note away once the verdict has been read', async () => {
     vi.useFakeTimers()
     try {
       reporting.onRequest = () => ({ held: 1, unsuggested: 0 })
@@ -458,26 +499,52 @@ describe('auto-adapt seat feedback', () => {
       reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
       seat().click()
       await vi.advanceTimersByTimeAsync(0)
-      expect(seat().textContent).toBe('autoAdaptDone:1')
-      // The result is feedback, not state: a stale sentence left in the head of
-      // every adapted card is worse than no sentence.
+      expect(said()).toBe('autoAdaptDone:1')
+      // The result is feedback, not state: a chip left floating over the card
+      // the user has moved on to would be in the way of the work.
       await vi.advanceTimersByTimeAsync(8000)
+      expect(notes()).toHaveLength(0)
       expect(seat().textContent).toBe('autoAdaptAll')
-      expect(seat().getAttribute('title')).toBe('autoAdaptAllHint')
-      expect(seat().getAttribute('data-bre-auto-effort-phase')).toBe('idle')
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('leaves the label alone when nobody is reporting', () => {
+  it('takes the note down with the card that asked for it', () => {
+    reporting.onRequest = () => ({ held: 1, unsuggested: 0 })
+    const { section } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    expect(notes()).toHaveLength(1)
+    // The card closed: its route is no longer named by any target, so the
+    // verdict goes with it instead of floating over unrelated rows.
+    reconcileAutoEffortSeats(section, [], reporting)
+    expect(notes()).toHaveLength(0)
+  })
+
+  it('says nothing at all when nobody is reporting', async () => {
     // Placement-only deps (and any host that mounted the seat alone): there is
-    // no verdict to show, so the control must not invent one.
+    // no verdict to show, so nothing may be invented.
     const { section } = catalogue()
     reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], deps)
     seat().click()
+    await flush()
+    expect(notes()).toHaveLength(0)
     expect(seat().textContent).toBe('autoAdaptAll')
     expect(seat().getAttribute('title')).toBe('autoAdaptAllHint')
     expect(seat().disabled).toBe(false)
+  })
+
+  it('takes every note down on teardown, since nothing else owns them', async () => {
+    reporting.onRequest = () => ({ held: 1, unsuggested: 0 })
+    const { section } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    await flush()
+    expect(notes()).toHaveLength(1)
+    // The note is this plugin's own DOM OUTSIDE the seat: a dispose that only
+    // removed seats would leave the chip on the page forever.
+    teardownAutoEffortSeats()
+    expect(notes()).toHaveLength(0)
   })
 })
