@@ -42,6 +42,7 @@ import {
 import { compatOf, createEditorApi, defaultEffortOf, effortsOf, inputOf, nameOf, providersOf, writeModelRows, type RowIntent } from '../ops.js'
 import type { EffortEditorApi, EffortWriteIntent, HeldWrite, RemoteApi, SettingsJoin } from '../types.js'
 import { cataloguesOf, reconcileAutoEffortSeats, type AutoEffortSeatTarget } from './auto-effort-seat.js'
+import type { AutoAdaptReport } from '../auto-effort.js'
 import { panelRoot } from './mount.js'
 
 export type { SettingsJoin }
@@ -1105,7 +1106,7 @@ function seatEmptyCatalog(
   if (!stillEmpty) return
   reconcileAutoEffortSeats(root, emptyCatalogTargets(root, providersOf(join.namespace), labels), {
     t: deps.t,
-    onRequest: route => { void adaptEveryModel(state, deps, route) },
+    onRequest: route => adaptEveryModel(state, deps, route),
   })
 }
 
@@ -1174,10 +1175,19 @@ function autoEffortTargets(
  * @param state - mutable scan state: the adapting guard and the held ledger.
  * @param deps - the injection dependencies.
  * @param route - the provider route whose models are adapted.
+ * @returns what the pass did, so the seat can say something true about the
+ *   click: how many models it held an adaptation for, how many had no
+ *   suggestion, and -- when nothing could be adapted at all -- why.
  */
-export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, route: string): Promise<void> {
-  if (route.length === 0 || state.adapting.has(route)) return
+export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, route: string): Promise<AutoAdaptReport> {
+  // A second click while a pass is in flight is not a no-op the user should
+  // read as success: 'busy' travels back so the seat keeps the verdict the
+  // running pass is about to publish.
+  if (route.length === 0) return { held: 0, unsuggested: 0, blocked: 'unknown-route' }
+  if (state.adapting.has(route)) return { held: 0, unsuggested: 0, blocked: 'busy' }
   state.adapting.add(route)
+  let held = 0
+  let unsuggested = 0
   try {
     // One read for the whole run: `suggest` only ever READS the namespace here
     // (its endpoint probe is a read-only GET, it never resolves a credential),
@@ -1189,10 +1199,12 @@ export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, rout
     const providers = providersOf(seen.namespace)
     // A read-only page and a route that is not in the document yet (a create
     // card's typed id) have nothing to adapt: the card's own rows stage their
-    // work and it lands with the route.
-    if (seen.writable !== true || !hasOwn(providers, route)) return
+    // work and it lands with the route. Both are reported as blocked, never as
+    // "already configured" -- the user would read that as a completed pass.
+    if (seen.writable !== true) return { held: 0, unsuggested: 0, blocked: 'unwritable' }
+    if (!hasOwn(providers, route)) return { held: 0, unsuggested: 0, blocked: 'unknown-route' }
     const models = modelsOf(providers, route)
-    if (models.length === 0) return
+    if (models.length === 0) return { held: 0, unsuggested: 0, blocked: 'no-models' }
     const profile = providers[route] ?? {}
     const routeApi = typeof profile['api'] === 'string' ? profile['api'] as string : undefined
     // Expanded rows whose stored ladder is already a decision. An expanded row
@@ -1225,8 +1237,12 @@ export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, rout
       const reply = await api.suggest(route, modelId, nameOf(models, modelId))
       // 'no-suggestion' is the normal outcome for a model with no knowledge
       // match (the seat is a bulk convenience, not a promise): leave that row
-      // exactly as it is.
-      if (!reply.ok) continue
+      // exactly as it is, but COUNT it -- a pass that matched nothing at all
+      // must not be indistinguishable from a provider that needs nothing.
+      if (!reply.ok) {
+        unsuggested += 1
+        continue
+      }
       const parts = reply.suggestion
       const nextThinking = parts.efforts !== false
       // The draft a fresh editor would hold, mapped exactly as its own commit
@@ -1248,11 +1264,14 @@ export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, rout
         routeApi,
         initialCompat,
       }))
+      held += 1
     }
+    return { held, unsuggested }
   } catch (error) {
     // The seat has no message area of its own, and one row's refusal must not
     // strand the rows behind it: report, keep whatever holds already landed.
     console.warn('[bre] provider-wide adapt failed:', error)
+    return { held, unsuggested, failed: error instanceof Error ? error.message : String(error) }
   } finally {
     state.adapting.delete(route)
   }
@@ -1567,7 +1586,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     // and covers exactly the rows nothing on screen can answer for.
     reconcileAutoEffortSeats(root, autoEffortTargets(found, providers, labels), {
       t: deps.t,
-      onRequest: route => { void adaptEveryModel(state, deps, route) },
+      onRequest: route => adaptEveryModel(state, deps, route),
     })
 
     // Unmount editors whose rows are gone (the page re-rendered).

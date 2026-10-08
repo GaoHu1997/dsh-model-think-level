@@ -14,9 +14,9 @@
  */
 
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AUTO_EFFORT_EVENT, type AutoEffortDetail } from '../src/client/auto-effort.js'
-import { cataloguesOf, reconcileAutoEffortSeats, teardownAutoEffortSeats, type AutoEffortSeatTarget } from '../src/client/injection/auto-effort-seat.js'
+import { cataloguesOf, reconcileAutoEffortSeats, teardownAutoEffortSeats, type AutoAdaptAnswer, type AutoEffortSeatTarget } from '../src/client/injection/auto-effort-seat.js'
 import { STYLES } from '../src/client/styles.js'
 
 afterEach(() => { document.body.innerHTML = ''; teardownAutoEffortSeats() })
@@ -321,15 +321,163 @@ describe('reconcileAutoEffortSeats', () => {
     // so the rule above cannot take them — and the seat is anchored to them.
     expect(STYLES).not.toContain("[class*='modelCatalogTitle']")
     expect(STYLES).not.toContain("[class*='modelCatalogMeta']")
-    // With the heading gone the head holds only controls: they group as ONE
-    // centred cluster instead of being spread to opposite edges by the
-    // official rule — a flex-start row strands the two links at the far left
-    // of a full-width card, which reads as a misaligned, unfinished row.
-    expect(STYLES).toContain(
-      ".bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] {\n" +
-      '  justify-content: center;\n' +
-      '  align-items: center;\n' +
-      '}',
-    )
+    // With the heading gone the head holds only controls, and they read as TWO
+    // ENDS: 恢复默认模型 at the left edge, and 获取可用模型 with the seat beside
+    // it at the right. The official `space-between` cannot express that once
+    // there are three children (it would strand the fetch link mid-card), so
+    // the free space goes to the fetch link's own auto margin.
+    expect(STYLES).toContain("[class*='modelListHead'] > button:has(+ .bre-auto-effort)")
+    expect(STYLES).toContain('  margin-left: auto;\n')
+  })
+})
+
+/**
+ * The click's answer (user request: "点击自动获取思考等级没有反馈").
+ *
+ * The seat has no message area of its own and its work happens in another
+ * module, so the feedback IS the control: it says what it is doing, what came
+ * of it, and then goes back to being a button. These tests drive `onRequest`
+ * by hand — the injector's own suite covers what the pass counts.
+ */
+describe('auto-adapt seat feedback', () => {
+  /** A translator that keeps the params visible, so a count can be asserted. */
+  const reporting: { t: (key: string, params?: Record<string, string | number>) => string; onRequest: (route: string) => AutoAdaptAnswer } = {
+    t: (key, params) => (params === undefined ? key : `${key}:${String(params['count'] ?? params['message'] ?? '')}`),
+    onRequest: () => undefined,
+  }
+
+  /** Let a click's async arm run to its paint. */
+  const flush = async (): Promise<void> => { await new Promise(resolve => { setTimeout(resolve, 0) }) }
+
+  it('says it is working, then how many models it adapted', async () => {
+    let release = (): void => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const seen: string[] = []
+    reporting.onRequest = async () => {
+      seen.push(seat().textContent ?? '')
+      expect(seat().disabled).toBe(true)
+      await gate
+      return { held: 3, unsuggested: 0 }
+    }
+    const { section } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    await flush()
+    // The pass is a document read plus one probe per model: long enough that a
+    // still button reads as a dead one.
+    expect(seen).toEqual(['autoAdaptWorking'])
+    release()
+    await flush()
+    expect(seat().textContent).toBe('autoAdaptDone:3')
+    expect(seat().disabled).toBe(false)
+    // The tooltip carries what the label cannot: these writes are HELD, and
+    // they land only when the user saves the card.
+    expect(seat().getAttribute('title')).toBe('autoAdaptDoneHint:3')
+    expect(seat().getAttribute('data-bre-auto-effort-phase')).toBe('done')
+  })
+
+  it('tells a fully configured provider apart from one it could not read', async () => {
+    reporting.onRequest = () => ({ held: 0, unsuggested: 0 })
+    const { section } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    await flush()
+    // "nothing to do" is the pass SUCCEEDING. Reporting it as a refusal — or
+    // saying nothing at all — is the silence this control exists to end.
+    expect(seat().textContent).toBe('autoAdaptEmpty')
+
+    reporting.onRequest = () => ({ held: 0, unsuggested: 0, blocked: 'unwritable' })
+    seat().click()
+    await flush()
+    expect(seat().textContent).toBe('autoAdaptBlocked')
+    expect(seat().getAttribute('title')).toBe('autoAdaptBlockedHint')
+  })
+
+  it('says so when no model of the route had a suggestion', async () => {
+    reporting.onRequest = () => ({ held: 0, unsuggested: 4 })
+    const { section } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    await flush()
+    expect(seat().textContent).toBe('autoAdaptUnsuggested')
+    expect(seat().getAttribute('title')).toBe('autoAdaptUnsuggestedHint')
+  })
+
+  it('reports a thrown pass instead of leaving the button spinning', async () => {
+    reporting.onRequest = () => { throw new Error('wire down') }
+    const { section } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    await flush()
+    expect(seat().textContent).toBe('autoAdaptFailed:Error: wire down')
+    expect(seat().disabled).toBe(false)
+  })
+
+  it('keeps the verdict when the official page re-renders the head', async () => {
+    reporting.onRequest = () => ({ held: 2, unsuggested: 0 })
+    const { section, head } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    await flush()
+    expect(seat().textContent).toBe('autoAdaptDone:2')
+    // React owns the head: the next render drops this plugin's node entirely.
+    head.innerHTML = '<button type="button" class="_3nPmjq_linkButton">获取可用模型</button>'
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    // A fresh node shows the SAME verdict — it is keyed by route, not by node,
+    // so the answer the user waited for does not vanish with the element.
+    expect(seat().textContent).toBe('autoAdaptDone:2')
+  })
+
+  it('does not erase a running pass when a second click is refused', async () => {
+    let release = (): void => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    reporting.onRequest = async () => {
+      await gate
+      return { held: 1, unsuggested: 0 }
+    }
+    const { section } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+    seat().click()
+    await flush()
+    // The injector refuses the second click with `busy`; the button is disabled
+    // meanwhile, but a host that fires the handler anyway must not blank it.
+    reporting.onRequest = () => ({ held: 0, unsuggested: 0, blocked: 'busy' })
+    seat().click()
+    await flush()
+    expect(seat().textContent).toBe('autoAdaptWorking')
+    release()
+    await flush()
+    expect(seat().textContent).toBe('autoAdaptDone:1')
+  })
+
+  it('goes back to its label once the verdict has been read', async () => {
+    vi.useFakeTimers()
+    try {
+      reporting.onRequest = () => ({ held: 1, unsuggested: 0 })
+      const { section } = catalogue()
+      reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], reporting)
+      seat().click()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(seat().textContent).toBe('autoAdaptDone:1')
+      // The result is feedback, not state: a stale sentence left in the head of
+      // every adapted card is worse than no sentence.
+      await vi.advanceTimersByTimeAsync(8000)
+      expect(seat().textContent).toBe('autoAdaptAll')
+      expect(seat().getAttribute('title')).toBe('autoAdaptAllHint')
+      expect(seat().getAttribute('data-bre-auto-effort-phase')).toBe('idle')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves the label alone when nobody is reporting', () => {
+    // Placement-only deps (and any host that mounted the seat alone): there is
+    // no verdict to show, so the control must not invent one.
+    const { section } = catalogue()
+    reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], deps)
+    seat().click()
+    expect(seat().textContent).toBe('autoAdaptAll')
+    expect(seat().getAttribute('title')).toBe('autoAdaptAllHint')
+    expect(seat().disabled).toBe(false)
   })
 })

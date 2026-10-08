@@ -27,6 +27,30 @@ export interface AutoEffortDetail {
 }
 
 /**
+ * What one provider-wide adapt did, so the seat that asked can SAY so.
+ *
+ * The seat used to be a fire-and-forget control: the click held writes in a
+ * ledger the user never saw, so "did that work?" had no answer on screen. The
+ * counts below are the settings-document walk's own report — the arm that can
+ * see every model of the route, which is exactly the set the click is about.
+ */
+export interface AutoAdaptReport {
+  /** Unconfigured models this pass held an adaptation for. */
+  readonly held: number
+  /** Unconfigured models that had no suggestion to offer. */
+  readonly unsuggested: number
+  /**
+   * Why the pass could not run at all, when it could not: another pass is in
+   * flight, the document is not writable, the route is not saved yet, or the
+   * route declares no models. Every one of those is "nothing was held", which
+   * must not read as "already configured".
+   */
+  readonly blocked?: 'busy' | 'unwritable' | 'unknown-route' | 'no-models'
+  /** The failure text when the pass threw before it could report counts. */
+  readonly failed?: string
+}
+
+/**
  * The tail of the one-at-a-time queue. A catalogue can carry dozens of models
  * and every adapt reads the provider's own model list, so the requests must not
  * all be in flight at once. The chain never rejects: a failed adapt reports

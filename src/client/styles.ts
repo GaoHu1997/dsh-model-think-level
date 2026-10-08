@@ -1589,14 +1589,36 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   display: none;
 }
 
-/* With the heading gone the head holds nothing but controls, so they group as
-   ONE centred cluster (the official rule spreads them to opposite edges, which
-   strands the two links at the far left of a full-width card) and centre
-   against each other — the host's links are 28px tall, the seat is not. The
-   official gap is left alone: the seat's own 4px margin tops it up. */
+/* With the heading gone the head holds only controls, and they read as TWO
+   ENDS: 恢复默认模型 stays at the left edge while 获取可用模型 keeps the
+   auto-adapt seat beside it at the far right — the seat belongs to that link's
+   group, it is never a column of its own. The official space-between cannot
+   express that once a third child exists: it spreads the three evenly, which
+   strands the fetch link in the middle of the card. So the free space is handed
+   to the fetch link's own leading auto margin instead — an auto margin absorbs
+   the space BEFORE justify-content is consulted, whatever the official rule
+   says. The fetch link is the button the seat sits after, which is also the
+   only control present when the provider is not overridden: the pair then
+   simply holds the right edge. align-items centres the taller host links
+   against the seat. */
 .bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] {
-  justify-content: center;
   align-items: center;
+}
+.bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] > button:has(+ .bre-auto-effort) {
+  margin-left: auto;
+}
+
+/* The seat's verdict, so a click is never silent: the colour carries the
+   outcome the label only spells out, and a pass in flight reads as busy. */
+.bre-auto-effort[data-bre-auto-effort-phase='working'] {
+  opacity: 0.6;
+  cursor: progress;
+}
+.bre-auto-effort[data-bre-auto-effort-phase='done'] {
+  color: var(--dsw-alias-state-success-primary, #22c55e);
+}
+.bre-auto-effort[data-bre-auto-effort-phase='failed'] {
+  color: var(--dsw-alias-state-error-primary, #ec1313);
 }
 
 /* The API-key eye. The official key field is a plain flex column whose input is

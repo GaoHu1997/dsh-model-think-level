@@ -1743,6 +1743,54 @@ describe('the auto-adapt seat', () => {
     // Held, not written: an open official card owns the document, and its own
     // Save is what lands this (issue #7 / C2).
     expect(deps.mutate).not.toHaveBeenCalled()
+    // And the seat says so: the click used to be completely silent, which is
+    // indistinguishable from a control that does nothing at all.
+    const seat = root.querySelector<HTMLButtonElement>('.bre-auto-effort')!
+    expect(seat.textContent).toBe('autoAdaptDone')
+    expect(seat.getAttribute('data-bre-auto-effort-phase')).toBe('done')
+    expect(seat.disabled).toBe(false)
+  })
+
+  it('answers a click with nothing to adapt instead of staying silent', async () => {
+    // Every model already declares its levels: the pass SUCCEEDED and did
+    // nothing, which must not read like a refusal or a dead button.
+    const configured = structuredClone(join)
+    for (const layer of ['value', 'user'] as const) {
+      const models = (configured.namespace![layer] as { providers: { aliyun: { models: Array<Record<string, unknown>> } } }).providers.aliyun.models
+      for (const model of models) model['reasoningEfforts'] = { high: 'high' }
+    }
+    const deps = makeDeps({ describeNamespace: async () => configured })
+    const state = createScanState()
+    const root = buildModelsDom()
+    await settle(() => reconcile(root, deps, state), state)
+
+    root.querySelector<HTMLButtonElement>('.bre-auto-effort')!.click()
+    for (let tick = 0; tick < 40 && state.queued.size === 0; tick += 1) {
+      await new Promise(resolve => { setTimeout(resolve, 0) })
+    }
+
+    expect(state.queued.size).toBe(0)
+    const seat = root.querySelector<HTMLButtonElement>('.bre-auto-effort')!
+    expect(seat.textContent).toBe('autoAdaptEmpty')
+    expect(seat.getAttribute('title')).toBe('autoAdaptEmptyHint')
+  })
+
+  it('reports a read-only click as blocked rather than as already configured', async () => {
+    // The two read the same on screen ("nothing was written") and mean opposite
+    // things: one is the pass working, the other is the pass refusing.
+    const deps = makeDeps({ describeNamespace: async () => ({ ...join, writable: false }) })
+    const state = createScanState()
+    const root = buildModelsDom()
+    await settle(() => reconcile(root, deps, state), state)
+
+    root.querySelector<HTMLButtonElement>('.bre-auto-effort')!.click()
+    for (let tick = 0; tick < 40 && state.queued.size === 0; tick += 1) {
+      await new Promise(resolve => { setTimeout(resolve, 0) })
+    }
+
+    const seat = root.querySelector<HTMLButtonElement>('.bre-auto-effort')!
+    expect(seat.textContent).toBe('autoAdaptBlocked')
+    expect(seat.getAttribute('title')).toBe('autoAdaptBlockedHint')
   })
 
   it('saves every unconfigured collapsed model with thinking and vision while preserving configured models', async () => {
@@ -1813,11 +1861,14 @@ describe('the auto-adapt seat', () => {
     await settle(() => reconcile(root, deps, state), state)
     expect(deps.mount).toHaveBeenCalledTimes(1)
 
-    await adaptEveryModel(state, deps, 'aliyun')
+    const report = await adaptEveryModel(state, deps, 'aliyun')
 
     const held = state.queued.get('aliyun')
     expect(held?.has('qwen-turbo')).toBe(true)
     expect(held?.has('qwen-max')).toBe(true)
+    // The seat's label counts what the pass HELD: the walk is the only thing
+    // that knows, so the caller gets a tally rather than a bare resolve.
+    expect(report).toEqual({ held: 2, unsuggested: 0 })
   })
 
   it('does not overwrite a model whose thinking levels are already configured', async () => {
@@ -1845,9 +1896,12 @@ describe('the auto-adapt seat', () => {
     const deps = makeDeps({ describeNamespace: async () => ({ ...join, writable: false }) })
     const state = createScanState()
 
-    await adaptEveryModel(state, deps, 'aliyun')
+    const report = await adaptEveryModel(state, deps, 'aliyun')
 
     expect(state.queued.size).toBe(0)
+    // Reported as blocked, never as `{held: 0}`: the seat would render an empty
+    // tally as "已全部配置", which is a lie about a page that refuses writes.
+    expect(report).toEqual({ held: 0, unsuggested: 0, blocked: 'unwritable' })
   })
 
   it('ignores a route the settings document does not declare', async () => {
@@ -1856,8 +1910,28 @@ describe('the auto-adapt seat', () => {
     const deps = makeDeps()
     const state = createScanState()
 
-    await adaptEveryModel(state, deps, 'acme-gateway')
+    const report = await adaptEveryModel(state, deps, 'acme-gateway')
 
     expect(state.queued.size).toBe(0)
+    expect(report).toEqual({ held: 0, unsuggested: 0, blocked: 'unknown-route' })
+  })
+
+  it('answers a second click while a pass is running with busy, not with a tally', async () => {
+    // The re-entrancy guard used to return silently, so a double click looked
+    // like an instant success: the seat would paint "已全部配置" over a pass
+    // that had not finished reading the document yet.
+    let release = (): void => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const deps = makeDeps({
+      describeNamespace: async () => { await gate; return join },
+    })
+    const state = createScanState()
+
+    const first = adaptEveryModel(state, deps, 'aliyun')
+    const second = await adaptEveryModel(state, deps, 'aliyun')
+    expect(second).toEqual({ held: 0, unsuggested: 0, blocked: 'busy' })
+    release()
+    // The pass that owns the route still reports its own result.
+    expect((await first).held).toBeGreaterThan(0)
   })
 })
