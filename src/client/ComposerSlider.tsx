@@ -32,6 +32,7 @@ import {
   useSyncExternalStore,
 } from 'react'
 import { flushSync } from 'react-dom'
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import { inferModalitiesFromName, matchKnowledgeBase } from '../knowledge.js'
 import { selectRefusalMessage } from './effort-memory.js'
@@ -139,6 +140,80 @@ function chevron(open: boolean): ReactNode {
     'span',
     { className: 'bre-row-chevron' + (open ? ' is-open' : ''), 'aria-hidden': true },
     '›',
+  )
+}
+
+/**
+ * A truncated span carries its full text in a custom tooltip instead of the
+ * native `title` bubble, which the page cannot style and which reads harsh
+ * next to the menu.
+ */
+interface TruncatedTipState {
+  /** The element that is truncating its text. */
+  target: HTMLElement
+  /** The full text to show. */
+  text: string
+}
+
+/**
+ * The tip is only for spans that ACTUALLY truncate: the check is
+ * `scrollWidth > clientWidth` on enter, so a short provider or model name never
+ * pops a bubble. Positioning happens at show time, under the span, aligned to
+ * its right edge — the truncated end — and clamped to the viewport.
+ */
+function useTruncatedTip(): {
+  tip: TruncatedTipState | null
+  /** onMouseEnter handler for a possibly-truncating span. */
+  onEnter: (event: { currentTarget: HTMLElement }, text: string) => void
+  onLeave: () => void
+} {
+  const [tip, setTip] = useState<TruncatedTipState | null>(null)
+  const timerRef = useRef<number>(0)
+  useEffect(() => () => { window.clearTimeout(timerRef.current) }, [])
+  const onLeave = useCallback((): void => {
+    window.clearTimeout(timerRef.current)
+    setTip(null)
+  }, [])
+  const onEnter = useCallback((event: { currentTarget: HTMLElement }, text: string): void => {
+    window.clearTimeout(timerRef.current)
+    const target = event.currentTarget
+    // Truncation check first: nothing to show for a name that fits.
+    if (target.scrollWidth <= target.clientWidth + 1) return
+    timerRef.current = window.setTimeout(() => {
+      setTip({ target, text })
+    }, 300)
+  }, [])
+  return { tip, onEnter, onLeave }
+}
+
+/** The mouse-enter face the DOM hands a React handler (the only field we read). */
+type EnterEvent = { currentTarget: HTMLElement }
+
+/**
+ * Render the tip bubble on <body> (fixed positioning escapes the menu's
+ * overflow clip and stacking context), under the truncated span and aligned to
+ * its right edge — the end the ellipsis sits at — clamped into the viewport.
+ * The span keeps its label as an aria-label so screen readers still get the
+ * full name without a hover.
+ */
+function TruncatedTip({ state }: { state: TruncatedTipState }): ReactNode {
+  if (typeof document === 'undefined') return null
+  const box = state.target.getBoundingClientRect()
+  const left = Math.max(12, Math.min(box.right, window.innerWidth - 12))
+  return createPortal(
+    createElement(
+      'div',
+      {
+        className: 'bre-tip',
+        role: 'tooltip',
+        style: {
+          top: Math.min(box.bottom + 6, window.innerHeight - 40),
+          right: Math.max(12, window.innerWidth - left),
+        },
+      },
+      state.text,
+    ),
+    document.body,
   )
 }
 
@@ -463,6 +538,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   }, [collapsePanel, directory, focusMenu, levels, select, state.current, state.status, t])
 
   /** The two rows; each opens its own list underneath. */
+  const { tip, onEnter, onLeave } = useTruncatedTip()
   const rows: ReactNode[] = [
     createElement(
       'button',
@@ -473,10 +549,21 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
         className: 'bre-row-control' + (panel === 'model' ? ' is-open' : ''),
         disabled: busy,
         'aria-expanded': panel === 'model',
+        onMouseLeave: onLeave,
         onClick: () => { togglePanel(panel === 'model' ? null : 'model') },
       },
       createElement('span', { className: 'bre-row-label' }, t('modelRowLabel')),
-      createElement('span', { className: 'bre-row-value' }, modelLabel),
+      createElement(
+        'span',
+        {
+          className: 'bre-row-value',
+          // The full label for screen readers; sighted users get the custom
+          // tooltip (below) only when the one-line value actually truncates.
+          'aria-label': modelLabel,
+          onMouseEnter: (event: EnterEvent) => { onEnter(event, modelLabel) },
+        },
+        modelLabel,
+      ),
       chevron(panel === 'model'),
     ),
     // Provider column + the models of the selected provider, side by side. The
@@ -499,11 +586,21 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
                 + (provider === current?.provider ? ' is-current' : ''),
               disabled: busy,
               'aria-expanded': provider === shownProvider,
+              onMouseLeave: onLeave,
               onClick: () => { setOpenProvider(provider) },
             },
             createElement(
               'span',
-              { className: 'bre-option-name' },
+              {
+                className: 'bre-option-name',
+                // The provider column truncates long labels with ellipsis; the
+                // custom tooltip keeps the full name readable without the
+                // native title bubble.
+                'aria-label': providerLabelOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike),
+                onMouseEnter: (event: EnterEvent) => {
+                  onEnter(event, providerLabelOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike))
+                },
+              },
               providerLabelOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike),
             ),
             chevron(provider === shownProvider),
@@ -528,9 +625,18 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
                   className: 'bre-option' + (active ? ' is-active' : ''),
                   disabled: busy,
                   'aria-pressed': active,
+                  onMouseLeave: onLeave,
                   onClick: () => { void chooseModel(shownProvider as string, choice.id) },
                 },
-                createElement('span', { className: 'bre-option-name' }, choice.name ?? choice.id),
+                createElement(
+                  'span',
+                  {
+                    className: 'bre-option-name',
+                    'aria-label': choice.name ?? choice.id,
+                    onMouseEnter: (event: EnterEvent) => { onEnter(event, choice.name ?? choice.id) },
+                  },
+                  choice.name ?? choice.id,
+                ),
                 // No tick on a model row: it would sit right beside the
                 // capability badges and read as one of them. The accent colour
                 // (plus the row tint in CSS) is the whole selection signal.
@@ -593,5 +699,6 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     error === null
       ? null
       : createElement('div', { className: 'bre-model-error', role: 'status' }, error),
+    tip === null ? null : createElement(TruncatedTip, { key: 'tip', state: tip }),
   )
 }

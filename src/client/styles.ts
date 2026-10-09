@@ -472,6 +472,40 @@ export const STYLES = `
 .bre-tag-icon { display: block; width: 13px; height: 13px; }
 .bre-option-check { flex: none; width: 14px; height: 14px; }
 .bre-empty { padding: 6px 8px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+/* ---- Truncated-label tooltip (custom, replaces the native title) ----
+   A self-drawn bubble instead of the OS tooltip, which the page cannot style
+   and which reads harsh next to the menu. Fixed-positioned on <body> so the
+   menu's own overflow/clip cannot cut it, aligned under the truncated span,
+   capped to the viewport with wrap for very long names. */
+.bre-tip {
+  position: fixed;
+  z-index: 2147483647;
+  max-width: min(360px, calc(100vw - 24px));
+  box-sizing: border-box;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-module-platform, #232630);
+  color: var(--dsw-alias-label-primary, #f2f3f5);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .22);
+  animation: bre-tip-in 120ms ease-out;
+}
+body:not([data-ds-dark-theme]) .bre-tip {
+  background: #ffffff;
+  color: var(--dsw-alias-label-primary, #1f2329);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .14), 0 0 0 .5px var(--dsw-alias-border-l4, rgba(0, 0, 0, .1));
+}
+@keyframes bre-tip-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bre-tip { animation: none; }
+}
 .bre-slider-advanced {
   /* upstream .re-advanced: the padded area that hosts the slider */
   padding: 14px;
@@ -1067,10 +1101,23 @@ body:not([data-ds-dark-theme]) .bre-effort.is-dragging .bre-effort-knob {
   flex-direction: column;
   gap: 8px;
 }
+/* The titled-section rows the pane is built from: the title row names its
+   section (headers first; future advanced sections each carry one), sitting
+   under a hairline the way the official page's group titles do. */
+.bre-headers-title-row {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, #0000001a);
+  margin-bottom: 2px;
+}
+.bre-headers-title-row .bre-effort-title {
+  font-size: 13px;
+  line-height: 20px;
+}
+
 .bre-headers-columns,
 .bre-headers-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.9fr) minmax(180px, 1.5fr) 32px;
+  grid-template-columns: minmax(120px, 0.9fr) minmax(180px, 1.5fr) 28px;
   align-items: center;
   gap: 8px;
 }
@@ -1099,7 +1146,7 @@ body:not([data-ds-dark-theme]) .bre-effort.is-dragging .bre-effort-knob {
   background: var(--dsw-alias-interactive-bg-hover, #2631480f);
 }
 .bre-headers-remove {
-  width: 32px;
+  width: 28px;
   padding: 0;
   justify-self: center;
 }
@@ -1203,7 +1250,7 @@ body:not([data-ds-dark-theme]) .bre-effort.is-dragging .bre-effort-knob {
 @media (max-width: 520px) {
   .bre-headers-columns { display: none; }
   .bre-headers-row {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) 32px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) 28px;
     gap: 6px;
     padding: 4px;
   }

@@ -315,6 +315,13 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
               : editing || inline
                 ? (
                   <div className="bre-headers-edit">
+                    {/* The section's title row. Under the tabs the pane has no
+                        head strip of its own, and future advanced sections each
+                        carry one of these of their own — the pane is a stack of
+                        titled sections, headers being the first. */}
+                    <div className="bre-headers-title-row">
+                      <span className="bre-effort-title">{t('headersTitle')}</span>
+                    </div>
                     <div className="bre-headers-columns" aria-hidden="true">
                       <span>{t('headersName')}</span>
                       <span>{t('headersValue')}</span>

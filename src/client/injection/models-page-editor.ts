@@ -44,6 +44,7 @@ import type { EffortEditorApi, EffortWriteIntent, HeldWrite, RemoteApi, Settings
 import { cataloguesOf, reconcileAutoEffortSeats, type AutoEffortSeatTarget } from './auto-effort-seat.js'
 import type { AutoAdaptReport } from '../auto-effort.js'
 import { panelRoot } from './mount.js'
+import { scrollHostOf } from './row-drag.js'
 
 export type { SettingsJoin }
 
@@ -280,6 +281,11 @@ export interface ScanState {
   submitWired: WeakSet<Element>
   /** Cancel buttons already wired. */
   cancelWired: WeakSet<Element>
+  /** Disclosure chevrons already wired for the top re-pin, so a re-scan
+   * never double-registers. */
+  disclosureWired: WeakSet<Element>
+  /** Provider-row Edit buttons already wired for the top re-pin. */
+  editWired: WeakSet<Element>
 }
 
 /**
@@ -500,6 +506,8 @@ export function createScanState(): ScanState {
     signalsUnavailable: false,
     submitWired: new WeakSet(),
     cancelWired: new WeakSet(),
+    disclosureWired: new WeakSet(),
+    editWired: new WeakSet(),
   }
   restoreLedger(state)
   return state
@@ -1432,6 +1440,292 @@ function wireOnce(
 }
 
 /**
+ * One re-pin window, as it stands on its scroll host.
+ *
+ * `deadline` is EXTENDABLE: a second request on the same host lengthens the
+ * running window instead of starting a second loop, so two overlapping height
+ * changes (the official disclosure opening, then the injected editor mounting a
+ * scan later) share ONE pinned position — the one measured when the first of
+ * them arrived — and one suppression.
+ *
+ * The pinned element is whichever one the FIRST request named: the disclosure
+ * path names the row card, the mount path the official editing box it found the
+ * container in. Both sit above the growth either way, so the card cannot walk
+ * up whichever of the two is being watched.
+ */
+interface RepinWindow {
+  /** When the window closes, on the `performance.now()` clock. */
+  deadline: number
+  /** When the window opened, which bounds every extension of it. */
+  startedAt: number
+  /** The frame this window is waiting on, while one is pending. */
+  frame: number | undefined
+  /** Give the scroll host back to the browser and forget the window. */
+  release(): void
+}
+
+/** The window running on each scroll host, so at most one ever fights the anchoring. */
+const REPINS = new WeakMap<HTMLElement, RepinWindow>()
+
+/**
+ * How long each source of height change keeps its card pinned.
+ *
+ * Both cover the injector's own debounced scan (`SCAN_DEBOUNCE_MS`, 120ms) plus
+ * the async `createRoot` render that follows it: the click's window has to
+ * survive the official render AND the editor mount that follows a scan later,
+ * and the mount's own window has to survive React's render.
+ */
+const REPIN_CLICK_MS = 420
+const REPIN_MOUNT_MS = 320
+
+/**
+ * How long a window keeps holding after the card last CHANGED HEIGHT.
+ *
+ * The clocks above are budgets measured from the event that opened the window,
+ * and the card can still be growing when they run out — a slow settings read
+ * puts the editor mount later, and React can land its render in more than one
+ * commit. A window that is still watching a moving card is therefore extended
+ * to this quiet period, so it lets go after the growth has STOPPED rather than
+ * after a fixed guess at when it would.
+ */
+const REPIN_QUIET_MS = 160
+
+/**
+ * The ceiling on one window, extensions included.
+ *
+ * The quiet period above is only pushed out while the card moves, so this is
+ * what keeps a card that keeps growing (an endlessly re-rendering editor) from
+ * pinning the page forever. It is also generous enough to cover a settings read
+ * that answers a second late.
+ */
+const REPIN_MAX_MS = 2000
+
+/**
+ * A hard frame ceiling for one window, as a stopgap beside the clock.
+ *
+ * The deadline is wall-clock, and a clock that stops advancing while frames
+ * keep arriving (a fake one under test, a throttled tab that has stopped
+ * painting) would leave the loop running for as long as frames do. ~2.5s at
+ * 60fps clears {@link REPIN_MAX_MS} with room to spare.
+ */
+const REPIN_MAX_FRAMES = 150
+
+/**
+ * The keys that scroll the page rather than edit a field.
+ *
+ * The stand-down above fires on a user's INPUT, and a keydown is the one input
+ * that is mostly typing: releasing the pin because someone typed a letter into
+ * the editor that just mounted would hand the page back to its anchoring
+ * mid-growth. Only the keys that actually move a scrollport count.
+ */
+const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' '])
+
+/**
+ * Hold one card's viewport position while its content changes height.
+ *
+ * Growing a card below the header makes the browser's scroll anchoring keep a
+ * node near the GROWING part visually stable, which walks the card's header —
+ * and everything above it — up the viewport. Suppressing anchoring for the
+ * duration and re-pinning the card's top every frame turns that into the card
+ * growing DOWNWARD instead.
+ *
+ * The card does not reach its final height at once, which is what a
+ * stability-bounded loop got wrong: the official React commit renders the
+ * disclosure container on the click, and this plugin's editor mounts a
+ * debounced scan later through an async render. Measured on the live page with
+ * the settings list scrolled to its end, the first change lands in the click's
+ * own frame and the second ~100ms later: a loop that stopped three stable
+ * frames after the click (~50ms) had already handed anchoring back, and the
+ * second change then walked the card 587px up the viewport.
+ *
+ * So the window is TIME-bounded, and a window that is still watching the card
+ * grow is pushed out to {@link REPIN_QUIET_MS} past the last change it saw — it
+ * releases when the growth STOPS, not when a fixed guess says it should have.
+ * {@link REPIN_MAX_MS} bounds that.
+ *
+ * The window stands down early on two conditions, both of which mean the
+ * measurement it is working from is no longer valid: the USER scrolled (their
+ * scroll must not be fought), or the card left the document (React replaced
+ * it — a detached box measures 0, and correcting against that would throw the
+ * view somewhere arbitrary).
+ *
+ * "The user scrolled" is read from their INPUT — a wheel, a touch, a pointer
+ * press or a scrolling key — and NOT from the scroll offset, which is the one
+ * thing the page itself also moves: the browser clamps it when a card above
+ * collapses, and this loop moves it on purpose. Watching the offset called
+ * every one of those a user scroll and abandoned the pin, which is exactly
+ * what opening a provider card needs: one official editor at a time means the
+ * card that was open closes in the same commit, the content above the clicked
+ * row shrinks by the closing editor's height, and the row has to be held where
+ * the user left it rather than walk off the top of the view.
+ *
+ * The correction itself adds the delta to the offset because the offset and the
+ * viewport are inverse: a card that has moved DOWN the screen (a positive
+ * delta) is brought back by scrolling DOWN the document, and one that has moved
+ * up by scrolling up. Subtracting it — as this did while the suppression was
+ * doing all the work and the delta was always 0 — drives the card the wrong way
+ * whenever the page really did move it.
+ */
+function pinCardTop(card: HTMLElement, windowMs: number): void {
+  const host = scrollHostOf(card)
+  if (host === undefined || !card.isConnected) return
+  const now = performance.now()
+  const running = REPINS.get(host)
+  if (running !== undefined) {
+    // Same host: keep the position the first request measured and just hold on
+    // longer, so the two height changes are pinned against one origin. The
+    // extension is still bounded by the ceiling measured from the first
+    // request, so two windows can never chain into an unbounded one.
+    running.deadline = Math.min(Math.max(running.deadline, now + windowMs), running.startedAt + REPIN_MAX_MS)
+    return
+  }
+  const rectBefore = card.getBoundingClientRect()
+  const topBefore = rectBefore.top
+  let heightBefore = rectBefore.height
+  // The offset this loop itself last left, so its own writes are never mistaken
+  // for somebody else's scroll.
+  let lastSet = host.scrollTop
+  host.style.overflowAnchor = 'none'
+  // Named `pin`, not `window`: this module runs in the browser, and a local
+  // called `window` would shadow the global the frame APIs come from.
+  const pin: RepinWindow = { deadline: now + windowMs, startedAt: now, frame: undefined, release: () => {} }
+  const release = (): void => {
+    if (pin.frame !== undefined) {
+      window.cancelAnimationFrame(pin.frame)
+      pin.frame = undefined
+    }
+    host.style.overflowAnchor = ''
+    REPINS.delete(host)
+    document.removeEventListener('wheel', onUserInput, true)
+    document.removeEventListener('touchstart', onUserInput, true)
+    document.removeEventListener('pointerdown', onUserInput, true)
+    document.removeEventListener('keydown', onKeyScroll, true)
+  }
+  function onUserInput(): void {
+    release()
+  }
+  function onKeyScroll(event: KeyboardEvent): void {
+    if (SCROLL_KEYS.has(event.key)) release()
+  }
+  pin.release = release
+  REPINS.set(host, pin)
+  document.addEventListener('wheel', onUserInput, { capture: true, passive: true })
+  document.addEventListener('touchstart', onUserInput, { capture: true, passive: true })
+  document.addEventListener('pointerdown', onUserInput, { capture: true })
+  document.addEventListener('keydown', onKeyScroll, { capture: true })
+  let frames = 0
+  const tick = (): void => {
+    pin.frame = undefined
+    frames += 1
+    if (!card.isConnected || frames >= REPIN_MAX_FRAMES) {
+      release()
+      return
+    }
+    const rect = card.getBoundingClientRect()
+    // Still growing: the height change that follows has to stay inside this
+    // window, so the release is pushed back to a quiet period after it.
+    const grew = Math.abs(rect.height - heightBefore) > 0.5
+    // An offset this loop did not write, in a frame where nothing changed
+    // height, is a scroll of somebody else's — a scrollbar drag is the one
+    // gesture the input listeners above cannot see. A frame that DID change
+    // height is the page rebuilding the card, and its offset move is the one
+    // this window exists to undo.
+    if (!grew && host.scrollTop !== lastSet) {
+      release()
+      return
+    }
+    const delta = rect.top - topBefore
+    if (delta !== 0) {
+      host.scrollTop += delta
+      lastSet = host.scrollTop
+    }
+    const at = performance.now()
+    if (grew) {
+      heightBefore = rect.height
+      pin.deadline = Math.min(Math.max(pin.deadline, at + REPIN_QUIET_MS), pin.startedAt + REPIN_MAX_MS)
+    }
+    if (at >= pin.deadline) {
+      release()
+      return
+    }
+    pin.frame = window.requestAnimationFrame(tick)
+  }
+  pin.frame = window.requestAnimationFrame(tick)
+}
+
+/**
+ * Wire one model row's disclosure chevron so its toggle cannot walk the card
+ * up the viewport ({@link pinCardTop}).
+ *
+ * Capture phase, before the official handler: the click's own height change has
+ * to be inside the window, and it is the click that opens the window.
+ */
+function wireDisclosureRepin(
+  trigger: HTMLElement,
+  wired: WeakSet<Element>,
+): void {
+  wireOnce(trigger, wired, () => {
+    const row = trigger.closest<HTMLElement>('[class*="modelEntry"]') ?? trigger.closest<HTMLElement>('[class*="rowCard"]')
+    if (row === null) return
+    pinCardTop(trigger.closest<HTMLElement>('[class*="rowCard"]') ?? row, REPIN_CLICK_MS)
+  })
+}
+
+/** The `{provider}` slot inside one official aria-label template. */
+const PROVIDER_TOKEN = '{provider}'
+
+/**
+ * The official Edit button of one provider row, found through the host's own
+ * `editProvider` template (`编辑 {provider}` / `Edit {provider}`).
+ *
+ * Matched by template rather than by class: the label is the one thing the
+ * official rows and this plugin's seats cannot both carry, whereas
+ * `secondaryButton` is shared with every other secondary control on the page.
+ * Buttons inside our own DOM are skipped anyway, so a future label of ours that
+ * happened to read like this one could never be pinned as an official control.
+ * @param row - one provider row to search.
+ * @param labels - the host label anchors in the active language.
+ * @returns the row's official Edit buttons, one per template that matches.
+ */
+function editTriggersOf(row: HTMLElement, labels: HostLabels): HTMLElement[] {
+  const templates = labels.editProvider.map(template => {
+    const at = template.indexOf(PROVIDER_TOKEN)
+    return at < 0 ? undefined : { prefix: template.slice(0, at), suffix: template.slice(at + PROVIDER_TOKEN.length) }
+  }).filter((parts): parts is { prefix: string; suffix: string } => parts !== undefined)
+  if (templates.length === 0) return []
+  const found: HTMLElement[] = []
+  for (const button of Array.from(row.querySelectorAll<HTMLElement>('button[aria-label]'))) {
+    const label = button.getAttribute('aria-label') ?? ''
+    if (!templates.some(parts => label.length > parts.prefix.length + parts.suffix.length
+      && label.startsWith(parts.prefix) && label.endsWith(parts.suffix))) continue
+    if (button.closest('[data-plugin]') !== null) continue
+    found.push(button)
+  }
+  return found
+}
+
+/**
+ * Wire one provider row's Edit button so opening its card cannot walk the row
+ * up the viewport ({@link pinCardTop}).
+ *
+ * This is the page's largest single height change, and the only one whose
+ * growth is matched by a collapse ABOVE it: the official page edits one
+ * provider at a time, so the card that was open closes in the same commit. The
+ * closing editor is also the browser's own anchor node, so anchoring has
+ * nothing left to hold and the view is not compensated — measured on the live
+ * page, the row the user clicked walked 474px up the viewport, exactly the
+ * height of the editor that closed. Capture phase, like the chevrons, so the
+ * window is open before the official handler commits.
+ */
+function wireEditRepin(trigger: HTMLElement, wired: WeakSet<Element>): void {
+  wireOnce(trigger, wired, () => {
+    const card = trigger.closest<HTMLElement>('[class*="rowCard"], [class*="setupCard"], [class*="addCard"]')
+    if (card === null) return
+    pinCardTop(card, REPIN_CLICK_MS)
+  })
+}
+
+/**
  * Whether an official editing card is open on the page, told from the card's
  * own action row (its Cancel/commit pair) with the model-row containers as a
  * fallback signal.
@@ -1487,6 +1781,16 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // from those buttons alone would let a write slip into that card's frozen
   // revision baseline -- issue #7 again, under a rarer trigger.
   const cardOpen = officialCardOf(root) !== undefined
+  // The provider rows' OWN Edit buttons are wired BEFORE every gate below, and
+  // that placement is the point: opening a card is the page's largest height
+  // change, and it happens exactly when NO card is open — the branch that
+  // returns early below — so a pin wired any later would only ever be in place
+  // for the second card the user opens. Scoped to the rows themselves, so the
+  // document-wide scan this rides never goes looking for Edit buttons in the
+  // rest of the app. See {@link wireEditRepin}.
+  for (const row of Array.from(root.querySelectorAll<HTMLElement>('[class*="rowCard"], [class*="setupCard"]'))) {
+    for (const trigger of editTriggersOf(row, labels)) wireEditRepin(trigger, state.editWired)
+  }
   // Match on the attribute VALUE, never through a selector built out of host
   // copy: a language pack whose label carries a quote or a bracket would make
   // `querySelector` throw, and this scan has no try/catch around it, so the
@@ -1535,6 +1839,18 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     })
     return
   }
+  // The chevrons are wired HERE, not inside the describe callback below.
+  // Re-pinning a card's top needs no settings data — only the click and the DOM
+  // — while the row scan below is downstream of `describeNamespace()`. A read
+  // that is slow, refused or retrying therefore used to leave every chevron
+  // unwired, and an unwired chevron means the card walks up the viewport on
+  // every expand: the exact symptom, appearing only on the occasions a settings
+  // read was unhappy. Idempotent by node (wireOnce), so it costs one query.
+  for (const aria of labels.capacity) {
+    for (const trigger of Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))) {
+      if ((trigger.getAttribute('aria-label') ?? '').startsWith(aria)) wireDisclosureRepin(trigger, state.disclosureWired)
+    }
+  }
   // Fold the describe request across scans (one wire read per wave). A
   // promise's .then ALWAYS runs asynchronously (microtask), even when already
   // resolved — the fold just keeps concurrent scans from stacking wire reads.
@@ -1559,6 +1875,9 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       const triggers = Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
         .filter(button => (button.getAttribute('aria-label') ?? '').startsWith(aria))
       for (const trigger of triggers) {
+        // The chevron's re-pin is wired above, ahead of this read (see the
+        // pass in `reconcile`): it needs no settings data, and keeping it here
+        // would make the page's scroll behaviour depend on a wire read.
         const card = cardOf(trigger)
         if (card === undefined) continue
         // The model id lives on the trigger's OWN row, not elsewhere in the
@@ -1765,6 +2084,12 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         return
       }
       if (hasEditor(container)) return
+      // Mounting the editor is a height change of its own — a debounced scan
+      // after the disclosure opened, and a re-render is one more — so the card
+      // is pinned across it too. Without this the click's window (which ends
+      // before a scan's mount arrives) hands the browser back to its anchoring
+      // just in time for the editor to grow the card and walk the header up.
+      pinCardTop(cardOf(container) ?? target.card, REPIN_MOUNT_MS)
       const editor = deps.mount(container, next)
       state.mounted.set(container, { editor, props: next })
     })

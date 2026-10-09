@@ -50,6 +50,7 @@
 import { setAttr, setClass, setHidden, setText } from './dom.js'
 import { KEY_MANAGED_CLASS, enhanceKeyManagerField, resetKeyManagerField, teardownKeyManager } from './key-manager.js'
 import { KEY_FIELD_CLASS, resetKeyField, revealKeyField } from './key-reveal.js'
+import { scrollHostOf } from './row-drag.js'
 
 /** Marks the tab bar the plugin's own tab-bar component renders (one per card). */
 const TABS_CLASS = 'bre-editor-tabs'
@@ -166,10 +167,45 @@ export function editorCardOf(element: Element | null): HTMLElement | null {
  * Switch one card to a tab. The card attribute is the single source of truth:
  * the stylesheet swaps the pane on the attribute alone, and the bar's buttons
  * follow it here.
+ *
+ * Switching panes changes the card's height (the model list is far taller than
+ * the identity fields), and the browser's scroll anchoring then keeps a node
+ * near the card's BOTTOM visually stable — the card's header walks up the
+ * viewport. The card's top is re-pinned here instead: the scroll host's offset
+ * is measured against the card's viewport position before the switch and
+ * restored against it after, so the header stays put and the card grows
+ * DOWNWARD.
+ *
+ * The restore ADDS the delta to the offset, the way {@link pinCardTop} does:
+ * a card that has moved down the screen is brought back by scrolling down the
+ * document. Subtracting it works only while the delta is 0 — which is the
+ * common case here, because the suppression below is what stops the browser
+ * from moving the offset in the first place — and drives the card the wrong way
+ * on the occasion the swap really did move it.
  */
 export function selectEditorTab(card: HTMLElement, id: EditorTabId): void {
+  const host = scrollHostOf(card)
+  // The card's viewport Y before the pane swap — the number the restore below
+  // re-earns. The scroll host's offset is captured with it because the swap
+  // may reset the host's own scrollTop as its content shrinks and grows.
+  const topBefore = card.getBoundingClientRect().top
+  const scrollTopBefore = host?.scrollTop ?? 0
+  // Suppress the host's scroll anchoring across the swap: anchoring keeps a
+  // node near the card's BOTTOM stable, which is exactly the walk-up this
+  // restores. With it off, the host's scrollTop stays where it was put.
+  if (host !== undefined) host.style.overflowAnchor = 'none'
   setAttr(card, TAB_ATTR, id)
   syncSelected(card)
+  if (host === undefined) return
+  // The pane swap is pure CSS: the reflow it costs lands in the same frame, so
+  // one rAF later the new height is measurable and the top can be re-pinned.
+  requestAnimationFrame(() => {
+    host.style.overflowAnchor = ''
+    // A scroll of our own (or of the user, mid-restore) must not be fought.
+    if (host.scrollTop !== scrollTopBefore) return
+    const delta = card.getBoundingClientRect().top - topBefore
+    if (delta !== 0) host.scrollTop += delta
+  })
 }
 
 /**

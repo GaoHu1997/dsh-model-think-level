@@ -1942,3 +1942,231 @@ describe('the auto-adapt seat', () => {
     expect((await first).held).toBeGreaterThan(0)
   })
 })
+
+/**
+ * Re-pinning a card's top across a model row's disclosure toggle.
+ *
+ * The card grows in TWO stages: the official React commit renders the
+ * disclosure container in the click's own frame, and the injected editor mounts
+ * a debounced scan later. Measured on the live page (settings list scrolled to
+ * its end), the second stage lands ~100ms after the click and moved the card
+ * 587px up the viewport whenever the window had already let go — which is what
+ * a loop that released three stable frames after the click did.
+ */
+describe('disclosure re-pin', () => {
+  /** A scroll host the injector can find, carrying the metrics jsdom lacks. */
+  function scrollHostAround(section: HTMLElement): HTMLElement {
+    const host = document.createElement('div')
+    host.style.overflowY = 'auto'
+    Object.defineProperty(host, 'scrollHeight', { value: 2000, configurable: true })
+    Object.defineProperty(host, 'clientHeight', { value: 600, configurable: true })
+    host.appendChild(section)
+    document.body.appendChild(host)
+    return host
+  }
+
+  /**
+   * Pin the card's box to whatever `height` reports, so the loop sees growth.
+   *
+   * Both elements a re-pin window can be opened on are stubbed: the disclosure
+   * path pins the row card, the editor mount pins the official editing box it
+   * found the container in. One window runs per scroll host, so whichever of
+   * the two opened first is the element the loop measures — and both of them sit
+   * above the growth either way.
+   */
+  function stubCardBox(card: Element, height: () => number): void {
+    const box = (): DOMRect => ({
+      top: 100, bottom: 100 + height(), left: 0, right: 600, width: 600, height: height(),
+      x: 0, y: 100, toJSON: () => ({}),
+    }) as DOMRect
+    card.getBoundingClientRect = box
+    for (const inner of Array.from(card.querySelectorAll('[class*="editor"]'))) {
+      inner.getBoundingClientRect = box
+    }
+  }
+
+  const wait = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
+
+  it('still holds the host when the editor mounts a scan after the click', async () => {
+    const section = buildModelsDom()
+    const host = scrollHostAround(section)
+    const deps = makeDeps()
+    const state = createScanState()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+
+    const chevron = section.querySelector<HTMLElement>('button[aria-label="Capacities 1"]')
+    expect(chevron).not.toBeNull()
+    chevron?.click()
+
+    // Suppressed in the click's own capture phase, before the official handler.
+    expect(host.style.overflowAnchor).toBe('none')
+    // The window has to OUTLIVE the click's frame: the editor mount that grows
+    // the card again arrives with the injector's 120ms debounced scan.
+    await wait(150)
+    expect(host.style.overflowAnchor).toBe('none')
+    // ...and it lets go on its own once the card has stopped moving.
+    await wait(700)
+    expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('extends the window while the card keeps growing, then releases', async () => {
+    const section = buildModelsDom()
+    const card = section.querySelector<HTMLElement>('.rowCard')
+    const host = scrollHostAround(section)
+    expect(card).not.toBeNull()
+    if (card === null) return
+    // A second growth just inside the click's budget: React can land the mount
+    // in more than one commit, and the window has to cover what follows it —
+    // not stop on the clock while the card is still moving.
+    const started = Date.now()
+    stubCardBox(card, () => (Date.now() - started > 350 ? 900 : 300))
+
+    const deps = makeDeps()
+    const state = createScanState()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+
+    section.querySelector<HTMLElement>('button[aria-label="Capacities 1"]')?.click()
+    await wait(460)
+    // Past the click's own 420ms budget, but the growth pushed the release out.
+    expect(host.style.overflowAnchor).toBe('none')
+    await wait(400)
+    expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('corrects the view the page moved, without mistaking it for a scroll', async () => {
+    const section = buildModelsDom()
+    const card = section.querySelector<HTMLElement>('.rowCard')
+    const host = scrollHostAround(section)
+    expect(card).not.toBeNull()
+    if (card === null) return
+    // jsdom has no layout: give the host a real offset and make the card's
+    // viewport position FOLLOW it, the way a browser's does.
+    let contentTop = 400
+    Object.defineProperty(host, 'scrollTop', { value: 300, writable: true, configurable: true })
+    const box = (): DOMRect => ({
+      top: contentTop - host.scrollTop, bottom: contentTop - host.scrollTop + 300,
+      left: 0, right: 600, width: 600, height: 300, x: 0, y: contentTop - host.scrollTop, toJSON: () => ({}),
+    }) as DOMRect
+    card.getBoundingClientRect = box
+    for (const inner of Array.from(card.querySelectorAll('[class*="editor"]'))) inner.getBoundingClientRect = box
+
+    const deps = makeDeps()
+    const state = createScanState()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+
+    section.querySelector<HTMLElement>('button[aria-label="Capacities 1"]')?.click()
+    expect(host.style.overflowAnchor).toBe('none')
+
+    // The page's own doing: the editor above this card closed, so the content
+    // above shrank and the card's content position moved up 40px. The window
+    // has to put the card back where the user saw it — NOT treat the moved
+    // offset as a user scroll and stand down, and NOT drive it further off.
+    contentTop = 360
+    await wait(80)
+
+    expect(host.style.overflowAnchor).toBe('none')
+    expect(host.scrollTop).toBe(260)
+    expect(Math.round(card.getBoundingClientRect().top)).toBe(100)
+  })
+
+  it('still stands down on a real user scroll', async () => {
+    const section = buildModelsDom()
+    const card = section.querySelector<HTMLElement>('.rowCard')
+    const host = scrollHostAround(section)
+    expect(card).not.toBeNull()
+    if (card === null) return
+    Object.defineProperty(host, 'scrollTop', { value: 300, writable: true, configurable: true })
+    stubCardBox(card, () => 300)
+
+    const deps = makeDeps()
+    const state = createScanState()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+
+    section.querySelector<HTMLElement>('button[aria-label="Capacities 1"]')?.click()
+    expect(host.style.overflowAnchor).toBe('none')
+    document.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
+    expect(host.style.overflowAnchor).toBe('')
+  })
+})
+
+/**
+ * Re-pinning a card's top across the provider row's OWN Edit button.
+ *
+ * The official page edits one provider at a time, so opening a card closes the
+ * one that was open. The closing editor is the browser's anchor node, so
+ * anchoring has nothing left to hold: measured on the live page with a card
+ * already open and the list scrolled to its end, clicking another row's 编辑
+ * walked that row 474px up the viewport — exactly the height of the editor that
+ * closed — with the scroll offset net unchanged.
+ */
+describe('provider Edit re-pin', () => {
+  /** A row card whose header carries the official Edit button. */
+  function buildRowDom(extra: string): HTMLElement {
+    const section = document.createElement('div')
+    section.className = 'section'
+    section.innerHTML = `
+      <ul class="rows">
+        <li class="rowCard">
+          <div class="rowHead">
+            <span class="rowName">Aliyun</span>
+            <div class="rowActions">
+              <button class="secondaryButton" aria-label="Edit aliyun">编辑</button>
+              ${extra}
+            </div>
+          </div>
+          <div class="editor">
+            <div class="modelCatalog">
+              <div class="modelEntry">
+                <div class="modelRow"><input aria-label="Model ID" value="qwen-max" /></div>
+                <div class="modelAdvanced"><label><span>Context window</span><input /></label></div>
+              </div>
+            </div>
+          </div>
+        </li>
+      </ul>
+    `
+    document.body.appendChild(section)
+    return section
+  }
+
+  function scrollHostAround(section: HTMLElement): HTMLElement {
+    const host = document.createElement('div')
+    host.style.overflowY = 'auto'
+    Object.defineProperty(host, 'scrollHeight', { value: 2000, configurable: true })
+    Object.defineProperty(host, 'clientHeight', { value: 600, configurable: true })
+    host.appendChild(section)
+    document.body.appendChild(host)
+    return host
+  }
+
+  it('pins the card on the official Edit button, before the official handler', async () => {
+    const section = buildRowDom('')
+    const host = scrollHostAround(section)
+    const deps = makeDeps()
+    const state = createScanState()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+
+    const edit = section.querySelector<HTMLElement>('button[aria-label="Edit aliyun"]')
+    expect(edit).not.toBeNull()
+    edit?.click()
+    expect(host.style.overflowAnchor).toBe('none')
+  })
+
+  it('leaves our own seats alone, whatever they are labelled', async () => {
+    // A control of ours that reads like the official one: the wiring matches by
+    // template alone, so only the plugin-subtree guard keeps it out.
+    const section = buildRowDom('<span data-plugin="dsh-model-think-level"><button aria-label="Edit aliyun">编辑</button></span>')
+    const host = scrollHostAround(section)
+    const deps = makeDeps()
+    const state = createScanState()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+
+    const foreign = section.querySelector<HTMLElement>('[data-plugin] button')
+    foreign?.click()
+    expect(host.style.overflowAnchor).toBe('')
+
+    const official = section.querySelector<HTMLElement>('.rowActions > button[aria-label="Edit aliyun"]')
+    official?.click()
+    expect(host.style.overflowAnchor).toBe('none')
+  })
+})
