@@ -53,6 +53,7 @@ import {
 import { teardownAutoEffortSeats } from './auto-effort-seat.js'
 import {
   createModelOrderState,
+  modelListMutation,
   reconcileModelOrder,
   teardownModelOrder,
   type ModelOrderDeps,
@@ -294,7 +295,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // A session may already be resident when the fiber starts (page reload,
     // HMR): wire it before the first mutation has a chance to land.
     onComposerMutation()
-    observer = new MutationObserver(() => {
+    observer = new MutationObserver((records) => {
       // The composer path runs SYNCHRONOUSLY on the mutation microtask: the
       // React commit that opens the menu and this callback are delivered
       // before the browser's next paint, so the FIRST painted frame already
@@ -312,6 +313,20 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // one long column and then visibly re-sort itself a frame or more later
       // — the "click Edit and the tabbed editor flickers in" report.
       reconcileEditorTabs(panelRoot(), editorTabsDeps, editorTabsState)
+      // And the model order pass joins the synchronous pair for exactly one
+      // kind of burst: the host adding or removing a model row. The official
+      // list keys its rows by array index, so a deletion re-fills the
+      // surviving elements with the next models' contents while they still
+      // carry the CSS `order` of the model that moved out of them — deferred
+      // to the debounced scan below, the whole tail of the list paints
+      // scrambled and then re-sorts itself: the "delete one model and the
+      // list flashes" report. This pass is pure DOM work too (id re-stamps,
+      // grip copy, order writes — no wire reads), so it lands before the
+      // first painted frame. The debounced scan runs it again a moment later
+      // and the pass is idempotent, so nothing else shifts.
+      if (modelListMutation(records)) {
+        reconcileModelOrder(panelRoot(), modelOrderDeps, modelOrderState)
+      }
       schedule()
     })
     observer.observe(document.body, { childList: true, subtree: true })

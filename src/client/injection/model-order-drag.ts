@@ -78,6 +78,42 @@ export function modelListsOf(root: HTMLElement): HTMLElement[] {
   return lists
 }
 
+/**
+ * Whether a mutation burst added or removed model ROWS.
+ *
+ * The official editor keys its model rows by ARRAY INDEX (`models.map((model,
+ * index) => <ModelRow ... />, index)`), so deleting one model commits as the
+ * LAST row element leaving the list and every row after the deleted one
+ * swapping its contents INSIDE its existing element. Those elements keep the
+ * CSS `order` this module wrote for the model that moved out of them: the
+ * list paints its tail shifted into the wrong slots, and re-sorts itself
+ * when the debounced scan finally corrects the order a frame or more later —
+ * the "delete one model and the whole list flashes" report. The observer
+ * answers that burst with an order pass in its own microtask, before the
+ * first painted frame; the same reasoning that made the tab pass synchronous.
+ */
+export function modelListMutation(records: readonly MutationRecord[]): boolean {
+  for (const record of records) {
+    if (record.type !== 'childList') continue
+    // The list itself gaining or losing a row — the host's own add/remove.
+    // (`modelListsOf`'s direct-children check also excludes the head, whose
+    // class shares the `modelList` fragment.)
+    const target = record.target
+    if (target instanceof HTMLElement
+      && target.matches('[class*="modelList"]')
+      && rowElements(target).some(child => child.matches('[class*="modelEntry"]'))) return true
+    // Or one of the changed nodes being a row: the list check misses the
+    // removal that empties the list, and the node check reaches an add whose
+    // record names the entry directly.
+    for (const nodes of [record.addedNodes, record.removedNodes]) {
+      for (const node of Array.from(nodes)) {
+        if (node instanceof HTMLElement && node.matches('[class*="modelEntry"]')) return true
+      }
+    }
+  }
+  return false
+}
+
 /** The model id this module stamped on an entry, if any. */
 function modelIdOf(entry: HTMLElement): string | undefined {
   const value = entry.getAttribute(ROW_ID_ATTR)

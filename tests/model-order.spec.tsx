@@ -30,6 +30,7 @@ import {
 } from '../src/client/model-order.js'
 import {
   createModelOrderState,
+  modelListMutation,
   modelListsOf,
   reconcileModelOrder,
   teardownModelOrder,
@@ -388,5 +389,69 @@ describe('composer model column', () => {
     await act(async () => { syncModelOrders({ aliyun: ['qwen-plus', 'qwen-turbo'] }) })
     expect(names()).toEqual(['Qwen Max', 'Qwen Plus', 'Qwen Turbo'])
     await act(async () => { root.unmount() })
+  })
+})
+
+describe('modelListMutation — the guard for the synchronous order pass', () => {
+  /**
+   * Real MutationRecords, collected the way the injector's observer collects
+   * them: observe `body` (childList+subtree), mutate, then await a macrotask —
+   * jsdom delivers the callback in a microtask, so the queue is drained by then.
+   */
+  function burstOf(): { records: MutationRecord[]; flush: () => Promise<void>; stop: () => void } {
+    const records: MutationRecord[] = []
+    const observer = new MutationObserver(list => { records.push(...list) })
+    observer.observe(document.body, { childList: true, subtree: true })
+    return {
+      records,
+      flush: () => new Promise<void>(resolve => { setTimeout(resolve, 0) }),
+      stop: () => { observer.disconnect() },
+    }
+  }
+
+  const entryOf = (list: HTMLElement, index: number): HTMLElement => list.children[index] as HTMLElement
+
+  it('fires when the host removes or adds a model row', async () => {
+    const { list } = officialModelPage('aliyun', [{ id: 'a' }, { id: 'b' }, { id: 'c' }])
+    const burst = burstOf()
+    // The host's index-keyed commit of a delete: the LAST element leaves.
+    entryOf(list, 2).remove()
+    await burst.flush()
+    expect(modelListMutation(burst.records)).toBe(true)
+    burst.records.length = 0
+    // And an add-model: a new blank entry appears.
+    const added = document.createElement('div')
+    added.className = '_3nPmjq_modelEntry'
+    list.appendChild(added)
+    await burst.flush()
+    expect(modelListMutation(burst.records)).toBe(true)
+    burst.stop()
+  })
+
+  it('stays quiet for this plugin’s own inserts inside a row', async () => {
+    const { list } = officialModelPage('aliyun', [{ id: 'a' }, { id: 'b' }])
+    const burst = burstOf()
+    const entry = entryOf(list, 0)
+    const seat = entry.querySelector<HTMLElement>('[class*="modelRow"]')!
+    // A grip into the grid, and an editor slot into the disclosure: neither is
+    // a row, so neither may re-arm the synchronous pass.
+    seat.insertBefore(document.createElement('span'), seat.firstChild)
+    entry.querySelector<HTMLElement>('[class*="modelAdvanced"]')!.appendChild(document.createElement('div'))
+    await burst.flush()
+    expect(modelListMutation(burst.records)).toBe(false)
+    burst.stop()
+  })
+
+  it('stays quiet for the list HEAD, which shares the class fragment', async () => {
+    const { list } = officialModelPage('aliyun', [{ id: 'a' }])
+    const head = document.createElement('div')
+    head.className = '_3nPmjq_modelListHead'
+    const card = list.parentElement as HTMLElement
+    card.insertBefore(head, list)
+    const burst = burstOf()
+    head.appendChild(document.createElement('span'))
+    await burst.flush()
+    expect(modelListMutation(burst.records)).toBe(false)
+    burst.stop()
   })
 })

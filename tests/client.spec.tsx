@@ -15,6 +15,8 @@ import { PI_AI_NS, PLUGIN_ID, STORE_NS } from '../src/constants.js'
 import { en, zh } from '../src/client/locales.js'
 import type { ModelDirectoryLike } from '../src/client/types.js'
 import { directoryFixture, fakeApi, JOIN_FIXTURE, makeCtx, makeJoin, waitFor } from './support/composer-fixture.js'
+import { officialModelPage } from './support/model-fixture.js'
+import { setModelOrder } from '../src/client/model-order.js'
 
 
 type Ctx = Parameters<typeof import('../src/client/index.js').apply>[0]
@@ -1013,6 +1015,59 @@ describe('client apply()', () => {
       expect(block.querySelector('.bre-slider-setting')).toBeNull()
     } finally {
       h.disposeAll()
+    }
+  })
+})
+
+describe('client apply() — model rows after a host delete', () => {
+  /** The model entries of one list, in the sequence they screen. */
+  function screenedIds(list: HTMLElement): string[] {
+    return Array.from(list.children)
+      .filter((child): child is HTMLElement => child instanceof HTMLElement)
+      .map((entry, index) => ({
+        id: entry.getAttribute('data-bre-row-model') ?? '',
+        order: entry.style.order === '' ? index : Number.parseInt(entry.style.order, 10),
+      }))
+      .sort((left, right) => left.order - right.order)
+      .map(row => row.id)
+  }
+
+  it('re-places the stored order on the delete burst itself, not on the late scan', async () => {
+    const models = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }]
+    const join = makeJoin({ aliyun: { displayName: 'Aliyun', api: 'openai-completions', models } })
+    const api = fakeApi(() => Promise.resolve(join))
+    const h = makeCtx(api)
+    setModelOrder('aliyun', ['c', 'a', 'b'])
+    const { list } = officialModelPage('aliyun', models)
+    try {
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => screenedIds(list).join(',') === 'c,a,b')
+
+      // The host's index-keyed commit of deleting model `b`: every row after
+      // the deleted one swaps contents INSIDE its existing element (an input's
+      // value is a property write, not a mutation), and the LAST element is
+      // what leaves the list. What stays behind carries the CSS `order` of the
+      // model that moved out of it.
+      const entries = Array.from(list.children) as HTMLElement[]
+      const inputOf = (entry: HTMLElement, label: string) =>
+        entry.querySelector<HTMLInputElement>(`input[aria-label^="${label}"]`)!
+      inputOf(entries[1], 'Model ID').value = 'c'
+      inputOf(entries[1], 'Display name').value = 'C'
+      entries[2].remove()
+
+      // The burst's own microtask must re-place the order. Deferred to the
+      // debounced scan, the list would screen `a,c` (the tail shifted into the
+      // stale slots) and snap back to `c,a` one frame or more later — the
+      // "delete one model and the whole list flashes" report.
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(screenedIds(list)).toEqual(['c', 'a'])
+      // And the debounced scan agrees with it: the pass is idempotent.
+      await new Promise(resolve => setTimeout(resolve, 400))
+      expect(screenedIds(list)).toEqual(['c', 'a'])
+    } finally {
+      h.disposeAll()
+      window.localStorage.clear()
     }
   })
 })
