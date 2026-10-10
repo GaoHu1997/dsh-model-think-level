@@ -6,8 +6,8 @@
  */
 
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, queueWriteInto, reconcile, stageEffortsInto, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, pinModelListCards, queueWriteInto, reconcile, stageEffortsInto, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
 import { suggestEfforts, type ReasoningEfforts } from '../src/knowledge.js'
 import type { RemoteApi } from '../src/client/types.js'
 
@@ -1923,6 +1923,45 @@ describe('the auto-adapt seat', () => {
     expect(report).toEqual({ held: 0, unsuggested: 0, blocked: 'unknown-route' })
   })
 
+  it('adapts the card\'s unsaved rows in the same click, held for the card\'s save', async () => {
+    // Every SAVED model is configured, but the card holds rows the document
+    // does not know: the head's click walks the screen's rows too, so a card
+    // the user is still editing is adapted in one click instead of being
+    // deferred behind a save. The draft's hold lands when the Save carries the
+    // row into the document -- the same channel a row's own auto-adapt uses.
+    const configured = structuredClone(join)
+    const userLayer = configured.namespace!.user as { providers: { aliyun: { models: Array<Record<string, unknown>> } } }
+    const layers = [
+      configured.namespace!.value as { providers: { aliyun: { models: Array<Record<string, unknown>> } } },
+      userLayer,
+    ]
+    for (const layer of layers) {
+      layer.providers.aliyun.models = layer.providers.aliyun.models
+        .map(model => ({ ...model, reasoningEfforts: { high: 'high' } }))
+    }
+    const deps = makeDeps({ describeNamespace: async () => configured })
+    const state = createScanState()
+
+    const report = await adaptEveryModel(state, deps, 'aliyun', [
+      { id: 'qwen-max', name: 'Qwen Max' },
+      { id: 'qwen-turbo', name: 'Qwen Turbo' },
+      { id: 'my-draft-row', name: 'My Draft Row' },
+    ])
+
+    expect(state.queued.size).toBe(1)
+    expect(state.queued.get('aliyun')?.has('my-draft-row')).toBe(true)
+    expect(report).toEqual({ held: 1, unsuggested: 0 })
+    // ...and once the card is saved (the draft id is the document's own), the
+    // same pass finds the row configured and holds nothing more.
+    userLayer.providers.aliyun.models.push({ id: 'my-draft-row', reasoningEfforts: { high: 'high' } })
+    const clean = await adaptEveryModel(state, deps, 'aliyun', [
+      { id: 'qwen-max', name: 'Qwen Max' },
+      { id: 'qwen-turbo', name: 'Qwen Turbo' },
+      { id: 'my-draft-row', name: 'My Draft Row' },
+    ])
+    expect(clean).toEqual({ held: 0, unsuggested: 0 })
+  })
+
   it('answers a second click while a pass is running with busy, not with a tally', async () => {
     // The re-entrancy guard used to return silently, so a double click looked
     // like an instant success: the seat would paint "已全部配置" over a pass
@@ -2005,6 +2044,56 @@ describe('disclosure re-pin', () => {
     await wait(150)
     expect(host.style.overflowAnchor).toBe('none')
     // ...and it lets go on its own once the card has stopped moving.
+    await wait(700)
+    expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('holds the card across a model row burst so the tail contracts upward', async () => {
+    const section = buildModelsDom()
+    const host = scrollHostAround(section)
+    // The shape the burst guard sees on the live page: the host's hashed
+    // module classes wrap the model entries in a `modelList` INSIDE a
+    // provider card. A deletion removes the LAST element — the survivors
+    // re-fill in place, which is the part the pin does not care about.
+    const card = section.querySelector<HTMLElement>('.rowCard')
+    expect(card).not.toBeNull()
+    if (card === null) return
+    const list = document.createElement('div')
+    list.className = 'modelList'
+    const gone = document.createElement('div')
+    gone.className = 'modelEntry'
+    list.appendChild(gone)
+    card.appendChild(list)
+    gone.remove()
+
+    pinModelListCards(document.body)
+
+    expect(host.style.overflowAnchor).toBe('none')
+    // The window has to outlive the burst's own frames: the re-filled rows
+    // leave a stale editor that the injector's 120ms debounced scan re-renders
+    // or mounts after the deletion, and that is the second height change.
+    await wait(150)
+    expect(host.style.overflowAnchor).toBe('none')
+    // ...and it lets go on its own once the card has stopped moving.
+    await wait(700)
+    expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('pins a setup card too — the card the user is actually editing', async () => {
+    const section = buildModelsDom()
+    const host = scrollHostAround(section)
+    // A NEW provider's card carries no rowCard at all; a pin that names only
+    // saved providers silently skips the card deletions happen on.
+    const setup = document.createElement('div')
+    setup.className = 'setupCard'
+    const list = document.createElement('div')
+    list.className = 'modelList'
+    setup.appendChild(list)
+    section.appendChild(setup)
+
+    pinModelListCards(document.body)
+
+    expect(host.style.overflowAnchor).toBe('none')
     await wait(700)
     expect(host.style.overflowAnchor).toBe('')
   })
@@ -2168,5 +2257,199 @@ describe('provider Edit re-pin', () => {
     const official = section.querySelector<HTMLElement>('.rowActions > button[aria-label="Edit aliyun"]')
     official?.click()
     expect(host.style.overflowAnchor).toBe('none')
+  })
+})
+
+/**
+ * Holding a shrinking model list's scroll RANGE open across a deletion.
+ *
+ * The official panel is a fixed-height card with one scrolling body, so a list
+ * losing a row does not resize anything: it shortens the body's content, and an
+ * offset past the new maximum is folded down to it (the browser's scroll clamp).
+ * Measured on the live page with the list scrolled to its end and eight rows
+ * deleted: every step moved the view by exactly that clamp, 54px per row — the
+ * "the top slides down instead of the list contracting upward" report. Scroll
+ * anchoring cannot answer it (there is no longer a position to anchor to; the
+ * range itself is gone), so the position is recorded from the click that starts
+ * the deletion and the range is bought back with a blank appended to the host.
+ */
+describe('model list deletion range', () => {
+  afterEach(() => { unwatchModelListOffsets() })
+
+  interface Page {
+    host: HTMLElement
+    /** The live page's own content height, which a deletion shrinks. */
+    content: { height: number }
+    deleteButton: HTMLElement
+  }
+
+  /** The blank this plugin appends, and the height it holds. */
+  function slackHeight(host: HTMLElement): number {
+    const spacer = host.querySelector<HTMLElement>('.bre-list-slack')
+    return spacer === null ? 0 : Number.parseFloat(spacer.style.height)
+  }
+
+  /**
+   * A panel-shaped page: one provider card whose list holds the model rows.
+   *
+   * The host reports the SUM a real layout would — the blank included — and
+   * `scrollTop` is a plain value, so the test performs the clamp the browser
+   * would do instead of jsdom inventing one out of a stub.
+   */
+  function buildPage(contentHeight: number): Page {
+    const section = document.createElement('div')
+    section.className = 'section'
+    section.innerHTML = `
+      <ul class="rows">
+        <li class="rowCard">
+          <div class="rowHead"><span class="rowName">Aliyun</span></div>
+          <div class="editor">
+            <div class="modelCatalog">
+              <div class="modelList">
+                <div class="modelEntry">
+                  <div class="modelRow">
+                    <input aria-label="Model ID" value="qwen-max" />
+                    <button class="secondaryButton" aria-label="删除模型 1">删除</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </li>
+      </ul>
+    `
+    const content = { height: contentHeight }
+    const host = document.createElement('div')
+    host.style.overflowY = 'auto'
+    host.appendChild(section)
+    document.body.appendChild(host)
+    Object.defineProperty(host, 'scrollHeight', {
+      get: () => content.height + slackHeight(host),
+      configurable: true,
+    })
+    Object.defineProperty(host, 'clientHeight', { value: 746, configurable: true })
+    Object.defineProperty(host, 'scrollTop', { value: 0, writable: true, configurable: true })
+
+    const deleteButton = section.querySelector<HTMLElement>('.secondaryButton')
+    expect(deleteButton).not.toBeNull()
+    watchModelListOffsets()
+    return { host, content, deleteButton: deleteButton as HTMLElement }
+  }
+
+  /**
+   * What the browser's layout does when the content shrinks: an offset past the
+   * new maximum is folded down to it, and nothing else moves.
+   * @param page - the page under test.
+   */
+  function clampNow(page: Page): void {
+    const reach = Math.max(0, page.host.scrollHeight - page.host.clientHeight)
+    page.host.scrollTop = Math.min(page.host.scrollTop, reach)
+  }
+
+  it('gives the host back the range a deletion takes, so the tail rises instead', () => {
+    const page = buildPage(1555)
+    page.host.scrollTop = 809
+    page.deleteButton.click()
+
+    // The commit lands a row shorter and the browser clamps what it held.
+    page.content.height = 1501
+    clampNow(page)
+    expect(page.host.scrollTop).toBe(755)
+
+    pinModelListCards(document.body)
+
+    // The offset the user's click was made from holds again, one row of blank
+    // below the real content is what holds it, and it is OURS.
+    expect(page.host.scrollTop).toBe(809)
+    expect(slackHeight(page.host)).toBe(54)
+    const spacer = page.host.querySelector<HTMLElement>('.bre-list-slack')
+    expect(spacer?.dataset['plugin']).toBe('dsh-model-think-level')
+  })
+
+  it('sizes the blank to the newest shrink rather than stacking one per row', () => {
+    const page = buildPage(1555)
+    page.host.scrollTop = 809
+    page.deleteButton.click()
+    page.content.height = 1501
+    clampNow(page)
+    pinModelListCards(document.body)
+    expect(slackHeight(page.host)).toBe(54)
+
+    // A second deletion, clicked from the position the first one holds.
+    expect(page.host.scrollTop).toBe(809)
+    page.deleteButton.click()
+    page.content.height = 1447
+    clampNow(page)
+    pinModelListCards(document.body)
+
+    // Two rows gone, one blank — computed from the real content each time.
+    expect(slackHeight(page.host)).toBe(108)
+    expect(page.host.querySelectorAll('.bre-list-slack').length).toBe(1)
+    expect(page.host.scrollTop).toBe(809)
+  })
+
+  it('leaves a list that is nowhere near its end alone', () => {
+    const page = buildPage(1555)
+    page.host.scrollTop = 300
+    page.deleteButton.click()
+    page.content.height = 1501
+    clampNow(page)
+
+    pinModelListCards(document.body)
+
+    // The content still reaches past the position: nothing was taken away, so
+    // nothing is held open and the offset stays where the user put it.
+    expect(slackHeight(page.host)).toBe(0)
+    expect(page.host.scrollTop).toBe(300)
+  })
+
+  it('forgets the position once the user moves the view themselves', () => {
+    const page = buildPage(1555)
+    page.host.scrollTop = 809
+    page.deleteButton.click()
+    // A wheel before the commit lands: a position the user has left is not a
+    // position to hold the view at.
+    document.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
+    page.content.height = 1501
+    clampNow(page)
+
+    pinModelListCards(document.body)
+
+    expect(slackHeight(page.host)).toBe(0)
+    expect(page.host.scrollTop).toBe(755)
+  })
+
+  it('lets the blank go once the view is off it', () => {
+    const page = buildPage(1555)
+    page.host.scrollTop = 809
+    page.deleteButton.click()
+    page.content.height = 1501
+    clampNow(page)
+    pinModelListCards(document.body)
+    expect(slackHeight(page.host)).toBe(54)
+
+    // Scrolling back up puts the blank below the view, where its removal moves
+    // nothing.
+    page.host.scrollTop = 100
+    page.host.dispatchEvent(new Event('scroll'))
+
+    expect(slackHeight(page.host)).toBe(0)
+    expect(page.host.scrollTop).toBe(100)
+  })
+
+  it('drops every blank when the fiber goes away', () => {
+    const page = buildPage(1555)
+    page.host.scrollTop = 809
+    page.deleteButton.click()
+    page.content.height = 1501
+    clampNow(page)
+    pinModelListCards(document.body)
+    expect(slackHeight(page.host)).toBe(54)
+
+    // A dead fiber's blank is raw DOM inside the official panel: it leaves with
+    // the listeners that would have swept it.
+    unwatchModelListOffsets()
+
+    expect(page.host.querySelector('.bre-list-slack')).toBeNull()
   })
 })

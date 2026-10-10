@@ -21,7 +21,8 @@ import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { PLUGIN_ID } from '../../constants.js'
 import { EffortEditor } from '../EffortEditor.tsx'
 import {
-  createScanState, flushOnTeardown, flushOnUnload, reconcile,
+  createScanState, flushOnTeardown, flushOnUnload, pinModelListCards, reconcile,
+  unwatchModelListOffsets, watchModelListOffsets,
   type HostLabels, type InjectorDeps, type ScanState,
 } from './models-page-editor.js'
 import { describeNamespace } from '../ops.ts'
@@ -295,6 +296,10 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // A session may already be resident when the fiber starts (page reload,
     // HMR): wire it before the first mutation has a chance to land.
     onComposerMutation()
+    // Where a click inside a model list leaves the scroll position: the row
+    // deletion's clamp takes that position away before any later pass can read
+    // it, so it has to be recorded from the event that starts the deletion.
+    watchModelListOffsets()
     observer = new MutationObserver((records) => {
       // The composer path runs SYNCHRONOUSLY on the mutation microtask: the
       // React commit that opens the menu and this callback are delivered
@@ -326,6 +331,14 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // and the pass is idempotent, so nothing else shifts.
       if (modelListMutation(records)) {
         reconcileModelOrder(panelRoot(), modelOrderDeps, modelOrderState)
+        // The same burst shrinks one card by a row's height INSIDE it, and the
+        // browser's scroll anchoring buys that shrink back by moving the whole
+        // view: the "delete one model and the window jumps down" report.
+        // Pinning the card's top from this microtask suppresses the anchoring
+        // before the deletion is ever laid out, so the tail contracts upward
+        // into the hole instead — and the window outlives the burst to cover
+        // the stale editor's re-render by the debounced scan below.
+        pinModelListCards(panelRoot())
       }
       schedule()
     })
@@ -378,6 +391,10 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // attributes this plugin owns inside the official card — a dead fiber must
     // not leave the page keyed to tabs nothing maintains anymore.
     teardownEditorTabs()
+    // Last, the deletion guard: the recorded positions are THIS fiber's
+    // listeners, and the blanks holding scroll ranges open are raw DOM inside
+    // the official panel, which a dead fiber must not leave behind either.
+    unwatchModelListOffsets()
   }
 
   const flushOnUnloadNow = (): void => { flushOnUnload(scanState, injectorDeps) }

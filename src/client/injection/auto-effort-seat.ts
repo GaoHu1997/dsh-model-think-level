@@ -134,7 +134,7 @@ function outcomeOf(report: AutoAdaptReport): SeatOutcome | null {
   if (report.failed !== undefined) return { phase: 'failed', count: 0, missed: 0, detail: report.failed }
   // Nothing to write is not one condition but three, and they read very
   // differently to a user: "already configured" is the pass working correctly,
-  // "blocked" is the pass refusing, and conflating them is exactly the silence
+  // "blocked" is the pass refusing -- conflating them is exactly the silence
   // this report exists to end.
   if (report.blocked !== undefined) return { phase: 'blocked', count: 0, missed: 0, detail: '' }
   if (report.held > 0) return { phase: 'done', count: report.held, missed: report.unsuggested, detail: '' }

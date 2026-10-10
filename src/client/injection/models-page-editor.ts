@@ -1159,6 +1159,33 @@ function autoEffortTargets(
 }
 
 /**
+ * The models one route's card shows on screen, from the scan's own rows.
+ *
+ * The provider-wide adapt reads the settings document, which cannot know the
+ * rows the card holds but has not saved yet; this list is what the pass
+ * extends its walk with, so a card the user is still editing is adapted in the
+ * same click instead of being deferred behind a save. Rows the scan could not
+ * name (a model id still being typed) and rows whose card resolves to another
+ * route are left out: a write must only ever be held for a row it could see.
+ */
+function screenModels(
+  found: readonly FoundModel[],
+  route: string,
+  providers: Record<string, Record<string, unknown>>,
+  labels: HostLabels,
+): Array<{ id: string; name: string }> {
+  const rows: Array<{ id: string; name: string }> = []
+  const seen = new Set<string>()
+  for (const model of found) {
+    if (model.modelId.length === 0 || seen.has(model.modelId)) continue
+    if (routeOfCard(model.card, providers, labels)?.route !== route) continue
+    seen.add(model.modelId)
+    rows.push({ id: model.modelId, name: inputValueByLabel(model.row, labels.modelName) })
+  }
+  return rows
+}
+
+/**
  * Adapt every model of one provider, the rows the user never unfolded
  * included.
  *
@@ -1183,11 +1210,24 @@ function autoEffortTargets(
  * @param state - mutable scan state: the adapting guard and the held ledger.
  * @param deps - the injection dependencies.
  * @param route - the provider route whose models are adapted.
+ * @param state - mutable scan state: the adapting guard and the held ledger.
+ * @param deps - the injection dependencies.
+ * @param route - the provider route whose models are adapted.
+ * @param visibleRows - the models the route's card shows on screen, from the
+ *   scan's own rows (id and display name). The document cannot know the rows
+ *   the card holds but has not saved yet, so the pass extends its walk with
+ *   them: their holds land with the card's own Save, exactly like a row's own
+ *   auto-adapt.
  * @returns what the pass did, so the seat can say something true about the
  *   click: how many models it held an adaptation for, how many had no
  *   suggestion, and -- when nothing could be adapted at all -- why.
  */
-export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, route: string): Promise<AutoAdaptReport> {
+export async function adaptEveryModel(
+  state: ScanState,
+  deps: InjectorDeps,
+  route: string,
+  visibleRows: ReadonlyArray<{ id: string; name: string }> = [],
+): Promise<AutoAdaptReport> {
   // A second click while a pass is in flight is not a no-op the user should
   // read as success: 'busy' travels back so the seat keeps the verdict the
   // running pass is about to publish.
@@ -1211,7 +1251,28 @@ export async function adaptEveryModel(state: ScanState, deps: InjectorDeps, rout
     // "already configured" -- the user would read that as a completed pass.
     if (seen.writable !== true) return { held: 0, unsuggested: 0, blocked: 'unwritable' }
     if (!hasOwn(providers, route)) return { held: 0, unsuggested: 0, blocked: 'unknown-route' }
-    const models = modelsOf(providers, route)
+    // The ids the DOCUMENT knows, so the card's own unsaved rows can be told
+    // apart from the ones it has already saved.
+    const docModels = modelsOf(providers, route)
+    const docIds = new Set<string>()
+    for (const model of docModels) {
+      const modelId = typeof model['id'] === 'string' ? model['id'] : ''
+      if (modelId.length > 0) docIds.add(modelId)
+    }
+    // The card's own unsaved rows join the walk as fresh models: the document
+    // cannot know a row the card holds but has not saved yet, yet the hold it
+    // needs is exactly the hold the row's own auto-adapt makes -- the write
+    // lands when the card's Save carries the row into the document, and is
+    // dropped harmlessly (modelNotFound) if the user cancels the card instead.
+    // A card the user is still editing is therefore adapted in one click, not
+    // deferred behind a save. Synthetic entries carry only id and name, so the
+    // lookups below read them as a fresh editor would: no ladder, no
+    // modalities, nothing to preserve.
+    const models = docModels.slice()
+    for (const visible of visibleRows) {
+      if (visible.id.length === 0 || docIds.has(visible.id)) continue
+      models.push({ id: visible.id, name: visible.name })
+    }
     if (models.length === 0) return { held: 0, unsuggested: 0, blocked: 'no-models' }
     const profile = providers[route] ?? {}
     const routeApi = typeof profile['api'] === 'string' ? profile['api'] as string : undefined
@@ -1653,6 +1714,329 @@ function pinCardTop(card: HTMLElement, windowMs: number): void {
   pin.frame = window.requestAnimationFrame(tick)
 }
 
+/** The selector every pass in this module reaches a model list through. */
+const MODEL_LIST_SELECTOR = '[class*="modelList"]'
+
+/** The class of the blank element that holds a scroll host's range open. */
+const LIST_SLACK_CLASS = 'bre-list-slack'
+
+/**
+ * How long a position recorded by a click inside a list stays usable.
+ *
+ * The deletion this exists for commits in the click's own task, so the window
+ * is only ever stretched by a host that renders late. Anything longer is a
+ * different interaction, and the position recorded for the click the user made
+ * before it is no longer the position they are looking at.
+ */
+const LIST_OFFSET_TTL_MS = 3000
+
+/** Where one list's scroll host stood when a click inside that list arrived. */
+interface ListOffset {
+  /** The container the coming change will shorten. */
+  host: HTMLElement
+  /** Its offset before the change, which the clamp is about to take away. */
+  top: number
+  /** When it was read, on the `performance.now()` clock. */
+  at: number
+}
+
+/**
+ * The last click's position, or nothing once the user has moved the view.
+ *
+ * ONE slot is enough: a deletion is caused by the click that just landed, so
+ * the newest record always names the interaction in flight. It is cleared by
+ * the inputs that move a scrollport rather than by watching the offset itself,
+ * for the same reason {@link pinCardTop} watches input: the page moves the
+ * offset on its own, and that move is the very thing this module exists to
+ * undo.
+ */
+let listOffset: ListOffset | undefined
+
+/** The blank one scroll host's range is held open with. */
+interface ListSlack {
+  /** The element appended to the host, sized to the range being held. */
+  spacer: HTMLElement
+  /** Its height in pixels, as last written. */
+  height: number
+  /** The host's own release check, removed along with the spacer. */
+  onScroll: () => void
+}
+
+/** The slack held on each host, by host. */
+const LIST_SLACKS = new WeakMap<HTMLElement, ListSlack>()
+
+/** Every spacer currently in the page, so a later pass can revisit them. */
+const LIVE_SLACKS = new Set<HTMLElement>()
+
+/**
+ * Read one list's scroll position out of the click that is about to change it.
+ *
+ * The clamp cannot be undone after the fact. The browser folds a scroll
+ * container's offset down to its new maximum as soon as ANY layout flush sees
+ * the shorter content — and this injector's mutation microtask is such a flush
+ * (measured on the live page, removing the last row by hand: the offset had
+ * already gone 809 -> 755 in the same task, before a single frame was
+ * painted). A position that is gone cannot be measured back, so the only
+ * moment it can be read is the event that starts the deletion, while it is
+ * still the user's own position.
+ */
+function recordListOffset(target: EventTarget | null): void {
+  if (!(target instanceof Element)) return
+  const list = target.closest<HTMLElement>(MODEL_LIST_SELECTOR)
+  if (list === null) return
+  const host = scrollHostOf(list)
+  // `scrollHostOf` answers with the page's own scroller when nothing local
+  // scrolls; a row deletion cannot shorten that, and a blank appended to it
+  // would be loose in the document.
+  if (host === undefined || host === document.scrollingElement || !host.contains(list)) return
+  listOffset = { host, top: host.scrollTop, at: performance.now() }
+}
+
+/** Drop the recorded position: the user is moving the view themselves. */
+function forgetListOffset(): void {
+  listOffset = undefined
+}
+
+function onListClick(event: Event): void {
+  recordListOffset(event.target)
+}
+
+/**
+ * Keys, split by what they do: the scrolling ones release the record (the user
+ * is moving the view), every other one is a possible activation of a control
+ * inside the list and records like a click does.
+ */
+function onListKey(event: KeyboardEvent): void {
+  if (SCROLL_KEYS.has(event.key)) {
+    forgetListOffset()
+    return
+  }
+  recordListOffset(event.target)
+}
+
+/** How many live fibers have asked for the offset to be watched. */
+let offsetWatchers = 0
+
+/**
+ * Start recording where a click inside a model list leaves its scroll host.
+ *
+ * Document-level and capture-phase, like the stand-down listeners a re-pin
+ * window installs: the position has to be read before the official handler
+ * (and React's commit behind it) can shorten the list. Reference counted, so
+ * a reload that lands a second fiber over a page that already has one does not
+ * take the listeners away from the first.
+ */
+export function watchModelListOffsets(): void {
+  offsetWatchers += 1
+  if (offsetWatchers > 1) return
+  document.addEventListener('click', onListClick, true)
+  document.addEventListener('keydown', onListKey, true)
+  // Clearing on the gestures that move a scrollport: a click in one list must
+  // not leave a position behind that a burst somewhere else could be held at.
+  // (A pointerdown always precedes its own click, and this clears BEFORE it,
+  // so the click's record survives.)
+  document.addEventListener('focusin', forgetListOffset, true)
+  document.addEventListener('pointerdown', forgetListOffset, true)
+  document.addEventListener('wheel', forgetListOffset, { capture: true, passive: true })
+  document.addEventListener('touchstart', forgetListOffset, { capture: true, passive: true })
+}
+
+/**
+ * Give one host back the scroll range its blank was holding open.
+ *
+ * Only ever called when the view does not need it: see {@link sweepListSlacks}.
+ */
+function releaseListSlack(host: HTMLElement): void {
+  const slack = LIST_SLACKS.get(host)
+  if (slack === undefined) return
+  LIST_SLACKS.delete(host)
+  LIVE_SLACKS.delete(slack.spacer)
+  host.removeEventListener('scroll', slack.onScroll)
+  slack.spacer.remove()
+}
+
+/**
+ * Let go of every blank the page no longer needs.
+ *
+ * A blank is load-bearing only while the viewport is sitting on top of it: if
+ * the offset the host holds fits inside the REAL content, removing it moves
+ * nothing on screen — what is below the viewport is the same either way — and
+ * the page gets its own scroll range back. That is also how the space is given
+ * back when the list grows again (an editor reopening, a model added): the
+ * content reaches past the view again, and the next pass drops the blank.
+ */
+function sweepListSlacks(): void {
+  if (LIVE_SLACKS.size === 0) return
+  for (const spacer of Array.from(LIVE_SLACKS)) {
+    const host = spacer.parentElement
+    const slack = host === null ? undefined : LIST_SLACKS.get(host)
+    if (host === null || slack === undefined) {
+      LIVE_SLACKS.delete(spacer)
+      spacer.remove()
+      continue
+    }
+    if (host.scrollTop <= host.scrollHeight - host.clientHeight - slack.height) releaseListSlack(host)
+  }
+}
+
+/** Whether the offset `host` is holding needs the blank to survive. */
+function slackNeeded(host: HTMLElement, height: number): boolean {
+  return host.scrollTop > host.scrollHeight - host.clientHeight - height
+}
+
+/**
+ * Hold the position the last click inside a model list was made from.
+ *
+ * Deleting a row makes the list shorter, and a scroll container holding an
+ * offset past the new maximum is CLAMPED down to it by the browser's own
+ * layout: the view drops by exactly the height the list lost, which is what
+ * "the top slides down instead of the content below contracting upward"
+ * describes. Suppressing anchoring cannot answer it (this is not anchoring,
+ * the range itself is gone) and neither can a later correction (the offset was
+ * already gone before this pass could read it — see {@link recordListOffset}).
+ *
+ * So this puts the range back instead: a `data-plugin` blank appended to the
+ * host, exactly as tall as the offset the user was holding needs it to be, and
+ * the recorded offset restored on top of it. The tail then contracts upward
+ * into the hole the row left, exactly as if the row had been at the end, and
+ * the panel gives the space back through {@link sweepListSlacks} as soon as
+ * the view no longer sits on it.
+ *
+ * Repeated deletions accumulate by construction: the sum below is recomputed
+ * from the REAL content every time (the blank this module added is taken back
+ * out of it), so the blank ends up as tall as the newest shrink needs, not as
+ * tall as the last two put together.
+ */
+function holdListSlack(now: number = performance.now()): void {
+  const recorded = listOffset
+  if (recorded === undefined || now - recorded.at > LIST_OFFSET_TTL_MS) return
+  const host = recorded.host
+  if (!host.isConnected) return
+  const slack = LIST_SLACKS.get(host)
+  const held = slack === undefined ? 0 : slack.height
+  // The offset the REAL content allows: every sum the host reports includes
+  // the blank, so it comes back out before the position is compared to it.
+  const reach = host.scrollHeight - host.clientHeight - held
+  const needed = recorded.top - reach
+  if (needed <= 0) {
+    // Nothing to hold: the content still reaches past the position. The blank
+    // may still exist from an earlier burst, and goes as soon as the view does
+    // not sit on it.
+    if (slack !== undefined && !slackNeeded(host, slack.height)) releaseListSlack(host)
+    return
+  }
+  let entry = slack
+  if (entry === undefined) {
+    const spacer = document.createElement('div')
+    spacer.className = LIST_SLACK_CLASS
+    spacer.dataset['plugin'] = PLUGIN_ID
+    spacer.setAttribute('aria-hidden', 'true')
+    spacer.style.height = '0px'
+    host.appendChild(spacer)
+    // The scroll listener is the release for every move that is NOT a burst:
+    // the user scrolling up off the blank frees it mid-gesture, without
+    // waiting for the next mutation.
+    const onScroll = (): void => {
+      const current = LIST_SLACKS.get(host)
+      if (current !== undefined && !slackNeeded(host, current.height)) releaseListSlack(host)
+    }
+    entry = { spacer, height: 0, onScroll }
+    LIST_SLACKS.set(host, entry)
+    LIVE_SLACKS.add(spacer)
+    host.addEventListener('scroll', onScroll, { passive: true })
+  }
+  if (entry.height !== needed) {
+    entry.height = needed
+    entry.spacer.style.height = `${needed}px`
+  }
+  // The clamp is the only thing that can have moved this offset since the
+  // click (a scroll gesture would have dropped the record), so handing the
+  // recorded position back is handing the user's own view back.
+  if (host.scrollTop !== recorded.top) host.scrollTop = recorded.top
+}
+
+/**
+ * Stop watching, drop every blank, and forget the last position.
+ *
+ * The blanks are elements this plugin owns inside the official page: a fiber
+ * that goes away must not leave a scroll container holding a gap nothing
+ * maintains. Removing one can move the view (the range it held goes with it),
+ * which is the right thing to do to a page whose watcher is gone.
+ */
+export function unwatchModelListOffsets(): void {
+  offsetWatchers = Math.max(0, offsetWatchers - 1)
+  if (offsetWatchers > 0) return
+  document.removeEventListener('click', onListClick, true)
+  document.removeEventListener('keydown', onListKey, true)
+  document.removeEventListener('focusin', forgetListOffset, true)
+  document.removeEventListener('pointerdown', forgetListOffset, true)
+  document.removeEventListener('wheel', forgetListOffset, true)
+  document.removeEventListener('touchstart', forgetListOffset, true)
+  listOffset = undefined
+  for (const spacer of Array.from(LIVE_SLACKS)) {
+    const host = spacer.parentElement
+    if (host === null) {
+      LIVE_SLACKS.delete(spacer)
+      spacer.remove()
+      continue
+    }
+    releaseListSlack(host)
+  }
+}
+
+/**
+ * Hold every open provider card's top across a model row burst, and hold the
+ * scroll host's own range open while it does.
+ *
+ * The official list keys rows by array index, so a deletion removes the LAST
+ * element and re-fills the survivors: the card loses a row's height INSIDE
+ * itself, above whatever its tail holds. Left to its anchoring the browser
+ * keeps a node near the hole visually stable instead — it buys the shrink
+ * back by moving the whole view, and deleting a model slides the page DOWN
+ * rather than letting the content below the list contract upward into the
+ * hole it opened. Suppressing anchoring from the burst's own microtask (the
+ * injector runs this before the browser has laid the deletion out) holds the
+ * card's top where it was: the header does not move, and the tail rises.
+ *
+ * Anchoring is only half of it, and the half that shows up when the list is
+ * scrolled near its end. There the shrink also takes the scroll RANGE away,
+ * and the browser clamps the offset down to the new maximum on the first
+ * flush that sees the shorter content — which is this very microtask.
+ * Measured on the live page (list scrolled to its end, eight deletions): every
+ * step moved the card's top by exactly the amount the clamp took, 54px per
+ * row, and no anchor suppression could stop it because nothing was anchoring:
+ * the range was simply gone. {@link holdListSlack} is what gives it back, from
+ * the position the row's own click recorded before the change.
+ *
+ * The window also covers the burst's second height change. The re-filled rows
+ * leave the mounted editor of the model that moved out of them STALE, and the
+ * debounced scan re-renders (or mounts) it a frame or two after the deletion
+ * itself — the same two-stage change {@link pinCardTop} was built for, now
+ * opened by the mutation rather than by a click.
+ *
+ * The card vocabulary is the same three flavours {@link wireEditRepin} knows:
+ * a deletion inside a NEW provider's setup card (or the add card) has no
+ * rowCard to climb into at all, and a pin that names only saved providers
+ * silently skips the very card the user is editing.
+ *
+ * @param root - the panel to search for model lists.
+ * @param windowMs - how long each found card stays pinned.
+ */
+export function pinModelListCards(root: HTMLElement, windowMs: number = REPIN_CLICK_MS): void {
+  // The range first, the cards after it: a pin measures its card's top on the
+  // first tick, and a pin that measured the clamped position would hold the
+  // view there — pushing the restoration back out frame by frame.
+  holdListSlack()
+  sweepListSlacks()
+  const pinned = new Set<HTMLElement>()
+  for (const list of Array.from(root.querySelectorAll<HTMLElement>(MODEL_LIST_SELECTOR))) {
+    const card = list.closest<HTMLElement>('[class*="rowCard"], [class*="setupCard"], [class*="addCard"]')
+    if (card === null || pinned.has(card)) continue
+    pinned.add(card)
+    pinCardTop(card, windowMs)
+  }
+}
+
 /**
  * Wire one model row's disclosure chevron so its toggle cannot walk the card
  * up the viewport ({@link pinCardTop}).
@@ -1905,7 +2289,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     // and covers exactly the rows nothing on screen can answer for.
     reconcileAutoEffortSeats(root, autoEffortTargets(found, providers, labels), {
       t: deps.t,
-      onRequest: route => adaptEveryModel(state, deps, route),
+      onRequest: route => adaptEveryModel(state, deps, route, screenModels(found, route, providers, labels)),
     })
 
     // Unmount editors whose rows are gone (the page re-rendered).

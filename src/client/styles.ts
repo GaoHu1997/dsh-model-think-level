@@ -1399,6 +1399,16 @@ div.bre-row-dragging { opacity: .5; }
   [data-bre-row-model] { transition: none !important; }
 }
 
+/* The blank a shrinking model list leaves behind, appended to the panel's own
+   scroll host (see holdListSlack in models-page-editor): it holds the host's
+   scroll RANGE open so deleting a row cannot clamp the view down. Height is
+   written inline from the script — it is the range being held, not a style —
+   and the element must never take layout from above or a pointer from the user. */
+.bre-list-slack {
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
 /* ---- Provider enable switch (Models page) ---- */
 
 /* Leads the row's own action group (which is pushed right by margin-left:auto),
