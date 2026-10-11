@@ -37,6 +37,7 @@ import {
 import {
   createProviderOrderState,
   reconcileProviderOrder,
+  rowsListOf,
   teardownProviderOrder,
   type ProviderOrderDeps,
 } from './provider-order-drag.js'
@@ -51,6 +52,12 @@ import {
   teardownProviderDeleteSeats,
   type ProviderDeleteDeps,
 } from './provider-delete-seat.js'
+import {
+  createProviderDisabledGroupState,
+  reconcileProviderDisabledGroup,
+  teardownProviderDisabledGroup,
+  type ProviderDisabledGroupDeps,
+} from './provider-disabled-group.js'
 import { teardownAutoEffortSeats } from './auto-effort-seat.js'
 import {
   createModelOrderState,
@@ -175,6 +182,10 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   // No per-scan state: the seat IS the DOM node, and the pass is idempotent by
   // its presence, so nothing has to be remembered between scans.
   const providerDeleteDeps: ProviderDeleteDeps = { t, labels }
+  // The folded group keeps one thing between scans — whether it is unfolded —
+  // and that is a session preference, not a stored one (see the module note).
+  const providerDisabledState = createProviderDisabledGroupState()
+  const providerDisabledDeps: ProviderDisabledGroupDeps = { t, labels }
   const modelOrderState = createModelOrderState()
   const modelOrderDeps: ModelOrderDeps = { t, labels }
   const editorTabsState = createEditorTabsState()
@@ -206,6 +217,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // A refused held write arms a backoff; nothing on a settled page would
     // schedule the retry scan, so the injector asks for a timer.
     onBackoff: (delayMs) => { scheduleRetry(delayMs) },
+    onPendingChanged: () => { schedule() },
     mount(container, props) {
       const rootEl = document.createElement('div')
       // The slot class carries the grid-column span: this wrapper — not
@@ -256,6 +268,23 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     }, delayMs)
   }
 
+  /**
+   * Apply every decoration that only needs the current DOM. Keeping this pass
+   * synchronous with the host's mutation commit prevents the first Models-page
+   * paint from showing the undecorated provider list and then shifting when the
+   * debounced scan catches up. The data-aware editor reconcile stays deferred
+   * below because it may read the settings wire.
+   */
+  const reconcileDom = (): void => {
+    const root = panelRoot()
+    if (rowsListOf(root) === undefined) return
+    reconcileProviderOrder(root, providerOrderDeps, providerOrderState)
+    reconcileProviderEnabled(root, providerToggleDeps, providerToggleState)
+    reconcileProviderDeleteSeat(root, providerDeleteDeps)
+    reconcileProviderDisabledGroup(root, providerDisabledDeps, providerDisabledState)
+    reconcileModelOrder(root, modelOrderDeps, modelOrderState)
+  }
+
   function schedule(): void {
     if (stopped || scanTimer !== undefined) return
     // Debounce: the official page re-renders in bursts (typing, expanding,
@@ -273,20 +302,9 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // is already open, and a retry whose scan re-arms without a re-render.
       // Its own writes are guarded, so no scan ever chases its own tail.
       reconcileEditorTabs(panelRoot(), editorTabsDeps, editorTabsState)
-      // The row order pass rides the same scan but NOT the editor reconcile:
-      // `reconcile` bails out whenever no editing card is open, and the
-      // provider rows are on the page precisely when nothing is being edited.
-      reconcileProviderOrder(panelRoot(), providerOrderDeps, providerOrderState)
-      // The switch pass follows the order pass: it reads the same row ids, and
-      // it must see the rows where that pass left them.
-      reconcileProviderEnabled(panelRoot(), providerToggleDeps, providerToggleState)
-      // The delete seat follows the switch pass: it reads the same rows, and it
-      // fills the hole the host leaves in an unremovable row's action group.
-      reconcileProviderDeleteSeat(panelRoot(), providerDeleteDeps)
-      // The model pass comes last and covers a different list entirely: the
-      // model rows inside whichever provider editor is open. Its own lists are
-      // absent unless a card is expanded, so it no-ops on a collapsed page.
-      reconcileModelOrder(panelRoot(), modelOrderDeps, modelOrderState)
+      // These passes are also run synchronously by the observer. Repeating them
+      // here covers preference flips and retry scans that have no DOM mutation.
+      reconcileDom()
     }, SCAN_DEBOUNCE_MS)
   }
 
@@ -296,6 +314,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // A session may already be resident when the fiber starts (page reload,
     // HMR): wire it before the first mutation has a chance to land.
     onComposerMutation()
+    reconcileDom()
     // Where a click inside a model list leaves the scroll position: the row
     // deletion's clamp takes that position away before any later pass can read
     // it, so it has to be recorded from the event that starts the deletion.
@@ -318,19 +337,13 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // one long column and then visibly re-sort itself a frame or more later
       // — the "click Edit and the tabbed editor flickers in" report.
       reconcileEditorTabs(panelRoot(), editorTabsDeps, editorTabsState)
-      // And the model order pass joins the synchronous pair for exactly one
-      // kind of burst: the host adding or removing a model row. The official
-      // list keys its rows by array index, so a deletion re-fills the
-      // surviving elements with the next models' contents while they still
-      // carry the CSS `order` of the model that moved out of them — deferred
-      // to the debounced scan below, the whole tail of the list paints
-      // scrambled and then re-sorts itself: the "delete one model and the
-      // list flashes" report. This pass is pure DOM work too (id re-stamps,
-      // grip copy, order writes — no wire reads), so it lands before the
-      // first painted frame. The debounced scan runs it again a moment later
-      // and the pass is idempotent, so nothing else shifts.
+      // All other page decorations are DOM-only as well. They must land in this
+      // same microtask, otherwise navigating to Models first paints the official
+      // list and then visibly inserts/reorders the plugin controls.
+      reconcileDom()
+      // A model-list mutation needs the scroll pin before layout. The model-order
+      // pass above has already stamped the surviving rows before this pin runs.
       if (modelListMutation(records)) {
-        reconcileModelOrder(panelRoot(), modelOrderDeps, modelOrderState)
         // The same burst shrinks one card by a row's height INSIDE it, and the
         // browser's scroll anchoring buys that shrink back by moving the whole
         // view: the "delete one model and the window jumps down" report.
@@ -381,6 +394,10 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // The delete seats are raw DOM as well, and they stand for a control the
     // page owns: a dead fiber must not leave a row reading as unavailable.
     teardownProviderDeleteSeats()
+    // And for the folded group: the control and the hidden rows are raw DOM this
+    // plugin owns on the official list, and a dead fiber must not leave provider
+    // rows invisible with nothing left to unfold them.
+    teardownProviderDisabledGroup()
     // And for the auto-adapt seats: raw DOM this plugin put in the official
     // catalogue head, which a dead fiber must not leave clickable-looking.
     teardownAutoEffortSeats()

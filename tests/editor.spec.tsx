@@ -101,6 +101,30 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
   return hit
 }
 
+/** Type into a text input the way a keyboard would: the native value setter
+ *  bypasses React's value tracker, so the input event is not folded as a no-op. */
+async function typeText(input: HTMLInputElement, value: string): Promise<void> {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+/** Pick an option the way a pointer would: a real change event on a select. */
+async function pickOption(select: HTMLSelectElement, value: string): Promise<void> {
+  await act(async () => {
+    select.value = value
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+}
+
+/** The single compat control with this aria-label stem (the index suffix is 1). */
+function compatControl<T extends Element>(container: HTMLElement, selector: string, label: string): T {
+  const hit = container.querySelector<T>(`${selector}[aria-label="${label} 1"]`)
+  if (hit === null) throw new Error(`no compat control "${label}"`)
+  return hit
+}
+
 /** Whether a button with exactly this text exists (absence is expected sometimes). */
 function hasButton(container: HTMLElement, text: string): boolean {
   return Array.from(container.querySelectorAll('button')).some(candidate => candidate.textContent === text)
@@ -606,6 +630,49 @@ describe('EffortEditor compat controls', () => {
     expect(api.commit).toHaveBeenCalled()
     const write = (api.commit.mock.calls[0] as unknown[])[2] as Record<string, unknown>
     expect(write['compat']).toMatchObject({ thinkingTokenBudgetField: 'thinking_budget' })
+  })
+
+  it('queues the budget field the user just picked, not the one it replaced', async () => {
+    // Regression: the three compat handlers committed BEFORE React re-rendered,
+    // so the queued write carried the field the picker had already left behind —
+    // the UI showed the new spelling while the ledger held the old one.
+    const api = baseApi()
+    const { container } = await renderEditor(baseProps({
+      api,
+      routeApi: 'openai-completions',
+      compat: { thinkingTokenBudgetField: 'thinking_token_budget' },
+    }))
+    const picker = compatControl<HTMLSelectElement>(container, 'select.bre-select', t('budgetFieldLabel'))
+    await pickOption(picker, 'thinking_budget')
+    expect(picker.value).toBe('thinking_budget')
+    const write = (api.commit.mock.calls.at(-1) as unknown[])[2] as Record<string, unknown>
+    expect(write['compat']).toMatchObject({ thinkingTokenBudgetField: 'thinking_budget' })
+  })
+
+  it('queues the priority the user just typed, not the one it replaced', async () => {
+    const api = baseApi()
+    const { container } = await renderEditor(baseProps({
+      api,
+      routeApi: 'openai-completions',
+      compat: { vllmPriority: 8 },
+    }))
+    const field = compatControl<HTMLInputElement>(container, 'input.bre-text-input', t('priorityLabel'))
+    await typeText(field, '12')
+    const write = (api.commit.mock.calls.at(-1) as unknown[])[2] as Record<string, unknown>
+    expect(write['compat']).toMatchObject({ vllmPriority: 12 })
+  })
+
+  it('queues the max-output pick the user just made, not the one it replaced', async () => {
+    const api = baseApi()
+    const { container } = await renderEditor(baseProps({
+      api,
+      routeApi: 'openai-responses',
+      compat: { supportsMaxOutputTokens: true },
+    }))
+    const picker = compatControl<HTMLSelectElement>(container, 'select.bre-select', t('maxOutputLabel'))
+    await pickOption(picker, 'false')
+    const write = (api.commit.mock.calls.at(-1) as unknown[])[2] as Record<string, unknown>
+    expect(write['compat']).toMatchObject({ supportsMaxOutputTokens: false })
   })
 })
 

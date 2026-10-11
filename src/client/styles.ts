@@ -1494,6 +1494,60 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   cursor: default;
 }
 
+/* ---- The folded group of switched-off providers (Models page) ---- */
+
+/* A switched-off provider keeps its row — that is where it is switched back on —
+   but it does not have to stay in the list the user reads. The row keeps its DOM
+   slot (the drag pass reads its slots back out of there) and is ordered behind
+   the group's control instead, so unfolding shows the group UNDER that control
+   rather than scattered through the providers that are on.
+
+   !important, because the drag passes write an inline order onto the rows they
+   arrange: a folded row is not one of the rows the user is arranging, so the
+   tail belongs to this stylesheet, not to the last drag that ran. */
+.bre-row-folded { order: 1001 !important; }
+
+/* The seat: the list item that carries the control, in front of the folded rows
+   and behind every provider that is switched on. It is a list item of the host's
+   own flex column — the only place from which a control can head rows inside the
+   list — and it holds no card of its own, only the quiet end of the host's text
+   scale. */
+.bre-provider-disabled-seat {
+  box-sizing: border-box;
+  order: 1000 !important;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bre-provider-disabled-group {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  margin: 4px 0 0;
+  padding: 4px 2px;
+  border: none;
+  background: 0 0;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bre-provider-disabled-group:hover { color: var(--dsw-alias-label-secondary, #61666b); }
+
+.bre-provider-disabled-group:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 2px;
+}
+
+/* The folded row itself. !important because the official card class decides its
+   own display, and this stylesheet's order against the host's is not ours to
+   rely on. */
+.bre-row-hidden { display: none !important; }
+
 /* -----------------------------------------------------------------------
    The provider editor's three tabs.
 

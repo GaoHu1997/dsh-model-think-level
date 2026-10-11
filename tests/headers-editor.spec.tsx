@@ -447,6 +447,37 @@ describe('HeadersEditor', () => {
     }
   })
 
+  it('keys an added row apart from every loaded row', async () => {
+    // Regression: the draft numbered its loaded rows from 1 while the editor's
+    // own counter started at 1 as well, so the first added row reused the SECOND
+    // loaded row's id — editing it renamed that row too, and clearing it dropped
+    // that row as well, losing a stored header on the way out.
+    const api = fakeApi({ headers: { 'x-first': '1', 'x-second': '2' } })
+    const editor = await renderEditor({ route: 'aliyun', api, t })
+    try {
+      await expand(editor.container)
+      await act(async () => { buttonByText(editor.container, en.headersEdit).click() })
+      await act(async () => { buttonByText(editor.container, en.headersAdd).click() })
+
+      // Rename only the appended row: the loaded pair must keep its names.
+      const rowNames = (): string[] => Array.from(editor.container.querySelectorAll<HTMLInputElement>('input.bre-headers-name'))
+        .map(input => input.value)
+      await type(inputsByLabel(editor.container, en.headersName)[2]!, 'x-added')
+      expect(rowNames()).toEqual(['x-first', 'x-second', 'x-added'])
+
+      // Clear only the appended row: the loaded pair must survive.
+      const addedRemove = Array.from(editor.container.querySelectorAll<HTMLButtonElement>('button'))
+        .find(button => button.getAttribute('aria-label') === `${en.headersClear} x-added`)
+      await act(async () => { addedRemove!.click() })
+      expect(rowNames()).toEqual(['x-first', 'x-second'])
+
+      await act(async () => { buttonByText(editor.container, en.headersSave).click() })
+      expect(writtenHeaders(api.mutate)).toEqual({ 'x-first': '1', 'x-second': '2' })
+    } finally {
+      await editor.unmount()
+    }
+  })
+
   it('stores an empty dict when the last header is cleared', async () => {
     const api = fakeApi({ headers: { 'x-company': 'acme' } })
     const editor = await renderEditor({ route: 'aliyun', api, t })

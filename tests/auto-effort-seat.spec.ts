@@ -141,6 +141,24 @@ describe('reconcileAutoEffortSeats', () => {
     expect(seats()).toHaveLength(1)
   })
 
+  it('uses the latest callback when an existing seat is reconciled', async () => {
+    const { section } = catalogue()
+    const first = vi.fn(() => undefined)
+    const latest = vi.fn(() => undefined)
+    const targets = [{ catalogue: section, route: 'aliyun' }]
+    reconcileAutoEffortSeats(section, targets, { ...deps, onRequest: first })
+    const original = seat()
+    const records = await mutationsOf(section, () => {
+      reconcileAutoEffortSeats(section, targets, { ...deps, onRequest: latest })
+    })
+
+    expect(seat()).toBe(original)
+    expect(records).toEqual([])
+    original.click()
+    expect(latest).toHaveBeenCalledExactlyOnceWith('aliyun')
+    expect(first).not.toHaveBeenCalled()
+  })
+
   it('re-seats itself when the host appends a control after it', () => {
     const { section, head } = catalogue()
     reconcileAutoEffortSeats(section, [{ catalogue: section, route: 'aliyun' }], deps)

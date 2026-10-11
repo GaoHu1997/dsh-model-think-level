@@ -78,14 +78,24 @@ interface Draft {
   userAgent?: string
 }
 
-/** Build a draft from every stored header entry, including User-Agent. */
-function draftFrom(headers: Record<string, string> | undefined): Draft {
-  let id = 0
-  const rows = Object.entries(headers ?? {}).map(([name, value]) => ({ id: id += 1, name, value }))
+/**
+ * Build a draft from every stored header entry, including User-Agent.
+ *
+ * Row ids come from the caller's ONE counter, the same one `addRow` allocates
+ * from: numbering the loaded rows locally (1, 2, …) handed the first added row
+ * an id a loaded row already held, and every id-keyed operation — {@link patchRow},
+ * {@link removeRow}, the React key — then hit two rows at once.
+ * @param headers - the stored headers dict.
+ * @param nextId - the editor's single row-id counter, advanced per row handed out.
+ * @returns the draft.
+ */
+function draftFrom(headers: Record<string, string> | undefined, nextId: { current: number }): Draft {
+  const take = (): number => (nextId.current += 1)
+  const rows = Object.entries(headers ?? {}).map(([name, value]) => ({ id: take(), name, value }))
   // One blank pair by default: the pane is the editor now, and an empty pane
   // would offer nothing to type into — the other two panes always show fields,
   // and this one starts with one pair the user can fill (or replace) directly.
-  if (rows.length === 0) rows.push({ id: id += 1, name: '', value: '' })
+  if (rows.length === 0) rows.push({ id: take(), name: '', value: '' })
   return { rows }
 }
 
@@ -130,7 +140,7 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
    * and nothing else, so it renders expanded and drops the pill.
    */
   const [tabbed, setTabbed] = useState(false)
-  const nextRowId = useRef(1)
+  const nextRowId = useRef(0)
   const rootRef = useRef<HTMLDivElement | null>(null)
 
   // Seed the draft from the stored document. The slot hands the editor a route,
@@ -144,7 +154,7 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
         if (!live) return
         const headers = providerHeadersOf(join.namespace, route)
         setStored(headers)
-        setDraft(draftFrom(headers))
+        setDraft(draftFrom(headers, nextRowId))
         setReadOnly(join.writable !== true)
       } catch {
         // A read failure leaves the section inert rather than blocking the card.
@@ -203,7 +213,7 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
   }
 
   const cancel = (): void => {
-    setDraft(draftFrom(stored))
+    setDraft(draftFrom(stored, nextRowId))
     setEditing(false)
     setMessage(undefined)
   }

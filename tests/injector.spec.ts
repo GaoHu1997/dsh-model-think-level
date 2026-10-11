@@ -7,7 +7,7 @@
 
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, pinModelListCards, queueWriteInto, reconcile, stageEffortsInto, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
+import { absorbDelta, adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, pinModelListCards, queueWriteInto, reconcile, stageEffortsInto, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
 import { suggestEfforts, type ReasoningEfforts } from '../src/knowledge.js'
 import type { RemoteApi } from '../src/client/types.js'
 
@@ -1755,6 +1755,57 @@ describe('the auto-adapt seat', () => {
     expect(document.querySelector('.bre-auto-effort-note')?.getAttribute('data-bre-auto-effort-phase')).toBe('done')
   })
 
+  it.each(['after scan', 'before scan', 'retyped ID'] as const)(
+    'adapts a newly added collapsed row through the existing button (%s), then saves its ladder',
+    async timing => {
+      const local = structuredClone(join)
+      const layers = ['value', 'user'].map(layer =>
+        local.namespace![layer as 'value' | 'user'] as { providers: { aliyun: { models: Array<Record<string, unknown>> } } })
+      for (const layer of layers) {
+        for (const model of layer.providers.aliyun.models) model['reasoningEfforts'] = { high: 'high' }
+      }
+      const deps = makeDeps({ describeNamespace: async () => local })
+      const state = createScanState()
+      const root = buildModelsDom()
+      for (const advanced of root.querySelectorAll('.modelAdvanced')) advanced.remove()
+      await settle(() => reconcile(root, deps, state), state)
+      const button = root.querySelector<HTMLButtonElement>('.bre-auto-effort')!
+
+      const entry = document.createElement('div')
+      entry.className = 'modelEntry'
+      entry.innerHTML = `<div class="modelRow">
+        <input aria-label="Model ID 3" value="${timing === 'retyped ID' ? 'draft-old-id' : 'qwen-plus'}" />
+        <input aria-label="Display name 3" value="New Qwen" />
+        <button aria-label="Capacities 3"></button>
+      </div>`
+      root.querySelector('.modelCatalog')!.append(entry)
+      if (timing !== 'before scan') await settle(() => reconcile(root, deps, state), state)
+      if (timing === 'retyped ID') entry.querySelector('input')!.value = 'qwen-plus'
+      expect(root.querySelector('.bre-auto-effort')).toBe(button)
+
+      button.click()
+      await vi.waitFor(() => {
+        expect(state.pending.get('aliyun')?.get('qwen-plus')?.efforts).toEqual({ off: null, high: 'high' })
+      })
+      expect(state.pending.get('aliyun')?.has('draft-old-id')).toBe(false)
+      expect(state.queued.size).toBe(0)
+      expect(deps.mutate).not.toHaveBeenCalled()
+
+      for (const layer of layers) {
+        layer.providers.aliyun.models.push({ id: 'qwen-plus', name: 'New Qwen', contextWindow: 123456 })
+      }
+      await settleIdle(deps, state)
+      expect(state.pending.size).toBe(0)
+      expect(deps.mutate).toHaveBeenCalledTimes(1)
+      const written = (deps.mutate.mock.calls[0]![1] as Array<{ value: Array<Record<string, unknown>> }>)[0]!.value
+      expect(written.find(model => model['id'] === 'qwen-plus')).toMatchObject({
+        id: 'qwen-plus', name: 'New Qwen', contextWindow: 123456,
+        reasoningEfforts: { off: null, high: 'high' },
+      })
+      expect(written.find(model => model['id'] === 'qwen-max')?.['reasoningEfforts']).toEqual({ high: 'high' })
+    },
+  )
+
   it('answers a click with nothing to adapt instead of staying silent', async () => {
     // Every model already declares its levels: the pass SUCCEEDED and did
     // nothing, which must not read like a refusal or a dead button.
@@ -1857,6 +1908,60 @@ describe('the auto-adapt seat', () => {
     expect(state.queued.size).toBe(0)
   })
 
+  it('fills the image flag of a row whose ladder is already a decision, without restating the ladder', async () => {
+    // The two halves of a declaration are settled independently. A row that
+    // declared its ladder (here by hand) and never said anything about images
+    // still reads as configured to a pass that only looks at the ladder -- the
+    // user's report: the seat said "all already configured" while a vision model
+    // had no image flag. The fill therefore rides a ladder-less write
+    // (`efforts: 'keep'`), so the stored ladder comes out byte-identical.
+    const seeded = structuredClone(join)
+    for (const layer of ['value', 'user'] as const) {
+      const models = (seeded.namespace![layer] as { providers: { aliyun: { models: Array<Record<string, unknown>> } } }).providers.aliyun.models
+      models.push(
+        // Vision model (knowledge base says text+image), ladder already stored.
+        { id: 'gpt-4o-mini', reasoningEfforts: { high: 'high' } },
+        // Same model, but the row DID state its modality: that decision stands,
+        // no upgrade to images and no restating of the ladder either.
+        { id: 'gpt-4.1', reasoningEfforts: { high: 'high' }, input: ['text'] },
+      )
+    }
+    const deps = makeDeps({ describeNamespace: async () => seeded })
+    const state = createScanState()
+    const root = buildModelsDom()
+    for (const advanced of Array.from(root.querySelectorAll('.modelAdvanced'))) advanced.remove()
+    root.querySelector('.editor')!.insertAdjacentHTML('beforeend', `
+      <div class="editorActions">
+        <button type="button" class="secondaryButton">Cancel</button>
+        <button type="button" class="primaryButton">Apply</button>
+      </div>`)
+    await settle(() => reconcile(root, deps, state), state)
+
+    root.querySelector<HTMLButtonElement>('.bre-auto-effort')!.click()
+    for (let tick = 0; tick < 40 && (state.queued.get('aliyun')?.size ?? 0) < 3; tick += 1) {
+      await new Promise(resolve => { setTimeout(resolve, 0) })
+    }
+    const held = state.queued.get('aliyun')
+    expect([...held!.keys()]).toEqual(['qwen-max', 'qwen-turbo', 'gpt-4o-mini'])
+    expect(held?.get('gpt-4o-mini')?.efforts).toBe('keep')
+    expect(held?.get('gpt-4o-mini')?.input).toEqual(['text', 'image'])
+    // The state-less row is still a normal walk: it takes the whole suggestion.
+    expect(held?.get('qwen-turbo')?.efforts).toEqual({ off: null, high: 'high' })
+
+    root.querySelector<HTMLButtonElement>('.editorActions .primaryButton')!.click()
+    expect(state.committing.has('aliyun')).toBe(true)
+    await settleIdle(deps, state)
+    expect(deps.mutate).toHaveBeenCalledTimes(1)
+    const ops = deps.mutate.mock.calls[0]![1] as Array<{ path: string[]; value: Array<Record<string, unknown>> }>
+    const saved = ops[0]!.value
+    expect(saved.find(model => model['id'] === 'gpt-4o-mini')).toEqual({
+      id: 'gpt-4o-mini', reasoningEfforts: { high: 'high' }, input: ['text', 'image'],
+    })
+    expect(saved.find(model => model['id'] === 'gpt-4.1')).toEqual({
+      id: 'gpt-4.1', reasoningEfforts: { high: 'high' }, input: ['text'],
+    })
+  })
+
   it('adapts an expanded row that has no thinking levels yet, and leaves a configured one', async () => {
     const deps = makeDeps()
     const state = createScanState()
@@ -1923,12 +2028,48 @@ describe('the auto-adapt seat', () => {
     expect(report).toEqual({ held: 0, unsuggested: 0, blocked: 'unknown-route' })
   })
 
-  it('adapts the card\'s unsaved rows in the same click, held for the card\'s save', async () => {
-    // Every SAVED model is configured, but the card holds rows the document
+  it('refreshes a staged new row before the official Save', async () => {
+    const local = structuredClone(join)
+    for (const layer of ['value', 'user'] as const) {
+      const models = (local.namespace![layer] as { providers: { aliyun: { models: Array<Record<string, unknown>> } } }).providers.aliyun.models
+      for (const model of models) model['reasoningEfforts'] = { high: 'high' }
+    }
+    const deps = makeDeps({ describeNamespace: async () => local })
+    const state = createScanState()
+    const root = buildModelsDom()
+    const entry = document.createElement('div')
+    entry.className = 'modelEntry'
+    entry.innerHTML = `<div class="modelRow">
+      <input aria-label="Model ID 3" value="qwen-plus" />
+      <input aria-label="Display name 3" value="New Qwen" />
+      <button aria-label="Capacities 3"></button>
+    </div>
+    <div class="modelAdvanced" style="display:block"><label><span>Context window</span><input /></label></div>`
+    root.querySelector('.modelCatalog')!.append(entry)
+    deps.onPendingChanged = () => { reconcile(root, deps, state) }
+    await settle(() => reconcile(root, deps, state), state)
+
+    const report = await adaptEveryModel(state, deps, 'aliyun', [{ id: 'qwen-plus', name: 'New Qwen' }])
+    expect(report).toEqual({ held: 1, unsuggested: 0 })
+    await settle(() => reconcile(root, deps, state), state)
+
+    const mounted = [...state.mounted.values()].find(entry => entry.props.modelId === 'qwen-plus')
+    expect(mounted?.props.efforts).toEqual({ off: null, high: 'high' })
+    expect(mounted?.props.staged).toBe(true)
+    expect(deps.mutate).not.toHaveBeenCalled()
+  })
+
+  it('stages the card\'s unsaved rows, then lands their ladder once the Save carries the row in', async () => {
+    // Every SAVED model is configured, but the card holds a row the document
     // does not know: the head's click walks the screen's rows too, so a card
     // the user is still editing is adapted in one click instead of being
-    // deferred behind a save. The draft's hold lands when the Save carries the
-    // row into the document -- the same channel a row's own auto-adapt uses.
+    // deferred behind a save. That row STAGES -- the channel a row's own
+    // auto-adapt uses -- and the staged ledger is the only safe one for it:
+    // `flushRoute` keeps a staged declaration until a row with that id appears,
+    // while the commit-gated ledger treats a missing row as already landed and
+    // DROPS the intent silently. The settings read can still lag the official
+    // Save, and that silence is the reported "it said the levels were
+    // configured, and nothing was written".
     const configured = structuredClone(join)
     const userLayer = configured.namespace!.user as { providers: { aliyun: { models: Array<Record<string, unknown>> } } }
     const layers = [
@@ -1940,6 +2081,21 @@ describe('the auto-adapt seat', () => {
         .map(model => ({ ...model, reasoningEfforts: { high: 'high' } }))
     }
     const deps = makeDeps({ describeNamespace: async () => configured })
+    // A wire that really applies the batch, the way the settings document does:
+    // reading the ladder back off the written rows is the only way to see
+    // whether the click's promise ever reached the document.
+    deps.mutate.mockImplementation(async (_ns: string, ops: unknown[]) => {
+      for (const raw of ops as Array<{ op: string; path: Array<string | number>; value: Array<Record<string, unknown>> }>) {
+        const [head, route, field] = raw.path
+        if (raw.op !== 'set' || head !== 'providers' || field !== 'models') continue
+        // A real save writes the raw layer and recomputes the resolved one.
+        for (const layer of layers) {
+          const providers = layer.providers as unknown as Record<string, { models: unknown }>
+          providers[String(route)]!.models = raw.value
+        }
+      }
+      return { ok: true, value: undefined }
+    })
     const state = createScanState()
 
     const report = await adaptEveryModel(state, deps, 'aliyun', [
@@ -1948,18 +2104,75 @@ describe('the auto-adapt seat', () => {
       { id: 'my-draft-row', name: 'My Draft Row' },
     ])
 
-    expect(state.queued.size).toBe(1)
-    expect(state.queued.get('aliyun')?.has('my-draft-row')).toBe(true)
+    expect(state.queued.size).toBe(0)
+    expect(state.pending.get('aliyun')?.has('my-draft-row')).toBe(true)
     expect(report).toEqual({ held: 1, unsuggested: 0 })
-    // ...and once the card is saved (the draft id is the document's own), the
-    // same pass finds the row configured and holds nothing more.
-    userLayer.providers.aliyun.models.push({ id: 'my-draft-row', reasoningEfforts: { high: 'high' } })
+    // Staged means staged: nothing may reach the document before the Save does.
+    expect(deps.mutate).not.toHaveBeenCalled()
+
+    // The official Save carries the row into the document; the first idle pass
+    // lands the staged ladder on THAT row, preserving what the Save wrote.
+    for (const layer of layers) layer.providers.aliyun.models.push({ id: 'my-draft-row', name: 'My Draft Row' })
+    await settleIdle(deps, state)
+
+    expect(state.pending.size).toBe(0)
+    expect(deps.mutate).toHaveBeenCalledTimes(1)
+    const written = (deps.mutate.mock.calls[0]![1] as Array<{ value: Array<Record<string, unknown>> }>)[0]!.value
+    const draft = written.find(model => model['id'] === 'my-draft-row')
+    expect(draft?.['name']).toBe('My Draft Row')
+    expect('reasoningEfforts' in (draft ?? {})).toBe(true)
+    // ...and the pass that follows finds every row decided, holding nothing.
     const clean = await adaptEveryModel(state, deps, 'aliyun', [
       { id: 'qwen-max', name: 'Qwen Max' },
       { id: 'qwen-turbo', name: 'Qwen Turbo' },
       { id: 'my-draft-row', name: 'My Draft Row' },
     ])
     expect(clean).toEqual({ held: 0, unsuggested: 0 })
+  })
+
+  it('keeps a staged card row\'s ladder when the settings read still lags the Save', async () => {
+    // The Save landed, but the read the flush gets back is the pre-save
+    // document (the settings mirror "folds a fresh view in asynchronously").
+    // The staged intent must SURVIVE that read and land on the pass after it: a
+    // ladder dropped there is dropped silently, with the seat already having
+    // told the user the row was adapted.
+    const preSave = structuredClone(join)
+    const layers = [
+      preSave.namespace!.value as { providers: { aliyun: { models: Array<Record<string, unknown>> } } },
+      preSave.namespace!.user as { providers: { aliyun: { models: Array<Record<string, unknown>> } } },
+    ]
+    for (const layer of layers) {
+      layer.providers.aliyun.models = layer.providers.aliyun.models
+        .map(model => ({ ...model, reasoningEfforts: { high: 'high' } }))
+    }
+    let visible = preSave
+    const deps = makeDeps({ describeNamespace: async () => visible })
+    const state = createScanState()
+
+    const report = await adaptEveryModel(state, deps, 'aliyun', [{ id: 'my-draft-row', name: 'My Draft Row' }])
+    expect(report).toEqual({ held: 1, unsuggested: 0 })
+    expect(state.pending.get('aliyun')?.has('my-draft-row')).toBe(true)
+
+    // The Save put the row in the document, but this flush still reads the
+    // pre-save copy: the row looks missing, and the staging must be KEPT.
+    await settleIdle(deps, state)
+    expect(state.pending.get('aliyun')?.has('my-draft-row')).toBe(true)
+    expect(deps.mutate).not.toHaveBeenCalled()
+
+    // The mirror catches up: the next pass lands the ladder, once.
+    const caughtUp = structuredClone(preSave)
+    for (const layer of [
+      caughtUp.namespace!.value as { providers: { aliyun: { models: Array<Record<string, unknown>> } } },
+      caughtUp.namespace!.user as { providers: { aliyun: { models: Array<Record<string, unknown>> } } },
+    ]) {
+      layer.providers.aliyun.models.push({ id: 'my-draft-row', name: 'My Draft Row' })
+    }
+    visible = caughtUp
+    await settleIdle(deps, state)
+    expect(state.pending.size).toBe(0)
+    expect(deps.mutate).toHaveBeenCalledTimes(1)
+    const written = (deps.mutate.mock.calls[0]![1] as Array<{ value: Array<Record<string, unknown>> }>)[0]!.value
+    expect('reasoningEfforts' in (written.find(model => model['id'] === 'my-draft-row') ?? {})).toBe(true)
   })
 
   it('answers a second click while a pass is running with busy, not with a tally', async () => {
@@ -2451,5 +2664,191 @@ describe('model list deletion range', () => {
     unwatchModelListOffsets()
 
     expect(page.host.querySelector('.bre-list-slack')).toBeNull()
+  })
+
+  interface FlatPage {
+    /** The page's own scroller, which is where a long page keeps its offset. */
+    root: HTMLElement
+    /** The live page's own content height, which a deletion shrinks. */
+    content: { height: number }
+    deleteButton: HTMLElement
+    /** Undo the layout stubs and take the page down. */
+    undo: () => void
+  }
+
+  /** Stub one layout number jsdom does not compute, and hand back its undo. */
+  function stubLayout(
+    element: HTMLElement,
+    name: 'scrollHeight' | 'clientHeight' | 'scrollTop',
+    value: number | (() => number),
+  ): () => void {
+    const own = Object.getOwnPropertyDescriptor(element, name)
+    Object.defineProperty(element, name, typeof value === 'function'
+      ? { get: value, configurable: true }
+      : { value, writable: true, configurable: true })
+    return () => {
+      if (own === undefined) Reflect.deleteProperty(element, name)
+      else Object.defineProperty(element, name, own)
+    }
+  }
+
+  /**
+   * A page that scrolls as a WHOLE: one provider card's worth of tall content
+   * and nothing anywhere that declares an overflow of its own.
+   *
+   * This is the shape the live settings page has — the models package contains
+   * no scroll container at all — and the shape this pass used to refuse: it
+   * asked for the nearest container, was answered with the page's own scroller,
+   * and dropped the position on the floor.
+   */
+  function buildFlatPage(contentHeight: number): FlatPage {
+    const section = document.createElement('div')
+    section.className = 'section'
+    section.innerHTML = `
+      <ul class="rows">
+        <li class="rowCard">
+          <div class="rowHead"><span class="rowName">Aliyun</span></div>
+          <div class="editor">
+            <div class="modelCatalog">
+              <div class="modelList">
+                <div class="modelEntry">
+                  <div class="modelRow">
+                    <input aria-label="Model ID" value="qwen-max" />
+                    <button class="secondaryButton" aria-label="删除模型 1">删除</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </li>
+      </ul>
+    `
+    document.body.appendChild(section)
+    // jsdom answers `scrollingElement` with null; a browser answers with the
+    // document element, which is the container this case is entirely about.
+    const root = document.documentElement
+    const declared = Object.getOwnPropertyDescriptor(document, 'scrollingElement')
+    Object.defineProperty(document, 'scrollingElement', { get: () => root, configurable: true })
+    const content = { height: contentHeight }
+    const blank = (): number => {
+      const spacer = root.querySelector<HTMLElement>('.bre-list-slack')
+      return spacer === null ? 0 : Number.parseFloat(spacer.style.height)
+    }
+    const undo = [
+      stubLayout(root, 'scrollHeight', () => content.height + blank()),
+      stubLayout(root, 'clientHeight', 746),
+      stubLayout(root, 'scrollTop', 0),
+      () => {
+        if (declared === undefined) Reflect.deleteProperty(document, 'scrollingElement')
+        else Object.defineProperty(document, 'scrollingElement', declared)
+      },
+    ]
+    const deleteButton = section.querySelector<HTMLElement>('.secondaryButton')
+    expect(deleteButton).not.toBeNull()
+    watchModelListOffsets()
+    return {
+      root,
+      content,
+      deleteButton: deleteButton as HTMLElement,
+      undo: () => {
+        for (const restore of undo.reverse()) restore()
+        section.remove()
+      },
+    }
+  }
+
+  it("holds the page's own range when the page is all there is to scroll", () => {
+    const page = buildFlatPage(1555)
+    try {
+      page.root.scrollTop = 809
+      page.deleteButton.click()
+
+      // The deletion lands, and the range the offset was leaning on is the
+      // page's own: this is the clamp that used to be the whole report.
+      page.content.height = 1501
+      const reach = Math.max(0, page.root.scrollHeight - page.root.clientHeight)
+      page.root.scrollTop = Math.min(page.root.scrollTop, reach)
+      expect(page.root.scrollTop).toBe(755)
+
+      pinModelListCards(document.body)
+
+      // The position the click was made from holds again, and the blank that
+      // holds it is on the page itself.
+      expect(page.root.scrollTop).toBe(809)
+      const spacer = page.root.querySelector<HTMLElement>('.bre-list-slack')
+      expect(spacer?.style.height).toBe('54px')
+      expect(spacer?.dataset['plugin']).toBe('dsh-model-think-level')
+      // The page's blank sits in the page's own content, not outside it.
+      expect(spacer?.parentElement).toBe(document.body)
+
+      // The card is pinned against the page's scroller too, and its anchoring
+      // goes back the moment the user takes the view over.
+      expect(page.root.style.overflowAnchor).toBe('none')
+      document.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
+      expect(page.root.style.overflowAnchor).toBe('')
+    } finally {
+      page.undo()
+    }
+  })
+})
+
+/**
+ * Where a viewport correction goes when the container it started from cannot
+ * take it.
+ *
+ * A card's place on screen is the sum of every offset above it, so a delta
+ * belongs to whichever of those containers actually moved — and only a
+ * container this window still owns may be written to, or the loop would fight
+ * the user's own scrolling.
+ */
+describe('scroll chain correction', () => {
+  /** A container with a fixed amount of room left, clamped like a browser. */
+  function scroller(top: number, room: number): HTMLElement {
+    const host = document.createElement('div')
+    let value = top
+    Object.defineProperty(host, 'scrollTop', {
+      get: () => value,
+      set: (next: number) => {
+        value = Math.max(0, Math.min(next, top + room))
+      },
+      configurable: true,
+    })
+    return host
+  }
+
+  it('hands the delta to the container that has room for it', () => {
+    const panel = scroller(100, 300)
+    const page = scroller(50, 500)
+    const lastSet = new Map<HTMLElement, number>([[panel, 100], [page, 50]])
+    const watched = new Set<HTMLElement>([panel])
+
+    absorbDelta([panel, page], watched, lastSet, 54)
+
+    expect(panel.scrollTop).toBe(154)
+    expect(page.scrollTop).toBe(50)
+  })
+
+  it('moves the page once the panel has nothing left to give', () => {
+    const panel = scroller(400, 0)
+    const page = scroller(50, 500)
+    const lastSet = new Map<HTMLElement, number>([[panel, 400], [page, 50]])
+    const watched = new Set<HTMLElement>([panel])
+
+    absorbDelta([panel, page], watched, lastSet, 54)
+
+    expect(panel.scrollTop).toBe(400)
+    expect(page.scrollTop).toBe(104)
+    expect([...watched]).toContain(page)
+  })
+
+  it('leaves a container somebody else has already moved alone', () => {
+    const page = scroller(70, 500)
+    const lastSet = new Map<HTMLElement, number>([[page, 50]])
+    const watched = new Set<HTMLElement>([page])
+
+    absorbDelta([page], watched, lastSet, 54)
+
+    expect(page.scrollTop).toBe(70)
+    expect(lastSet.get(page)).toBe(50)
   })
 })

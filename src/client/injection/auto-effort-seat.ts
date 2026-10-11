@@ -182,7 +182,8 @@ export function reconcileAutoEffortSeats(
   const label = deps.t('autoAdaptAll')
   for (const [catalogue, route] of wanted) {
     const head = catalogue.querySelector<HTMLElement>(HEAD_PROBE) ?? catalogue
-    const seat = head.querySelector<HTMLButtonElement>(`[${SEAT_ATTR}]`) ?? createSeat(deps)
+    const seat = head.querySelector<HTMLButtonElement>(`[${SEAT_ATTR}]`) ?? createSeat()
+    seatDeps.set(seat, deps)
     // Beside the host's own link when the head renders one (the control the
     // user already reaches for), else at the head's end.
     const anchor = lastLink(head)
@@ -246,7 +247,7 @@ function lastLink(head: HTMLElement): HTMLElement | null {
   return links.length === 0 ? null : links[links.length - 1]
 }
 
-function createSeat(deps: AutoEffortSeatDeps): HTMLButtonElement {
+function createSeat(): HTMLButtonElement {
   const seat = document.createElement('button')
   seat.className = SEAT_CLASS
   seat.setAttribute('type', 'button')
@@ -257,6 +258,8 @@ function createSeat(deps: AutoEffortSeatDeps): HTMLButtonElement {
   seat.addEventListener('click', () => {
     const route = seat.getAttribute(SEAT_ATTR) ?? ''
     if (route.length === 0) return
+    const deps = seatDeps.get(seat)
+    if (deps === undefined) return
     // Two answers, one click: the event reaches every mounted row's editor
     // (the expanded ones), and `onRequest` covers the rows the pass could not
     // mount -- a collapsed row has no disclosure container to mount into.
@@ -351,6 +354,9 @@ function buildNote(): HTMLElement {
   note.innerHTML = `<span class="${NOTE_TEXT_CLASS}"></span><span class="${NOTE_DETAIL_CLASS}"></span>`
   return note
 }
+
+/** The latest request dependencies for each reused seat. */
+const seatDeps = new WeakMap<HTMLButtonElement, AutoEffortSeatDeps>()
 
 /**
  * The bubbles currently up, one per route.

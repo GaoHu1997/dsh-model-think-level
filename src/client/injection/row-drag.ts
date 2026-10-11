@@ -443,6 +443,32 @@ export function scrollHostOf(node: HTMLElement): HTMLElement | undefined {
   return root instanceof HTMLElement && root.scrollHeight > root.clientHeight ? root : undefined
 }
 
+/**
+ * Every container that can hold `node` in place, nearest first.
+ *
+ * {@link scrollHostOf} answers the one container an edge-drag has to drive. A
+ * window that CORRECTS the view needs the rest of the chain as well: the offset
+ * a change takes away is held by whichever ancestor the browser is using as the
+ * scrolling box, and the nearest container is only the innermost candidate for
+ * that — an ancestor the nearest one delegates to can be the one that moved.
+ *
+ * The page's own scroller is the last candidate even though it never declares
+ * an overflow of its own: a long settings page scrolls there when nothing
+ * inside it does, and a row deletion near the bottom of that page takes its
+ * range away exactly like a deletion inside a small panel would.
+ */
+export function scrollChainOf(node: HTMLElement): HTMLElement[] {
+  const chain: HTMLElement[] = []
+  let current: HTMLElement | null = node.parentElement
+  while (current !== null) {
+    if (scrolls(current)) chain.push(current)
+    current = current.parentElement
+  }
+  const root = document.scrollingElement
+  if (root instanceof HTMLElement && root.scrollHeight > root.clientHeight && !chain.includes(root)) chain.push(root)
+  return chain
+}
+
 /** Whether an element is a scroll container with something left to scroll. */
 function scrolls(node: HTMLElement): boolean {
   if (node.scrollHeight <= node.clientHeight) return false

@@ -224,6 +224,31 @@ export function compatDraftOf(compat: CompatSuggestion | undefined): CompatSugge
 }
 
 /**
+ * The compat advice three MANUAL field values spell, from the values handed in.
+ *
+ * The editor's three compat controls are its own edit surface, so the handler
+ * that just changed one must report the value it computed: re-reading the
+ * component state there reports the PRE-update field, because React commits
+ * that state after the event — the queued write then carries the previous
+ * advice while the control already shows the new one.
+ * @param parts - the three field values as they will read after the event.
+ * @returns the draft, or undefined when all three are empty.
+ */
+export function manualCompatOf(
+  parts: { budgetField: string; priorityText: string; maxOutput: string },
+): CompatSuggestion | undefined {
+  const out: CompatSuggestion = {}
+  // The cast is the same one the stored block round trip uses: a hand-tuned
+  // spelling the plugin's union does not name must survive unchanged.
+  if (parts.budgetField !== '') out.thinkingTokenBudgetField = parts.budgetField as CompatSuggestion['thinkingTokenBudgetField']
+  const pruned = parts.priorityText.trim()
+  if (pruned !== '' && /^-?\d+$/.test(pruned)) out.vllmPriority = Number.parseInt(pruned, 10)
+  if (parts.maxOutput === 'true') out.supportsMaxOutputTokens = true
+  else if (parts.maxOutput === 'false') out.supportsMaxOutputTokens = false
+  return Object.keys(out).length === 0 ? undefined : out
+}
+
+/**
  * Assemble one complete pending write from the parts a caller resolved: the
  * compat merge (the applied suggestion's block with the caller's own fields on
  * top), the thinking-budget default an openai-completions endpoint needs, and
@@ -363,15 +388,10 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     // later unrelated Apply writes the stale pick back over the document.
   }, [initialEfforts, initialInput, initialCompat, initialDefaultEffort])
 
-  const compatDraft = (): CompatSuggestion | undefined => {
-    const out: CompatSuggestion = {}
-    if (budgetField !== '') out.thinkingTokenBudgetField = budgetField as CompatSuggestion['thinkingTokenBudgetField']
-    const pruned = priorityText.trim()
-    if (pruned !== '' && /^-?\d+$/.test(pruned)) out.vllmPriority = Number.parseInt(pruned, 10)
-    if (maxOutput === 'true') out.supportsMaxOutputTokens = true
-    else if (maxOutput === 'false') out.supportsMaxOutputTokens = false
-    return Object.keys(out).length === 0 ? undefined : out
-  }
+  // The three fields as the STATE holds them — correct for every caller that did
+  // not just change one; the three compat handlers pass their own next triple
+  // through commitPending instead (see {@link manualCompatOf}).
+  const compatDraft = (): CompatSuggestion | undefined => manualCompatOf({ budgetField, priorityText, maxOutput })
   const compatChanged = (): boolean => {
     const draftOut = compatDraft()
     return JSON.stringify(draftOut ?? null) !== JSON.stringify({
@@ -439,6 +459,11 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     // The switch's pre-update value: a toggle computes its own next value and
     // hands it in, exactly like the three parts above.
     nextThinking: boolean = thinking,
+    // The three compat fields as they will read AFTER this event. Undefined
+    // means "this edit did not change one", i.e. the state's own values — the
+    // handlers that DO change one pass their next triple, because reading the
+    // state here would queue the previous advice.
+    nextCompatFields?: { budgetField: string; priorityText: string; maxOutput: string },
   ): void => {
     // OFF is the explicit `false` declaration, whatever the draft still holds
     // (the draft is deliberately left alone, so flipping back loses no edits).
@@ -458,7 +483,7 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
       efforts: effortsIntent,
       input: nextInput,
       defaultEffort: defaultEffortOut,
-      manualCompat: compatDraft(),
+      manualCompat: nextCompatFields === undefined ? compatDraft() : manualCompatOf(nextCompatFields),
       appliedCompat: appliedCompatRef.current,
       routeApi,
       initialCompat,
@@ -536,24 +561,26 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
 
   // Each text field reports on its own change: a controlled input fires per
   // keystroke, and commitPending collapses the ones that do not move the value.
+  // Each one hands over its OWN next triple for the same reason it hands over
+  // its next draft: the state it just set is not readable yet on this turn.
   const patchBudgetField = (value: string): void => {
     markDirty()
     setBudgetField(value)
-    commitPending(draft, modality, defaultEffort)
+    commitPending(draft, modality, defaultEffort, thinking, { budgetField: value, priorityText, maxOutput })
     setMessage(undefined)
   }
 
   const patchPriority = (value: string): void => {
     markDirty()
     setPriorityText(value)
-    commitPending(draft, modality, defaultEffort)
+    commitPending(draft, modality, defaultEffort, thinking, { budgetField, priorityText: value, maxOutput })
     setMessage(undefined)
   }
 
   const patchMaxOutput = (value: string): void => {
     markDirty()
     setMaxOutput(value)
-    commitPending(draft, modality, defaultEffort)
+    commitPending(draft, modality, defaultEffort, thinking, { budgetField, priorityText, maxOutput: value })
     setMessage(undefined)
   }
 
