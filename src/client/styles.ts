@@ -1103,7 +1103,10 @@ body:not([data-ds-dark-theme]) .bre-effort.is-dragging .bre-effort-knob {
 }
 /* The titled-section rows the pane is built from: the title row names its
    section (headers first; future advanced sections each carry one), sitting
-   under a hairline the way the official page's group titles do. */
+   under a hairline the way the official page's group titles do.
+   The head strip above it is where the headers section draws its title now —
+   it is the one title the pane needs, and it is the line the hint reads under
+   — so this rule is the hairline's home alone, for the sections that follow. */
 .bre-headers-title-row {
   padding-bottom: 6px;
   border-bottom: 1px solid var(--dsw-alias-border-l2, #0000001a);
