@@ -256,34 +256,29 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
 
   return (
     <div className="bre-headers" ref={rootRef} data-plugin={PLUGIN_ID} data-open={open ? '1' : '0'}>
-      {/* The title strip only exists while the section is a fold inside the
-          provider card: the grey head is the identity of a collapsed disclosure.
-          Under the tabs the section is the whole 高级配置 pane, and the
-          provider and models panes carry no heading strip of their own — the
-          tab itself names the pane — so the head steps aside there the same
-          way the disclosure button does, keeping the three panes identical in
-          weight. */}
-      {!tabbed && (
-        <div className="bre-headers-head">
-          {editing
-            ? <span className="bre-effort-title">{t('headersTitle')}</span>
-            : (
-              <button
-                type="button"
-                className="bre-headers-disclosure"
-                aria-expanded={open}
-                aria-label={`${t('headersTitle')} ${route}`}
-                onClick={() => { setOpen(!open); setMessage(undefined) }}
-              >
-                <span className="bre-effort-title">{t('headersTitle')}</span>
-                {loading || count === 0
-                  ? null
-                  : <span className="bre-headers-count">{count}</span>}
-                <span className="bre-headers-chevron" aria-hidden="true">›</span>
-              </button>
-            )}
-        </div>
-      )}
+      {/* The section's identity. A fold inside the provider card needs the grey
+          head with the count and the › that opens it; the 高级配置 pane needs
+          only the NAME — the tab above already disclosed it, and the pane is
+          the editor, so this is where the title the hint sits under belongs. */}
+      <div className="bre-headers-head">
+        {editing || tabbed
+          ? <span className="bre-effort-title">{t('headersTitle')}</span>
+          : (
+            <button
+              type="button"
+              className="bre-headers-disclosure"
+              aria-expanded={open}
+              aria-label={`${t('headersTitle')} ${route}`}
+              onClick={() => { setOpen(!open); setMessage(undefined) }}
+            >
+              <span className="bre-effort-title">{t('headersTitle')}</span>
+              {loading || count === 0
+                ? null
+                : <span className="bre-headers-count">{count}</span>}
+              <span className="bre-headers-chevron" aria-hidden="true">›</span>
+            </button>
+          )}
+      </div>
 
       {!open && !editing && !tabbed
         ? null
@@ -315,13 +310,6 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
               : editing || inline
                 ? (
                   <div className="bre-headers-edit">
-                    {/* The section's title row. Under the tabs the pane has no
-                        head strip of its own, and future advanced sections each
-                        carry one of these of their own — the pane is a stack of
-                        titled sections, headers being the first. */}
-                    <div className="bre-headers-title-row">
-                      <span className="bre-effort-title">{t('headersTitle')}</span>
-                    </div>
                     <div className="bre-headers-columns" aria-hidden="true">
                       <span>{t('headersName')}</span>
                       <span>{t('headersValue')}</span>

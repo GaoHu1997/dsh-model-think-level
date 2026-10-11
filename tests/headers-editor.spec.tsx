@@ -292,6 +292,13 @@ describe('HeadersEditor', () => {
       expect(editor.container.querySelector('.bre-headers-disclosure')).toBeNull()
       expect(editor.container.querySelectorAll('.bre-headers-row')).toHaveLength(1)
       expect(editor.container.textContent).toContain(en.headersHint)
+      // The hint reads UNDER the title, and the title is there to read it under:
+      // the pane is the only place the section shows a head at all, so a hint
+      // with nothing above it is the orphan. The title stays plain text — no
+      // pill, no › — because the tab above already named the pane.
+      const head = editor.container.querySelector('.bre-headers-head')
+      expect(head?.querySelector('.bre-effort-title')?.textContent).toBe(en.headersTitle)
+      expect(head?.textContent).not.toContain(en.headersHint)
       // Reaches its own edit affordances without a disclosure click — and
       // without the pill the collapsed card section shows to open the fold: the
       // pane IS the editor, so the rows are typed in place (the other two panes

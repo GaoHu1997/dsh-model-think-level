@@ -29,7 +29,7 @@
 
 import { orderedIds, reconcileRows, rowElements, teardownDrags, createDragState, clearRowOrder } from './row-drag.js'
 import type { DragAdapter, DragState } from './row-drag.js'
-import { setModelOrder, resolveModelOrder, modelOrderOf } from '../model-order.js'
+import { setModelOrder, resolveModelOrder } from '../model-order.js'
 import { inputValueByLabel, type HostLabels } from './models-page-editor.js'
 import { providerIdOfRow } from './provider-order-drag.js'
 
@@ -216,9 +216,4 @@ export function teardownModelOrder(state: ModelOrderState): void {
   const stamped = Array.from(document.querySelectorAll<HTMLElement>(`[${ROW_ID_ATTR}]`))
   clearRowOrder(stamped)
   for (const entry of stamped) entry.removeAttribute(ROW_ID_ATTR)
-}
-
-/** The stored sequence for one provider, for callers that only need to read it. */
-export function storedModelOrder(provider: string): readonly string[] {
-  return modelOrderOf(provider)
 }

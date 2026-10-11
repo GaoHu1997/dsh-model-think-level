@@ -1614,6 +1614,22 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   background: var(--dsw-alias-bg-module-platform, #f5f6f7);
 }
 
+/* The pane's heading is not a fold head. The grey pill, its hover state and
+   the › that opens the card section have no job in a pane that is always open
+   and named by the tab above it, so the title drops back to plain text. It
+   keeps the title row's weight the section uses everywhere else — the head
+   strip and the hint both step aside for it, which is what makes the title
+   the line the hint reads under rather than an equal of it. */
+.bre-tabbed[data-bre-tab='advanced'] .bre-headers-head {
+  min-height: 0;
+  padding: 0;
+  background: none;
+}
+.bre-tabbed[data-bre-tab='advanced'] .bre-headers-head .bre-effort-title {
+  font-size: 13px;
+  line-height: 20px;
+}
+
 /* The live editor folds its identity fields and model list into one
    "Customized" disclosure. Under the tabs the grouping is the panes' job: the
    group stays expanded (the pass forces it open) and its summary row — now a

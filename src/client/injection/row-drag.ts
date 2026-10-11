@@ -67,6 +67,14 @@ export interface DragSession {
   dropped: boolean
 }
 
+/** What a list looked like the last time a scan read it. */
+export interface ListSighting {
+  /** The ids in the sequence they screened, in screen order. */
+  readonly ids: readonly string[]
+  /** The row elements that were on screen. */
+  readonly rows: readonly Element[]
+}
+
 /** Per-scan bookkeeping; one instance per module that owns a list. */
 export interface DragState {
   /** The drag sources already carrying listeners. */
@@ -75,6 +83,16 @@ export interface DragState {
   readonly lists: WeakSet<Element>
   /** The insertion line; created on the first drag and reused until teardown. */
   line: HTMLElement | undefined
+  /**
+   * What each list looked like on the last pass, by list element.
+   *
+   * Needed because a removal cannot be told from a rename or an addition by
+   * looking at the current DOM: when the host keys its rows by index, deleting
+   * a model leaves every row below it drawn with the next model, so the rows on
+   * screen are the same elements holding the same `order`s they always had. See
+   * {@link arrangement} for what that does to the screen order.
+   */
+  readonly sighted: WeakMap<Element, ListSighting>
   drag: DragSession | undefined
 }
 
@@ -106,7 +124,7 @@ const INTERACTIVE =
   '[role="switch"], [role="checkbox"], [role="textbox"], [role="combobox"]'
 
 export function createDragState(): DragState {
-  return { sources: new WeakSet(), lists: new WeakSet(), line: undefined, drag: undefined }
+  return { sources: new WeakSet(), lists: new WeakSet(), line: undefined, sighted: new WeakMap(), drag: undefined }
 }
 
 /** A list's child elements, in DOM order. */
@@ -131,12 +149,12 @@ export function visualRows(list: HTMLElement): HTMLElement[] {
 }
 
 /**
- * Put `sequence` on screen: each row it names takes the slot a named row
- * already held, and a row it does not name keeps the slot it has. Every child
- * gets an explicit `order` once anything moves, so no two rows share a slot.
+ * Put `sequence` on screen against a known current sequence: each row it names
+ * takes the slot a named row already held, and a row it does not name keeps the
+ * slot it has. Every child gets an explicit `order` once anything moves, so no
+ * two rows share a slot.
  */
-export function placeRows(list: HTMLElement, sequence: readonly HTMLElement[]): void {
-  const current = visualRows(list)
+function placeRowsFrom(current: readonly HTMLElement[], sequence: readonly HTMLElement[]): void {
   const named = current.filter(row => sequence.includes(row))
   const slots = named.map(row => current.indexOf(row))
   const ordered = sequence.filter(row => named.includes(row))
@@ -150,6 +168,17 @@ export function placeRows(list: HTMLElement, sequence: readonly HTMLElement[]): 
     const value = String(slot)
     if (row.style.order !== value) row.style.order = value
   }
+}
+
+/**
+ * Put `sequence` on screen against the order the rows currently screen in.
+ *
+ * Only for a gesture in flight: the pointer's arrangement IS the screen order,
+ * so that is the sequence the rows are placed against. Everything outside a
+ * gesture goes through {@link applyIdOrder}, which places against the DOM.
+ */
+export function placeRows(list: HTMLElement, sequence: readonly HTMLElement[]): void {
+  placeRowsFrom(visualRows(list), sequence)
 }
 
 /**
@@ -185,8 +214,92 @@ export function orderedIds(
 }
 
 /**
+ * The ids that describe the current arrangement.
+ *
+ * Normally that is the screen order: it is what the user sees, and re-deriving
+ * it from anything else would undo their last drag. The exception is a removal,
+ * after which the screen order describes the arrangement as it was BEFORE the
+ * removal rather than the one the user is left with.
+ *
+ * React keys these rows by index, so removing a model does not remove the
+ * element that model was drawn in. Every element from the deleted position down
+ * is redrawn with the NEXT model and the last element is dropped, so each
+ * survivor is left holding a different model's inline `order`: the deleted
+ * model screens where its successor now sits, and the model that was last takes
+ * the row element that got destroyed. Reading the screen order then bakes that
+ * pre-removal arrangement back in as if the user had chosen it — the rows above
+ * the deletion jump and the ones below move down. That is both symptoms in one.
+ *
+ * A removal is told apart from the edits that read the same in the current DOM
+ * by which row elements survived. A model the user renamed keeps its element,
+ * and one they added arrives in a new element, so neither costs an element; a
+ * model they deleted destroys one, and because the keys are indexes it destroys
+ * the tail. So any row that was on screen last pass and is gone now means a
+ * model left — and the arrangement to restore is the last one with the departed
+ * ids dropped, which leaves the rows above the deletion in their slots and
+ * shifts the rows below up by exactly the count that left.
+ *
+ * That test needs no look at the ids at all, which is what lets it survive a
+ * rename, an addition, and several deletions inside one debounce window. A host
+ * that rebuilt the list from scratch also satisfies it, but harmlessly: none of
+ * its ids were in the sighting, so the ranking below falls back to the screen
+ * order it is already in.
+ *
+ * Anything else — a rename, an addition, rows this plugin cannot name, a drag in
+ * flight — leaves the screen order standing, because then it does describe the
+ * arrangement.
+ */
+function arrangement(
+  list: HTMLElement,
+  idOf: (row: HTMLElement) => string | undefined,
+  sighting: ListSighting | undefined,
+): string[] {
+  const current = orderedIds(list, idOf)
+  if (sighting === undefined || !rowsWereRemoved(list, sighting)) return current
+  const rank = new Map<string, number>()
+  sighting.ids.forEach((id, index) => { if (!rank.has(id)) rank.set(id, index) })
+  // Rank every id the sighting knew; anything that arrived since keeps the place
+  // it holds now, which for a model just added is the end of the list.
+  return current
+    .map((id, index) => ({ id, key: rank.get(id) ?? sighting.ids.length + index }))
+    .sort((left, right) => left.key - right.key)
+    .map(entry => entry.id)
+}
+
+/**
+ * Whether any row that was on screen last pass has been taken off the list since.
+ *
+ * The element is the whole witness. Nothing else in the DOM remembers what the
+ * list held before: a rename redraws the input in place, an addition appends,
+ * and a deletion leaves every survivor holding a neighbour's `order`.
+ */
+function rowsWereRemoved(list: HTMLElement, sighting: ListSighting): boolean {
+  return sighting.rows.some(row => !list.contains(row))
+}
+
+/** Note what the list looks like now, so the next pass can read this one. */
+function sight(list: HTMLElement, idOf: (row: HTMLElement) => string | undefined): ListSighting {
+  const ids: string[] = []
+  for (const row of visualRows(list)) {
+    const id = idOf(row)
+    if (id !== undefined) ids.push(id)
+  }
+  const rows: Element[] = []
+  for (const row of rowElements(list)) if (idOf(row) !== undefined) rows.push(row)
+  return { ids, rows }
+}
+
+/**
  * Place the rows in `ids` order. Rows without a known id are left exactly where
  * they are: a row we cannot name is a row we must not move.
+ *
+ * The slots come from the DOM order. React owns the child list and keeps it
+ * compacted and truthful across a removal, while the inline `order`s still on
+ * the survivors describe where those models were before it. Taking the slots
+ * from the DOM and the sequence from {@link arrangement} is what lets the two
+ * meet: the rows land in the order the user had, in the slots the host now
+ * genuinely has, so the gap a deletion left closes instead of leaving a row
+ * behind the end of the list.
  */
 export function applyIdOrder(
   list: HTMLElement,
@@ -195,13 +308,14 @@ export function applyIdOrder(
 ): void {
   const rank = new Map<string, number>()
   for (const [index, id] of ids.entries()) if (!rank.has(id)) rank.set(id, index)
-  const named = visualRows(list).filter(row => idOf(row) !== undefined)
+  const current = rowElements(list)
+  const named = current.filter(row => idOf(row) !== undefined)
   const ordered = [...named].sort((left, right) => {
     const leftRank = rank.get(idOf(left) as string) ?? Number.MAX_SAFE_INTEGER
     const rightRank = rank.get(idOf(right) as string) ?? Number.MAX_SAFE_INTEGER
     return leftRank - rightRank
   })
-  placeRows(list, ordered)
+  placeRowsFrom(current, ordered)
 }
 
 /** Hand every row back the inline geometry a drag wrote on it. */
@@ -599,7 +713,13 @@ export function reconcileRows(
   // Mid-drag the screen order is the user's, not the preference's: writing it
   // now would snap the row back under the pointer.
   if (state.drag !== undefined) return
-  applyIdOrder(list, adapter.order(orderedIds(list, adapter.idOf)), adapter.idOf)
+  // The arrangement to hold is the user's own — see `arrangement` for the one
+  // case where the screen order cannot be read as it. The slots come from the
+  // DOM inside `applyIdOrder`, so a removal closes its gap on the same pass that
+  // notices it.
+  const base = arrangement(list, adapter.idOf, state.sighted.get(list))
+  applyIdOrder(list, adapter.order(base), adapter.idOf)
+  state.sighted.set(list, sight(list, adapter.idOf))
 }
 
 /**

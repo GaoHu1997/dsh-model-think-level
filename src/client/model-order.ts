@@ -159,8 +159,3 @@ export function orderModelEntries<T extends { readonly id: string }>(
   const byId = new Map(entries.map(entry => [entry.id, entry]))
   return orderModels(entries.map(entry => entry.id), preferred).map(id => byId.get(id) as T)
 }
-
-/** Drop everything one provider stored (used when its last model is removed). */
-export function clearModelOrder(provider: string): void {
-  setModelOrder(provider, [])
-}
