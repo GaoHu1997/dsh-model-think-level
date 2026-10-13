@@ -168,4 +168,20 @@ describe('EditorTabBar', () => {
     )
     expect(STYLES).toContain('background: var(--dsw-alias-bg-module-platform, #f5f6f7);')
   })
+
+  it('keeps a marked commit row on the advanced tab, and only that', () => {
+    // The create card's 创建提供商 row is the save the 高级配置 pane's draft is
+    // written with, and the pass that marks it (data-bre-footer) is the only one
+    // allowed to keep a body on that tab. Without the mark the body steps aside
+    // wholesale, which is the long-standing behaviour of an existing provider.
+    expect(STYLES).toContain(
+      ".bre-tabbed[data-bre-tab='advanced'] [data-bre-editor-body]:not([data-bre-footer]) {\n  display: none !important;",
+    )
+    // Inside a kept path only the path shows: the wrapper's other children are the
+    // fields the tab is stepping away from. The row carries 'row', not 'path', so
+    // this rule never reaches the buttons underneath it.
+    expect(STYLES).toContain(
+      ".bre-tabbed[data-bre-tab='advanced'] [data-bre-footer='path'] > *:not([data-bre-footer]) {\n  display: none !important;",
+    )
+  })
 })

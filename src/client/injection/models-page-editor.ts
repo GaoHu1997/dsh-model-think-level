@@ -102,6 +102,14 @@ export interface HostLabels {
    * offers this plugin no seat to stamp that name on.
    */
   editProvider: readonly string[]
+  /**
+   * The official input-types control's image choice ("Image" / "图片"). When a
+   * row ships that control, it — not the plugin's ledger — is what tells the
+   * user (and the official Save) that a model takes images, so the copy is the
+   * anchor that finds the box a verdict belongs in: see
+   * {@link echoOfficialModality}.
+   */
+  inputImage: readonly string[]
 }
 
 /** A row's identity as found on the page, resolved from the settings join. */
@@ -1079,6 +1087,28 @@ function disclosureOf(trigger: Element): HTMLElement | undefined {
 }
 
 /**
+ * The official disclosure trigger of one model row: the chevron whose own
+ * aria-label carries the row's capacity copy ("Capacities 2" / "容量 2"). The
+ * same prefix match the scan finds a row's trigger by — never a position.
+ */
+function disclosureTriggerOf(row: HTMLElement, capacityLabels: readonly string[]): HTMLButtonElement | undefined {
+  return Array.from(row.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
+    .find(button => capacityLabels.some(label => (button.getAttribute('aria-label') ?? '').startsWith(label)))
+}
+
+/** Wait for the browser's next frame, so a host that commits a click's render
+ * asynchronously has painted its disclosure before the DOM is read again. */
+function nextFrame(): Promise<void> {
+  return new Promise<void>(resolve => {
+    if (typeof window.requestAnimationFrame !== 'function') {
+      resolve()
+      return
+    }
+    window.requestAnimationFrame(() => resolve())
+  })
+}
+
+/**
  * Whether the official page ships its own input-types editor inside this
  * row's disclosure (0.1.6-alpha.2's `ModelInputTypes` fieldset). This is the
  * CAPABILITY signal the plugin sniffs to stand its own modality section down:
@@ -1087,6 +1117,125 @@ function disclosureOf(trigger: Element): HTMLElement | undefined {
  */
 function officialInputTypesOf(container: HTMLElement): boolean {
   return container.querySelector('[class*="modelInputTypes"]') !== null
+}
+
+/**
+ * The official input-types checkbox an image verdict belongs to, or undefined
+ * when this row ships no such control (a legacy kernel) — or ships one whose
+ * boxes cannot be told apart.
+ *
+ * The official fieldset maps its two choices in a fixed order (`["text",
+ * "image"]`) and labels each one, so the image box is the one whose own label
+ * carries the image copy — matched like every other anchor, by copy, with the
+ * second box as the fallback for a host whose copy is in a language neither
+ * this plugin's locale nor its English floor knows: the order still identifies
+ * it.
+ */
+export function officialImageCheckboxOf(container: HTMLElement, imageLabels: readonly string[]): HTMLInputElement | undefined {
+  const fieldset = container.querySelector<HTMLElement>('[class*="modelInputTypes"]')
+  if (fieldset === null) return undefined
+  const boxes = Array.from(fieldset.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+  const labelled = boxes.find(box => {
+    const text = box.closest('label')?.textContent?.trim()
+    return text !== undefined && imageLabels.includes(text)
+  })
+  if (labelled !== undefined) return labelled
+  return boxes.length === 2 ? boxes[1] : undefined
+}
+
+/**
+ * Print a verdict about images on the OFFICIAL input-types control, and report
+ * whether that control now owns the row's modality.
+ *
+ * The official checkbox renders the official card's own DRAFT, not the
+ * settings document, so a document write of the plugin's can never tick it
+ * before the card is saved and reopened — the gap the user hit. Clicking the
+ * box is a real user-equivalent edit: the official form holds the tick in its
+ * draft and its own Save is what persists it. That is also why a row reaching
+ * this path must keep the modality OUT of its own write (see
+ * {@link officialModalityIntent}): two writers for one field would let this
+ * plugin's held write land after that Save and revert whatever the user chose
+ * in the meantime.
+ *
+ * A missing box, or a DISABLED one (a read-only card, which will not carry the
+ * click anywhere), reports `false` so the caller keeps its own write — the
+ * only remaining way the verdict can reach the document.
+ */
+export function echoOfficialModality(container: HTMLElement, image: boolean, imageLabels: readonly string[]): boolean {
+  const box = officialImageCheckboxOf(container, imageLabels)
+  if (box === undefined || box.disabled) return false
+  if (box.checked !== image) box.click()
+  return true
+}
+
+/**
+ * The modality intent a row's own write may carry, once the official
+ * input-types control has been offered the verdict.
+ *
+ * `undefined` out means the write states nothing about the modality: either it
+ * never carried one, or the official control took the verdict over. A row with
+ * no such control — a legacy kernel, or a row the user has left folded — hands
+ * its intent through unchanged, which keeps the document write as the way the
+ * verdict travels.
+ *
+ * `null` is the plugin's deliberate UNSET, which the official control cannot
+ * express at all (it knows only text and text+image): it passes through
+ * untouched.
+ */
+export function officialModalityIntent(
+  container: HTMLElement | undefined,
+  input: InputModalities | null | undefined,
+  imageLabels: readonly string[],
+): InputModalities | null | undefined {
+  if (input === undefined || input === null || container === undefined) return input
+  return echoOfficialModality(container, input.includes('image'), imageLabels) ? undefined : input
+}
+
+/**
+ * Print an image verdict on the official input-types control of ONE row.
+ *
+ * The official fieldset exists for an OPENED row only, and the fold belongs to
+ * the user: a bulk adapt that clicked rows open and left them that way unfolded
+ * every model of the provider, which is the first report this answers. Leaving
+ * them shut was the second: the box then never got its tick at all, because the
+ * control renders the card's DRAFT and no document write of this plugin's can
+ * reach it before the card is saved and reopened.
+ *
+ * So a folded row is visited, not unfolded: the row is opened for exactly as
+ * long as it takes to click the box and is closed again on the way out. Both
+ * clicks land in the same task, so the browser never paints the opened row —
+ * what the user sees at rest is their own fold, and the tick they were missing
+ * is inside it, held by the card's draft for the card's own Save to persist.
+ *
+ * `false` out means the official control does not own the row's modality — no
+ * such control (a legacy kernel), a disabled one (a read-only card), or a visit
+ * that found nothing to click — and the caller keeps its own write.
+ */
+async function imprintModality(
+  container: HTMLElement | undefined,
+  labels: HostLabels,
+  settle: () => Promise<void>,
+): Promise<boolean> {
+  if (container === undefined) return false
+  const imageLabels = labels.inputImage
+  // Already on screen: print the verdict on it, nothing to open.
+  if (officialInputTypesOf(container)) return echoOfficialModality(container, true, imageLabels)
+  const row = container.closest<HTMLElement>('[class*="modelEntry"]') ?? container
+  // Open, but with no input-types control inside it: this host ships none for
+  // this row (a legacy kernel), so there is nothing to tick and nothing to
+  // visit — the caller's own write is what carries the verdict.
+  if (row.querySelector('[class*="modelAdvanced"]') !== null) return false
+  const trigger = disclosureTriggerOf(row, labels.capacity)
+  if (trigger === undefined || trigger.disabled) return false
+  trigger.click()
+  if (!officialInputTypesOf(row)) await settle()
+  try {
+    return officialInputTypesOf(row) && echoOfficialModality(row, true, imageLabels)
+  } finally {
+    // Restore the fold the user owns, whether or not there was a box to tick,
+    // and never leave a row this pass opened standing open.
+    trigger.click()
+  }
 }
 
 /**
@@ -1161,6 +1310,19 @@ function autoEffortTargets(
 }
 
 /**
+ * One model row a card shows on screen: what the walk needs to name it, plus
+ * the row element itself, so a verdict about its modality can be printed on
+ * the row's own official control (which lives inside the row, collapsed or
+ * not). The element is optional because a caller may know the rows only by
+ * their ids.
+ */
+export interface ScreenModel {
+  readonly id: string
+  readonly name: string
+  readonly row?: HTMLElement
+}
+
+/**
  * The models one route's card shows on screen, from the scan's own rows.
  *
  * The provider-wide adapt reads the settings document, which cannot know the
@@ -1175,14 +1337,14 @@ function screenModels(
   route: string,
   providers: Record<string, Record<string, unknown>>,
   labels: HostLabels,
-): Array<{ id: string; name: string }> {
-  const rows: Array<{ id: string; name: string }> = []
+): ScreenModel[] {
+  const rows: ScreenModel[] = []
   const seen = new Set<string>()
   for (const model of found) {
     if (model.modelId.length === 0 || seen.has(model.modelId)) continue
     if (routeOfCard(model.card, providers, labels)?.route !== route) continue
     seen.add(model.modelId)
-    rows.push({ id: model.modelId, name: inputValueByLabel(model.row, labels.modelName) })
+    rows.push({ id: model.modelId, name: inputValueByLabel(model.row, labels.modelName), row: model.row })
   }
   return rows
 }
@@ -1192,8 +1354,8 @@ function screenModelsLive(
   route: string,
   providers: Record<string, Record<string, unknown>>,
   labels: HostLabels,
-): Array<{ id: string; name: string }> {
-  const rows: Array<{ id: string; name: string }> = []
+): ScreenModel[] {
+  const rows: ScreenModel[] = []
   const seen = new Set<string>()
   for (const aria of labels.capacity) {
     const triggers = Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
@@ -1206,7 +1368,7 @@ function screenModelsLive(
       if (modelId.length === 0 || seen.has(modelId)) continue
       if (routeOfCard(card, providers, labels)?.route !== route) continue
       seen.add(modelId)
-      rows.push({ id: modelId, name: inputValueByLabel(row, labels.modelName) })
+      rows.push({ id: modelId, name: inputValueByLabel(row, labels.modelName), row })
     }
   }
   return rows
@@ -1253,7 +1415,7 @@ export async function adaptEveryModel(
   state: ScanState,
   deps: InjectorDeps,
   route: string,
-  visibleRows: ReadonlyArray<{ id: string; name: string }> = [],
+  visibleRows: readonly ScreenModel[] = [],
 ): Promise<AutoAdaptReport> {
   // A second click while a pass is in flight is not a no-op the user should
   // read as success: 'busy' travels back so the seat keeps the verdict the
@@ -1272,12 +1434,17 @@ export async function adaptEveryModel(
     const describe = (): Promise<SettingsJoin> => (join ??= deps.describeNamespace())
     const seen = await describe()
     const providers = providersOf(seen.namespace)
-    // A read-only page and a route that is not in the document yet (a create
-    // card's typed id) have nothing to adapt: the card's own rows stage their
-    // work and it lands with the route. Both are reported as blocked, never as
-    // "already configured" -- the user would read that as a completed pass.
+    // A read-only page has nothing to adapt. A route the document does not hold
+    // YET is the create card's own typed id -- a card the user is filling in.
+    // Its rows are still adapt-worthy: they are on screen, the user asked for
+    // them, and every write this walk makes for such a row travels the STAGING
+    // ledger, which lands with the card's own Save (and a cancelled card drops
+    // it). Only a route with nothing on screen has nothing to adapt, and that
+    // is reported as blocked -- never as "already configured", which the user
+    // would read as a completed pass.
     if (seen.writable !== true) return { held: 0, unsuggested: 0, blocked: 'unwritable' }
-    if (!hasOwn(providers, route)) return { held: 0, unsuggested: 0, blocked: 'unknown-route' }
+    const known = hasOwn(providers, route)
+    if (!known && visibleRows.length === 0) return { held: 0, unsuggested: 0, blocked: 'unknown-route' }
     // The ids the DOCUMENT knows, so the card's own unsaved rows can be told
     // apart from the ones it has already saved.
     const docModels = modelsOf(providers, route)
@@ -1307,9 +1474,26 @@ export async function adaptEveryModel(
     // with no declaration is NOT covered: the user asked bulk adapt to fill
     // exactly those, the same as a collapsed row.
     const covered = new Set<string>()
-    for (const entry of state.mounted.values()) {
+    // Every row of this route that is on screen, by the container it is mounted
+    // in. A verdict about such a row's modality may have to be printed ON the
+    // row's own official input-types control instead of written into the
+    // document: that control renders the card's draft, so a document write
+    // could never tick it before the card is saved and reopened. See
+    // {@link officialModalityIntent}.
+    const mountedContainers = new Map<string, HTMLElement>()
+    for (const [container, entry] of state.mounted) {
       if (entry.props.route !== route) continue
+      mountedContainers.set(entry.props.modelId, container)
       if (entry.props.efforts !== undefined) covered.add(entry.props.modelId)
+    }
+    // Every row of this route the scan put on screen, COLLAPSED ones included.
+    // A collapsed row mounts no editor, so it never reaches `mountedContainers`
+    // -- and it is exactly the row a card the user is still filling in shows.
+    // Carrying its element here is what lets a modality verdict reach the
+    // row's own official control (see {@link imprintModality}).
+    const rowElements = new Map<string, HTMLElement>()
+    for (const visible of visibleRows) {
+      if (visible.row !== undefined) rowElements.set(visible.id, visible.row)
     }
     // Both arms are wired, and {@link stagedRow} picks per row -- the same rule
     // a row's own editor follows: a row the document already holds is a HOLD
@@ -1323,13 +1507,34 @@ export async function adaptEveryModel(
     // reported the row as adapted, which is the user-visible lie this arm
     // removes.
     let stagedRow = false
+    // Every write the walk lands for a row that is ON SCREEN goes through the
+    // official input-types control first (see {@link officialModalityIntent}):
+    // the walk must not race the official Save for the one field the user can
+    // see and edit in the official form itself.
+    const modalityIntent = (modelId: string, input: InputModalities | null | undefined): InputModalities | null | undefined =>
+      officialModalityIntent(mountedContainers.get(modelId), input, deps.labels().inputImage)
+    // The same offer, made BEFORE a row's write is committed. `true` out means
+    // the official control carries the verdict, and the caller then keeps the
+    // modality out of its own write -- the same single-writer rule
+    // {@link officialModalityIntent} enforces for a row already unfolded. A row
+    // with no such control answers `false`, and so does a row whose control
+    // could not be reached: the document write is then what carries its verdict
+    // (see {@link imprintModality}).
+    const imprintFor = async (modelId: string, nextModality: { readonly image: boolean }): Promise<boolean> => {
+      if (nextModality.image !== true) return false
+      const container = mountedContainers.get(modelId) ?? rowElements.get(modelId)
+      if (container === undefined) return false
+      return imprintModality(container, deps.labels(), nextFrame)
+    }
     const api = createEditorApi(
       deps.api,
       describe,
       (stagedRoute, modelId, efforts, compat, input, defaultEffort) => {
-        stageEffortsInto(state, stagedRoute, modelId, efforts, compat, input, defaultEffort)
+        stageEffortsInto(state, stagedRoute, modelId, efforts, compat, modalityIntent(modelId, input), defaultEffort)
       },
-      (heldRoute, modelId, write) => { queueWriteInto(state, heldRoute, modelId, write) },
+      (heldRoute, modelId, write) => {
+        queueWriteInto(state, heldRoute, modelId, { ...write, input: modalityIntent(modelId, write.input) })
+      },
       undefined,
       () => stagedRow,
     )
@@ -1358,7 +1563,36 @@ export async function adaptEveryModel(
       // flag. A row the editor has already reported an edit for IS left alone:
       // that queued intent is the user's latest word on the row.
       if (covered.has(modelId) && !settledLadder) continue
-      if (settledLadder && settledModality) continue
+      if (settledLadder && settledModality) {
+        // A fully settled row can STILL disagree with the control the user is
+        // looking at: the official input-types fieldset renders the card's draft,
+        // frozen when the card opened, so a modality written after that (this
+        // seat's own earlier click, or the idle pass behind it) leaves the box
+        // unticked until the card is saved and reopened -- the report that the
+        // tick only shows up on the second visit. That control is the surface the
+        // user reads, and clicking it is a user-equivalent edit, so a STORED
+        // image declaration is echoed on it here too.
+        //
+        // Deliberately narrow: only a row whose fieldset is already ON SCREEN (a
+        // collapsed row is a row the user is not reading, and unfolding it would
+        // be a side effect this pass owes nobody), and only one-way -- a text-only
+        // declaration is left alone and nothing here ever UNTICKS.
+        //
+        // It does not count as adapted: the declaration is already stored, so
+        // there is nothing to write and the 'done' copy's promise ("save to
+        // write") would be a lie. The verdict stays 'every model of this
+        // provider already declares its levels', which is what is true while the
+        // tick the user was missing appears.
+        const visible = mountedContainers.get(modelId) ?? rowElements.get(modelId)
+        if (Array.isArray(initialInput) && initialInput.includes('image') && visible !== undefined) {
+          const imageLabels = deps.labels().inputImage
+          const box = officialImageCheckboxOf(visible, imageLabels)
+          if (box !== undefined && !box.disabled && !box.checked) {
+            echoOfficialModality(visible, true, imageLabels)
+          }
+        }
+        continue
+      }
       const initialCompat = compatOf(models, modelId)
       const initialDefault = defaultEffortOf(models, modelId) ?? ''
       const reply = await api.suggest(route, modelId, nameOf(models, modelId))
@@ -1388,6 +1622,24 @@ export async function adaptEveryModel(
         // latest word with a suggestion (the held ledger keeps one write per
         // row, so this one would replace theirs).
         if (state.queued.get(route)?.has(modelId) === true) continue
+        // This row's own control is on screen. The official input-types
+        // checkbox renders the card's DRAFT, not the settings document, so a
+        // write of ours could never tick it before the card is saved and
+        // reopened — the user's report exactly. Print the verdict on the control
+        // instead: the tick is immediate, the official Save is what persists it,
+        // and a write that kept the modality would land after that Save and
+        // could revert whatever the user chose in the meantime. The row still
+        // counts as adapted — the verdict reached the only surface that can hold
+        // it before the Save — and no write is queued at all, because with
+        // `efforts: 'keep'` the modality WAS the whole message.
+        //
+        // A row whose control could not be reached is not left unfolded for this
+        // (see {@link imprintModality}): `imprintFor` answers `false` and the
+        // verdict rides the write below instead.
+        if (await imprintFor(modelId, nextModality)) {
+          held += 1
+          continue
+        }
         stagedRow = !docIds.has(modelId)
         api.commit(route, modelId, pendingWriteOf({
           efforts: 'keep',
@@ -1404,9 +1656,14 @@ export async function adaptEveryModel(
         : nextDefault === '' ? null : nextDefault
       // A row the document does not hold yet stages; a saved row holds.
       stagedRow = !docIds.has(modelId)
+      // The modality goes to the row's own official control first — folded row
+      // included, through the transient visit {@link imprintModality} makes — so
+      // the tick is in the card's draft the moment the click lands: the same
+      // offer the settled-ladder arm makes above.
+      const imprinted = await imprintFor(modelId, nextModality)
       api.commit(route, modelId, pendingWriteOf({
         efforts: ladderIntent(nextThinking, buildIntent(draftFrom(parts.efforts)), initialEfforts),
-        input: sameModality(nextModality, initialInput) ? undefined : buildModalityIntent(nextModality),
+        input: imprinted || sameModality(nextModality, initialInput) ? undefined : buildModalityIntent(nextModality),
         defaultEffort,
         manualCompat: compatDraftOf(initialCompat),
         appliedCompat: parts.compat,
@@ -2610,11 +2867,21 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         api: createEditorApi(
           deps.api,
           undefined,
-          (r, m, e, c, i, de) => { stageEffortsInto(state, r, m, e, c, i, de) },
+          (r, m, e, c, i, de) => {
+            stageEffortsInto(state, r, m, e, c, officialModalityIntent(container, i, labels.inputImage), de)
+          },
           // This row is on screen: it ALWAYS holds the document. The card it
           // lives in froze its revision baseline, so the intent is queued and
           // the official card's own Save is what commits it (issue #7 / C2).
-          (r, m, w) => { queueWriteInto(state, r, m, w) },
+          //
+          // Its MODALITY is the one part that control does not carry: this row
+          // ships the official input-types checkbox whenever `officialInputTypes`
+          // is set, and that box renders the card's draft, so the plugin offers
+          // the intent to the box itself and drops it from the write when the
+          // official form takes it. See {@link officialModalityIntent}.
+          (r, m, w) => {
+            queueWriteInto(state, r, m, { ...w, input: officialModalityIntent(container, w.input, labels.inputImage) })
+          },
           // The editor's Reset drops wherever this row's intent landed.
           r => { withdrawIntent(state, r, target.modelId) },
           // Re-resolve the card's staged-ness at CALL time, not at mount time:

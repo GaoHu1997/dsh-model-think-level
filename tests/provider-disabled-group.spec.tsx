@@ -44,6 +44,7 @@ const LABELS: HostLabels = {
   apply: ['Apply'],
   cancel: ['Cancel'],
   editProvider: ['Edit {provider}'],
+  inputImage: ['Image'],
 }
 
 /** The group's dependencies with a translator that echoes key and count. */

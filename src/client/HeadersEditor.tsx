@@ -14,6 +14,12 @@
  * card's own fields. The headers land through `llm-pi-ai.providers.<route>.headers`,
  * the one channel the adapter actually sends.
  *
+ * Deferred mode (`deferred`) is this same section rendered where there is no
+ * route to write TO yet — the create-provider card's 高级配置 pane, whose route
+ * the card's own 保存 declares. There the draft is reported instead of written,
+ * and the whole-dict discipline is what makes the two commit seams the same
+ * write: see {@link DeferredHeaders}.
+ *
  * @module dsh-model-think-level/HeadersEditor
  */
 
@@ -54,6 +60,23 @@ export interface HeaderEnvironment {
   }
 }
 
+/**
+ * Deferred mode: how a pane that has no route yet reports its draft.
+ *
+ * The create-provider card's 高级配置 pane edits an id the settings document
+ * does not declare — the card's own 保存 is what declares it — so that pane has
+ * nothing to write and no button to press. It hands the editor this instead:
+ * every change to the draft goes out as the complete dict its Save would write,
+ * and a Cancel reports that the draft is gone. Same component, same whole-dict
+ * discipline; only the commit seam changes, from a write to a report.
+ */
+export interface DeferredHeaders {
+  /** Every change to the draft, as the dict the editor's Save would write. */
+  onDraft: (headers: Record<string, string>) => void
+  /** The user cleared the draft: whatever was staged for it must go. */
+  onCancel: () => void
+}
+
 /** Props of {@link HeadersEditor}. */
 export interface HeadersEditorProps {
   /** The provider route this card edits. */
@@ -62,6 +85,24 @@ export interface HeadersEditorProps {
   api: RemoteApi
   /** Localized copy. */
   t: (key: string, params?: Record<string, string | number>) => string
+  /**
+   * Close the whole provider card, as the official footer's `取消` does.
+   *
+   * Only the mount that owns the card's DOM can press that button, so the
+   * editor takes the action as a prop instead of reaching for the DOM itself
+   * (this component needs no injection pass — see the module doc). Called by
+   * {@link cancel} in pane mode only; omitted, cancel stays a draft reset.
+   */
+  onDismiss?: () => void
+  /**
+   * Deferred mode: report the draft instead of writing it.
+   *
+   * Set by the create-provider card's pane, whose route does not exist yet. The
+   * editor then edits in place — no disclosure, no Edit step — and has no Save
+   * of its own: its copy states that the draft lands with the card's own 保存,
+   * which is the write that declares the route the draft is addressed to.
+   */
+  deferred?: DeferredHeaders
 }
 
 /** One editable header row; a stable `id` keeps React keys off the name. */
@@ -117,10 +158,10 @@ export function headersFromDraft(draft: Draft): Record<string, string> {
 
 /**
  * Render the provider card's request-header section.
- * @param props - route identity, write seam and copy.
+ * @param props - route identity, write seam, copy and the card dismiss seam.
  * @returns the section.
  */
-export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode {
+export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEditorProps): ReactNode {
   // Kept for the optional User-Agent preset list when a row is named that way.
   const uaListId = useId()
   const [stored, setStored] = useState<Record<string, string> | undefined>(undefined)
@@ -142,11 +183,24 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
   const [tabbed, setTabbed] = useState(false)
   const nextRowId = useRef(0)
   const rootRef = useRef<HTMLDivElement | null>(null)
+  /** Whether the draft is reported rather than written ({@link DeferredHeaders}). */
+  const isDeferred = deferred !== undefined
+  const reportDraft = deferred?.onDraft
+  /** The route whose stored headers this mount has already seeded from. */
+  const seededRoute = useRef<string | undefined>(undefined)
 
   // Seed the draft from the stored document. The slot hands the editor a route,
   // not a profile: the section reads the pi-ai namespace itself, so the card
   // re-renders that the section pushes cannot hand it a stale draft.
+  //
+  // Seeded once per ROUTE, and in deferred mode that means once per mount: there
+  // the route is an id the user is still typing, so a keystroke is not a reason
+  // to re-read anything — re-seeding would wipe the draft being typed, and an id
+  // cleared and typed again is still the same typing session. The route is the
+  // address that draft will be sent to, and nothing else.
   useEffect(() => {
+    if (isDeferred && seededRoute.current !== undefined) return
+    seededRoute.current = route
     let live = true
     void (async () => {
       try {
@@ -164,7 +218,15 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
       }
     })()
     return () => { live = false }
-  }, [api, route])
+  }, [api, route, isDeferred])
+
+  // Deferred mode's commit seam: every change to the draft leaves as the whole
+  // dict {@link save} would have written. It fires on mount too, which is how a
+  // pane opened and closed without an edit still reports what it holds.
+  useEffect(() => {
+    if (reportDraft === undefined) return
+    reportDraft(headersFromDraft(draft))
+  }, [draft, reportDraft])
 
   // The fetch-layer report is a host fact the page cannot observe on its own:
   // read once per mount, and never let its absence break the editor.
@@ -216,6 +278,23 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
     setDraft(draftFrom(stored, nextRowId))
     setEditing(false)
     setMessage(undefined)
+    // In pane mode there is no "leave edit mode" to fall back to: the pane IS
+    // the editor (`inline`), and the takeover hides the official footer this
+    // pane's 取消 stands in for. A cancel that only reset the draft therefore
+    // looked inert — with nothing typed yet, nothing on screen changed. The
+    // other two panes' 取消 closes the card through that footer, so closing the
+    // card is this pane's half of the same behaviour, and the draft reset above
+    // still lands first if the dismissal finds no button to press.
+    //
+    // Deferred mode is the exception: there the draft is not the editor's to
+    // write and the card is not the editor's to close, so cancel is a
+    // WITHDRAWAL — the owner drops what was staged for this draft and the card
+    // the user is filling in stays exactly where it is.
+    if (deferred !== undefined) {
+      deferred.onCancel()
+      return
+    }
+    if (tabbed) onDismiss?.()
   }
 
   const save = async (next: Record<string, string>): Promise<void> => {
@@ -261,8 +340,12 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
   // Under the tabs the pane IS the editor: rows on screen, typed in place, and
   // the pane's own Save commits them through the same seam the fold's editor
   // used. No "press Edit first" step — the other two panes take their edits
-  // directly, and this one does now too.
-  const inline = tabbed
+  // directly, and this one does now too. Deferred mode is inline for the same
+  // reason and one more: there is no fold to open and no Save to press, because
+  // the draft commit belongs to the card the pane sits on.
+  const inline = tabbed || isDeferred
+  /** Whether the body renders at all: the fold's own disclosure, or a pane. */
+  const expanded = open || editing || inline
 
   return (
     <div className="bre-headers" ref={rootRef} data-plugin={PLUGIN_ID} data-open={open ? '1' : '0'}>
@@ -271,7 +354,7 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
           only the NAME — the tab above already disclosed it, and the pane is
           the editor, so this is where the title the hint sits under belongs. */}
       <div className="bre-headers-head">
-        {editing || tabbed
+        {editing || inline
           ? <span className="bre-effort-title">{t('headersTitle')}</span>
           : (
             <button
@@ -290,7 +373,7 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
           )}
       </div>
 
-      {!open && !editing && !tabbed
+      {!expanded
         ? null
         : (
           <>
@@ -398,18 +481,46 @@ export function HeadersEditor({ route, api, t }: HeadersEditorProps): ReactNode 
                       {USER_AGENT_PRESETS.map(preset => <option key={preset} value={preset} />)}
                     </datalist>
                     <p className="bre-effort-note bre-headers-legacy" hidden>{t('headersUserAgentHint')}</p>
+                    {/* The deferred pane's contract, stated where its Save would
+                        have been: the draft is real, it is not written yet, and
+                        it lands with the card's own commit. */}
+                    {isDeferred
+                      ? (
+                        <>
+                          <p className="bre-effort-note">{t('pendingSave')}</p>
+                          <p className="bre-effort-note">{t('pendingHint')}</p>
+                        </>
+                      )
+                      : null}
                     <div className="bre-effort-actions">
-                      <button
-                        type="button"
-                        className="bre-primary-button"
-                        disabled={disabled}
-                        onClick={() => { void save(headersFromDraft(draft)) }}
-                      >
-                        {t('headersSave')}
-                      </button>
-                      <button type="button" className="bre-secondary-button" disabled={disabled} onClick={cancel}>
+                      {/* Dismiss first, commit last — the official footer's own
+                          order (`editorActions` renders the cancel button before
+                          the submit button), which the two sibling panes wear
+                          and the fold view of this one did not. Under the tabs
+                          this row REPLACES that footer (the takeover hides the
+                          official body), so matching the order is the point.
+                          Cancel stays live while the namespace is read-only:
+                          the pane could otherwise not be left at all. */}
+                      <button type="button" className="bre-secondary-button" disabled={busy} onClick={cancel}>
                         {t('headersCancel')}
                       </button>
+                      {/* Deferred mode has no Save to offer: the route this write
+                          is addressed to does not exist yet, so a button here
+                          could only ever report `headersNoRoute`. Dropping it is
+                          the honest shape of the pane, and the notes above say
+                          what took its place. */}
+                      {isDeferred
+                        ? null
+                        : (
+                          <button
+                            type="button"
+                            className="bre-primary-button"
+                            disabled={disabled}
+                            onClick={() => { void save(headersFromDraft(draft)) }}
+                          >
+                            {t('headersSave')}
+                          </button>
+                        )}
                     </div>
                   </div>
                 )

@@ -585,4 +585,51 @@ describe('HeadersEditor', () => {
       await editor.unmount()
     }
   })
+
+  it('dresses the pane footer in the official order and closes the card on cancel', async () => {
+    // Under the tabs the takeover hides the official footer, so THIS row is the
+    // pane's only 取消/保存 — and it has to read like the other two panes, which
+    // inherit the official order (dismiss left, commit right).
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const onDismiss = vi.fn()
+    const editor = await renderEditor({ route: 'aliyun', api, t, onDismiss }, { tabbed: 'after-mount' })
+    try {
+      const actions = editor.container.querySelector('.bre-effort-actions')
+      expect(actions).not.toBeNull()
+      expect(Array.from(actions!.querySelectorAll('button')).map(button => button.textContent))
+        .toEqual([en.headersCancel, en.headersSave])
+
+      // 取消 in the pane means what it means in the other two panes: leave the
+      // editor, discarding the draft. With nothing typed yet the dismissal IS
+      // the visible effect — exactly what the reported bug lacked.
+      await act(async () => { buttonByText(editor.container, en.headersCancel).click() })
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+      expect(api.mutate).not.toHaveBeenCalled()
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('keeps the fold cancel a draft reset that never reaches for the card', async () => {
+    // Only the pane's cancel speaks for the whole editor: in the fold, the
+    // official footer is still on screen and stays the one that closes it.
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const onDismiss = vi.fn()
+    const editor = await renderEditor({ route: 'aliyun', api, t, onDismiss })
+    try {
+      await expand(editor.container)
+      await act(async () => { buttonByText(editor.container, en.headersEdit).click() })
+      await type(inputsByLabel(editor.container, en.headersValue)[0]!, 'CHANGED')
+      await act(async () => { buttonByText(editor.container, en.headersCancel).click() })
+
+      expect(onDismiss).not.toHaveBeenCalled()
+      expect(api.mutate).not.toHaveBeenCalled()
+      // Back to the read view, with the stored value intact.
+      expect(buttonByText(editor.container, en.headersEdit)).toBeDefined()
+      await act(async () => { buttonByText(editor.container, en.headersEdit).click() })
+      expect(inputsByLabel(editor.container, en.headersValue)[0]!.value).toBe('acme')
+    } finally {
+      await editor.unmount()
+    }
+  })
 })

@@ -580,6 +580,7 @@ export async function writeProviderHeaders(
   headers: Record<string, string>,
 ): Promise<ProviderHeadersReply> {
   if (typeof route !== 'string' || route.length === 0) return { ok: false, error: 'no-route' }
+  let undeclared = false
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       // A conflict retry must NOT read the mirror: it folds a fresh view in
@@ -594,7 +595,16 @@ export async function writeProviderHeaders(
       // would then refuse to build. The slot this editor renders in only
       // dispatches for saved rows, so an absent route is a genuine race with a
       // deletion rather than a normal state.
-      if (!routeIsDeclared(join.namespace, route)) return { ok: false, error: 'no-route' }
+      //
+      // The mirror can lag a write that has just landed -- the provider the user
+      // created a moment ago is exactly that -- so a mirror-only "not declared"
+      // is not final: the second attempt asks the document itself, and only that
+      // answer refuses. Otherwise the first save of a brand-new provider would be
+      // stranded on a stale snapshot.
+      if (!routeIsDeclared(join.namespace, route)) {
+        undeclared = true
+        continue
+      }
       const response = await api.settings.mutate(
         PI_AI_NS,
         [{ op: 'set', path: ['providers', route, 'headers'], value: { ...headers } } as unknown as SettingsPathOpView],
@@ -609,11 +619,26 @@ export async function writeProviderHeaders(
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   }
-  return { ok: false, error: 'conflict' }
+  return undeclared ? { ok: false, error: 'no-route' } : { ok: false, error: 'conflict' }
 }
 
-/** Whether either raw layer declares this route (own key, never a prototype name). */
-function routeIsDeclared(namespace: SettingsNamespaceView | undefined, route: string): boolean {
+/**
+ * Whether this document declares the route: its RESOLVED providers map, or
+ * either raw layer, holding the key itself (own key, never a prototype name).
+ *
+ * The resolved map is the one the models-page editor stages against, and it is
+ * the only one a settings join is guaranteed to carry — a mirror-backed join can
+ * hand back `value` with the raw layers absent or thin, and a check that reads
+ * only the raw layers then answers "not declared" for a provider that plainly
+ * exists. The raw layers are still asked first-class, because they are where the
+ * official card's own save lands.
+ *
+ * Exported for the deferred-header ledger, which asks the same question for the
+ * same reason `writeProviderHeaders` does: a route nothing declares is a route
+ * nothing may be written to yet.
+ */
+export function routeIsDeclared(namespace: SettingsNamespaceView | undefined, route: string): boolean {
+  if (Object.prototype.hasOwnProperty.call(providersOf(namespace), route)) return true
   for (const layer of [namespace?.user, namespace?.base]) {
     const providers = providersOfLayer(layer)
     if (providers !== undefined && Object.prototype.hasOwnProperty.call(providers, route)) return true

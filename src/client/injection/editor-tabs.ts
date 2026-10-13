@@ -79,8 +79,23 @@ const PROVIDER_ROUTE_ATTR = 'data-bre-provider'
 /** Tags an element as the pane content of one tab. */
 const REGION_ATTR = 'data-bre-region'
 
-/** Tags the official editor body, hidden wholesale on the advanced tab. */
+/** Tags the official editor body, hidden on the advanced tab but for the panes. */
 const BODY_ATTR = 'data-bre-editor-body'
+
+/** Tags the official commit/cancel row — and the wrappers between it and the
+ * body — on a card that must keep that row on EVERY tab. Only the create card
+ * gets the mark: there the row's 创建提供商 is the save the 高级配置 pane's
+ * draft is written with, while an existing provider's advanced pane carries a
+ * save of its own and its footer stays out of the way. */
+const FOOTER_ATTR = 'data-bre-footer'
+
+/** The row itself: the ONE node in the chain whose children (its buttons) are
+ * content rather than layout to be dropped. */
+const FOOTER_ROW = 'row'
+
+/** A wrapper on the way from the body down to that row. The advanced tab keeps
+ * these visible and hides everything else inside them. */
+const FOOTER_PATH = 'path'
 
 /** Remembers a `<details>` this pass forced open (the official "Customized"
  * group starts collapsed; with the tab bar in charge it must stay expanded).
@@ -137,6 +152,18 @@ const MODELS_TERMINAL = '[class*="modelCatalog"], [class*="modelList"], [class*=
 /** A provider card: a row with an open editor, or the create-provider card. */
 const CARD_PROBE = '[class*="rowCard"], [class*="addCard"], li'
 
+/** One half of the create-provider card's form. That card is the only card with
+ * more than one, and the official page keeps both mounted once visited, hiding
+ * the inactive one with `hidden`. */
+const ADD_PANEL_SELECTOR = '[class*="addPanel"]'
+
+/** The plugin's own mount on a create-provider card (`CREATE_HOST_CLASS` in
+ * `src/client/injection/add-card.ts`) — how this pass tells the card that is
+ * CREATING a provider from one editing a route that already exists. Spelled
+ * here rather than imported: the add-card pass drives this module, and an import
+ * would close the cycle back through the tab bar. */
+const CREATE_HOST_SELECTOR = '.bre-create-host'
+
 /** Per-scan bookkeeping (one instance lives in `models-page.ts`). */
 export interface EditorTabsState {
   /** Cards whose takeover threw and had to be rolled back. A card that cannot
@@ -161,6 +188,29 @@ export function createEditorTabsState(): EditorTabsState {
  */
 export function editorCardOf(element: Element | null): HTMLElement | null {
   return element === null ? null : element.closest<HTMLElement>(CARD_PROBE)
+}
+
+/**
+ * The part of a card that presents its editor.
+ *
+ * A provider ROW has one editor and this returns the card itself. The
+ * create-provider card has TWO form halves — the built-in catalogue and the
+ * custom API declaration — and the official page mounts each once it is visited
+ * and hides the inactive one with `hidden`. Every lookup below is scoped to the
+ * visible half, because the hidden one carries a provider-card slot of its own:
+ * the plugin's mount inside it publishes a route, a tab bar and a headers
+ * section, and reading those would dress the visible form with the hidden
+ * form's provider.
+ *
+ * A card with both halves hidden (mid-swap, before React commits the show) and
+ * a card with none are both scoped to the card, which is the rule this module
+ * has always applied to a single-form card.
+ */
+export function activeScopeOf(card: HTMLElement): HTMLElement {
+  for (const child of Array.from(card.children)) {
+    if (child instanceof HTMLElement && child.matches(ADD_PANEL_SELECTOR) && !child.hidden) return child
+  }
+  return card
 }
 
 /**
@@ -262,6 +312,9 @@ export function teardownEditorTabs(): void {
   for (const el of Array.from(document.querySelectorAll<HTMLElement>(`[${BODY_ATTR}]`))) {
     el.removeAttribute(BODY_ATTR)
   }
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>(`[${FOOTER_ATTR}]`))) {
+    el.removeAttribute(FOOTER_ATTR)
+  }
   for (const group of Array.from(document.querySelectorAll<HTMLDetailsElement>(`details[${DETAILS_MEMO_ATTR}]`))) {
     group.removeAttribute('open')
     group.removeAttribute(DETAILS_MEMO_ATTR)
@@ -281,9 +334,12 @@ export function teardownEditorTabs(): void {
   teardownKeyManager()
 }
 
-/** The body of the card's open editor, or undefined when unrecognisable. */
-function editorBodyOf(card: HTMLElement): HTMLElement | undefined {
-  for (const child of Array.from(card.children)) {
+/**
+ * The body of the open editor inside `scope` (a card, or one half of the
+ * create-provider card's form), or undefined when unrecognisable.
+ */
+function editorBodyOf(scope: HTMLElement): HTMLElement | undefined {
+  for (const child of Array.from(scope.children)) {
     if (!(child instanceof HTMLElement)) continue
     // The card's header and action rows are "editor"-classed too; the body is
     // the remaining editor-classed child that actually holds the form.
@@ -294,10 +350,10 @@ function editorBodyOf(card: HTMLElement): HTMLElement | undefined {
     if (child.querySelector(EDITOR_PROBE) !== null || child.querySelector('input, select') !== null) return child
   }
   // Climb from the probes instead: the body is the probe's ancestor hanging
-  // directly off the card.
-  let node: HTMLElement | null = card.querySelector<HTMLElement>(EDITOR_PROBE)
-  while (node !== null && node.parentElement !== card) node = node.parentElement
-  return node !== null && node !== card ? node : undefined
+  // directly off the scope.
+  let node: HTMLElement | null = scope.querySelector<HTMLElement>(EDITOR_PROBE)
+  while (node !== null && node.parentElement !== scope) node = node.parentElement
+  return node !== null && node !== scope ? node : undefined
 }
 
 /** One editor body sorted into tab panes. */
@@ -387,21 +443,61 @@ function classifyChildren(container: HTMLElement, regions: BodyRegionsDraft, dep
     }
     if (child.querySelector('input, select, textarea') !== null) {
       regions.fields.push(child)
+      continue
     }
-    // Summaries, error/hint paragraphs, bare wrappers — nobody's pane.
+    // Hint and error paragraphs (the custom-route hint under the id field, its
+    // invalid/taken messages) are bare siblings of the identity fields, and a
+    // tab pane hides only what is TAGGED: left alone they stayed visible on
+    // every tab, which put the id field's hint under the model list. They
+    // describe the identity fields, so they belong to that pane; every other
+    // leftover (summaries, the action row's wrappers, bare layout nodes) is
+    // still nobody's pane and stays on all of them.
+    if (child.matches('p, small, em, i') || child.matches('[class*="Hint"], [class*="error"]')) {
+      regions.fields.push(child)
+    }
   }
 }
 
-/** The provider route this card edits, when the slot has published one. */
-function providerRouteOf(card: HTMLElement): string | undefined {
-  const host = card.querySelector<HTMLElement>(`[${PROVIDER_ROUTE_ATTR}]`)
+/**
+ * Mark a commit row, and every wrapper on the path up to the body, as the
+ * footer the advanced tab keeps.
+ *
+ * The advanced tab's rule hides the body's unmarked children, so a marked row
+ * nested inside a wrapper — the live editor folds fields, catalogue and footer
+ * into one "Customized" group — needs that wrapper marked with it, or hiding the
+ * wrapper takes the footer down as well. The wrappers are marked `path` and the
+ * row `row`: a `path` wrapper hides its own unmarked children, while the row's
+ * children — the buttons themselves — are the content being kept.
+ */
+function markFooterRow(row: HTMLElement, body: HTMLElement): void {
+  // A row outside this body is not this body's footer.
+  if (!body.contains(row)) return
+  setAttr(row, FOOTER_ATTR, FOOTER_ROW)
+  let node: HTMLElement | null = row.parentElement
+  while (node !== null) {
+    setAttr(node, FOOTER_ATTR, FOOTER_PATH)
+    if (node === body) break
+    node = node.parentElement
+  }
+}
+
+/** The provider route the form in `scope` edits, when the slot has published
+ * one. Scoped, so the hidden half of the create-provider card can never lend
+ * its route to the visible one. */
+function providerRouteOf(scope: HTMLElement): string | undefined {
+  const host = scope.querySelector<HTMLElement>(`[${PROVIDER_ROUTE_ATTR}]`)
   const route = host?.getAttribute(PROVIDER_ROUTE_ATTR)
   return route === null || route === undefined || route === '' ? undefined : route
 }
 
 /** Tag one open editor card for the takeover. */
 function applyTabs(card: HTMLElement, deps: EditorTabsDeps): void {
-  const body = editorBodyOf(card)
+  // Everything below is read from the half of the card that is actually
+  // showing: a two-form card (the create-provider card) keeps its other half
+  // mounted and hidden, and that half has a provider, a bar and a headers
+  // section of its own.
+  const scope = activeScopeOf(card)
+  const body = editorBodyOf(scope)
   if (body === undefined) {
     cleanupCard(card)
     return
@@ -411,12 +507,12 @@ function applyTabs(card: HTMLElement, deps: EditorTabsDeps): void {
     cleanupCard(card)
     return
   }
-  const headersSection = card.querySelector<HTMLElement>(HEADERS_SECTION_SELECTOR)
+  const headersSection = scope.querySelector<HTMLElement>(HEADERS_SECTION_SELECTOR)
 
   // One route for the whole pane: every field here belongs to the same
   // provider, and the eye and the key panel both use it to name the provider
   // whose keys they act on.
-  const route = providerRouteOf(card)
+  const route = providerRouteOf(scope)
   for (const field of regions.fields) {
     setAttr(field, REGION_ATTR, TAB_PROVIDER)
     // Dresses the API-key field with its reveal eye; a no-op on every other
@@ -434,6 +530,12 @@ function applyTabs(card: HTMLElement, deps: EditorTabsDeps): void {
   if (regions.header !== undefined) setAttr(regions.header, REGION_ATTR, REGION_NONE)
   if (regions.models !== undefined) setAttr(regions.models, REGION_ATTR, TAB_MODELS)
   setAttr(body, BODY_ATTR, '')
+  // The card that CREATES its provider keeps its own commit row on every tab,
+  // 高级配置 included: that row is the save the pane's draft is written with,
+  // and the advanced tab is exactly where a user who has just typed the headers
+  // is standing. An existing provider's card is left as it was — its advanced
+  // pane carries a save of its own, and two commits side by side is one too many.
+  if (scope.querySelector(CREATE_HOST_SELECTOR) !== null) markFooterRow(regions.actions, body)
   // The MOUNT is not the pane: it carries the bar and stays visible on every
   // tab, so only the section inside it is tagged (and hidden off `advanced`).
   if (headersSection !== null) setAttr(headersSection, REGION_ATTR, TAB_ADVANCED)
@@ -450,7 +552,7 @@ function applyTabs(card: HTMLElement, deps: EditorTabsDeps): void {
   setAttr(card, TAB_ATTR, available.has(active) ? active : TAB_PROVIDER)
   setClass(card, TABBED_CLASS, true)
 
-  syncTabBar(card, deps, available)
+  syncTabBar(card, scope, deps, available)
 }
 
 /**
@@ -461,9 +563,14 @@ function applyTabs(card: HTMLElement, deps: EditorTabsDeps): void {
  * with it), the availability of each pane, and the selected state. All three
  * are written only when they differ, so a settled page produces no mutation of
  * its own.
+ *
+ * The bar is looked up in the card's VISIBLE half: the create-provider card's
+ * two halves both carry one — the catalogue's comes from the slot the official
+ * page renders there, the custom form's is mounted by the create-card pass —
+ * and only the visible half's is the one this card is switching.
  */
-function syncTabBar(card: HTMLElement, deps: EditorTabsDeps, available: ReadonlySet<string>): void {
-  const bar = card.querySelector<HTMLElement>(`.${TABS_CLASS}`)
+function syncTabBar(card: HTMLElement, scope: HTMLElement, deps: EditorTabsDeps, available: ReadonlySet<string>): void {
+  const bar = scope.querySelector<HTMLElement>(`.${TABS_CLASS}`)
   if (bar === null) return
   setAttr(bar, 'aria-label', deps.t('editorTabsLabel'))
   setText(tabOf(bar, TAB_PROVIDER), deps.t('editorTabProvider'))
@@ -477,7 +584,7 @@ function syncTabBar(card: HTMLElement, deps: EditorTabsDeps, available: Readonly
 /** Mark the active button. The panes follow the card's attribute in CSS, so
  * this is the bar's own state (and assistive tech's), not the pane switch. */
 function syncSelected(card: HTMLElement, bar?: HTMLElement): void {
-  const target = bar ?? card.querySelector<HTMLElement>(`.${TABS_CLASS}`)
+  const target = bar ?? activeScopeOf(card).querySelector<HTMLElement>(`.${TABS_CLASS}`)
   if (target === null) return
   const active = card.getAttribute(TAB_ATTR) ?? TAB_PROVIDER
   for (const tab of Array.from(target.querySelectorAll<HTMLElement>(`[${TAB_ID_ATTR}]`))) {
@@ -506,6 +613,9 @@ function cleanupCard(card: HTMLElement): void {
       resetKeyManagerField(el)
     }
     el.removeAttribute(REGION_ATTR)
+  }
+  for (const el of Array.from(card.querySelectorAll<HTMLElement>(`[${FOOTER_ATTR}]`))) {
+    el.removeAttribute(FOOTER_ATTR)
   }
   restoreGroups(card)
 }

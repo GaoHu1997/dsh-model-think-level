@@ -152,6 +152,7 @@ function makeDeps(overrides?: Partial<InjectorDeps>): InjectorDeps & {
       apply: ['Apply'],
       cancel: ['Cancel'],
       editProvider: ['Edit {provider}'],
+      inputImage: ['Image'],
     }),
     mount,
     editors,
@@ -2016,9 +2017,11 @@ describe('the auto-adapt seat', () => {
     expect(report).toEqual({ held: 0, unsuggested: 0, blocked: 'unwritable' })
   })
 
-  it('ignores a route the settings document does not declare', async () => {
-    // A create card's typed Provider ID names a route nothing can be held
-    // against yet: its own rows stage, and the staging lands with the route.
+  it('ignores a route the settings document does not declare and nothing on screen names', async () => {
+    // A create card's typed Provider ID names a route nothing can be HELD
+    // against yet. With no row on screen there is nothing to adapt either, and
+    // that is reported as blocked -- never as "already configured", which the
+    // seat would print as a completed pass.
     const deps = makeDeps()
     const state = createScanState()
 
@@ -2026,6 +2029,210 @@ describe('the auto-adapt seat', () => {
 
     expect(state.queued.size).toBe(0)
     expect(report).toEqual({ held: 0, unsuggested: 0, blocked: 'unknown-route' })
+  })
+
+  it('adapts a create card\'s typed route from the rows it shows on screen', async () => {
+    // Same route, but the card HAS rows: the user just added them and asked for
+    // them. Refusing here was the reported "暂无可适配模型" on a card that was
+    // plainly full. Every write for such a row stages, and the staging ledger is
+    // the only safe channel: it lives until a row with that id appears, which is
+    // the card's own Save (a cancelled card drops it).
+    const deps = makeDeps()
+    const state = createScanState()
+
+    const report = await adaptEveryModel(state, deps, 'acme-gateway', [
+      { id: 'gpt-4o-mini', name: 'Draft Vision' },
+    ])
+
+    expect(report).toEqual({ held: 1, unsuggested: 0 })
+    const staged = state.pending.get('acme-gateway')?.get('gpt-4o-mini')
+    expect(staged?.efforts).toBeDefined()
+    expect(staged?.input).toEqual(['text', 'image'])
+    // Nothing is ever HELD for a route the document does not hold.
+    expect(state.queued.size).toBe(0)
+    expect(deps.mutate).not.toHaveBeenCalled()
+  })
+
+  it("ticks a collapsed row's image box through a visit that puts the fold back", async () => {
+    // The two reports at once: the official input-types checkbox renders the
+    // card's DRAFT, so a document write of the plugin's can never tick it before
+    // the card is saved and reopened — the box stayed empty — while a walk that
+    // OPENED the row for the tick unfolded every model of the provider, which is
+    // the fold the user never asked for. A folded row is therefore VISITED:
+    // opened for exactly the two clicks the tick takes and closed again on the
+    // way out, so the tick sits in the card's draft and the row is as folded as
+    // the user left it.
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    const entry = document.createElement('div')
+    entry.className = 'modelEntry'
+    entry.innerHTML = `<div class="modelRow">
+      <input aria-label="Model ID 3" value="gpt-4o-mini" />
+      <input aria-label="Display name 3" value="Draft Vision" />
+      <button aria-label="Capacities 3"></button>
+    </div>`
+    root.querySelector('.modelCatalog')!.append(entry)
+    const trigger = entry.querySelector<HTMLButtonElement>('button[aria-label="Capacities 3"]')!
+    // The official fold, emulated the way the host's React renders it: the
+    // disclosure — and with it the input-types control — exists only while the
+    // row is OPEN, and the card's draft is what its checkboxes carry.
+    const boxes: HTMLInputElement[] = []
+    let opened = 0
+    trigger.addEventListener('click', () => {
+      const open = entry.querySelector('.modelAdvanced')
+      if (open !== null) {
+        open.remove()
+        return
+      }
+      opened += 1
+      entry.insertAdjacentHTML('beforeend', `
+        <div class="modelAdvanced" style="display:block">
+          <fieldset class="modelInputTypes">
+            <label><input type="checkbox" checked /><span>Text</span></label>
+            <label><input type="checkbox" /><span>Image</span></label>
+          </fieldset>
+        </div>`)
+      boxes.push(entry.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[1]!)
+    })
+
+    const report = await adaptEveryModel(state, deps, 'acme-gateway', [
+      { id: 'gpt-4o-mini', name: 'Draft Vision', row: entry },
+    ])
+
+    // One visit — never an unfold the user has to undo.
+    expect(opened).toBe(1)
+    expect(entry.querySelector('.modelAdvanced')).toBeNull()
+    // The tick the user was missing, held by the card's draft for its own Save.
+    expect(boxes).toHaveLength(1)
+    expect(boxes[0]!.checked).toBe(true)
+    // The official control owns the modality, so the write states nothing about
+    // it: this route is the card's typed id, so the write STAGES and the ladder
+    // lands with the card's own Save.
+    const staged = state.pending.get('acme-gateway')?.get('gpt-4o-mini')
+    expect(staged?.efforts).toBeDefined()
+    expect(staged?.input).toBeUndefined()
+    expect(report).toEqual({ held: 1, unsuggested: 0 })
+  })
+
+  it('writes a missing vision flag when the row ships no control to tick', async () => {
+    // The same configured row on a host whose disclosure carries no input-types
+    // control at all (a legacy kernel): the visit has nothing to tick, the row
+    // is left exactly as folded as it was found, and the flag rides the write
+    // ('efforts: keep', so the stored ladder is untouched).
+    const seeded = structuredClone(join)
+    for (const layer of ['value', 'user'] as const) {
+      const provider = (seeded.namespace![layer] as {
+        providers: { aliyun: { models: Array<Record<string, unknown>> } }
+      }).providers.aliyun
+      provider.models = [{ id: 'gpt-4o-mini', reasoningEfforts: { high: 'high' } }]
+    }
+    const deps = makeDeps({ describeNamespace: async () => seeded })
+    const state = createScanState()
+    const entry = document.createElement('div')
+    entry.className = 'modelEntry'
+    entry.innerHTML = `<div class="modelRow">
+      <input aria-label="Model ID 3" value="gpt-4o-mini" />
+      <input aria-label="Display name 3" value="Draft Vision" />
+      <button aria-label="Capacities 3"></button>
+    </div>`
+    const trigger = entry.querySelector<HTMLButtonElement>('button[aria-label="Capacities 3"]')!
+    let visits = 0
+    trigger.addEventListener('click', () => {
+      visits += 1
+    })
+
+    const report = await adaptEveryModel(state, deps, 'aliyun', [
+      { id: 'gpt-4o-mini', name: 'Draft Vision', row: entry },
+    ])
+
+    // Opened and closed again around a control that was not there.
+    expect(visits).toBe(2)
+    expect(entry.querySelector('.modelAdvanced')).toBeNull()
+    expect(state.queued.get('aliyun')?.get('gpt-4o-mini')?.efforts).toBe('keep')
+    expect(state.queued.get('aliyun')?.get('gpt-4o-mini')?.input).toEqual(['text', 'image'])
+    expect(report).toEqual({ held: 1, unsuggested: 0 })
+  })
+
+  it("ticks a settled row's own image control when the card still shows it unticked", async () => {
+    // The card's draft is frozen when it opens, so a modality written after that
+    // -- this seat's own earlier click, or the idle pass behind it -- leaves the
+    // checkbox the user is looking at UNTICKED even though the document already
+    // says image: the report that the tick only shows up on the second visit.
+    // Both halves are settled, so nothing is written here; the control is clicked
+    // instead, which is a user-equivalent edit on the surface the user reads.
+    const seeded = structuredClone(join)
+    for (const layer of ['value', 'user'] as const) {
+      const provider = (seeded.namespace![layer] as {
+        providers: { aliyun: { models: Array<Record<string, unknown>> } }
+      }).providers.aliyun
+      provider.models = [{ id: 'gpt-4o-mini', reasoningEfforts: { high: 'high' }, input: ['text', 'image'] }]
+    }
+    const deps = makeDeps({ describeNamespace: async () => seeded })
+    const state = createScanState()
+    const entry = document.createElement('div')
+    entry.className = 'modelEntry'
+    entry.innerHTML = `<div class="modelRow">
+      <input aria-label="Model ID 3" value="gpt-4o-mini" />
+      <input aria-label="Display name 3" value="Draft Vision" />
+      <button aria-label="Capacities 3"></button>
+    </div>
+    <div class="modelAdvanced" style="display:block">
+      <fieldset class="modelInputTypes">
+        <label><input type="checkbox" checked /><span>Text</span></label>
+        <label><input type="checkbox" /><span>Image</span></label>
+      </fieldset>
+    </div>`
+
+    const report = await adaptEveryModel(state, deps, 'aliyun', [
+      { id: 'gpt-4o-mini', name: 'Draft Vision', row: entry },
+    ])
+
+    const boxes = Array.from(entry.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+    expect(boxes.map(box => box.checked)).toEqual([true, true])
+    // Nothing was adapted: the declaration was already stored, so the row counts
+    // as settled and the seat keeps its true 'already configured' verdict while
+    // the tick the user was missing appears.
+    expect(report).toEqual({ held: 0, unsuggested: 0 })
+    expect(state.pending.get('aliyun')?.get('gpt-4o-mini')).toBeUndefined()
+    expect(state.queued.get('aliyun')).toBeUndefined()
+  })
+
+  it('leaves a settled row folded rather than unfolding it to tick the image box', async () => {
+    // The same stored verdict, but the row is CLOSED: its fieldset is not on
+    // screen, so there is no tick the user could be reading. The document
+    // already says image, so no visit is owed here either -- opening a row to
+    // tick a box that is already ticked is exactly the unfold the user refused.
+    const seeded = structuredClone(join)
+    for (const layer of ['value', 'user'] as const) {
+      const provider = (seeded.namespace![layer] as {
+        providers: { aliyun: { models: Array<Record<string, unknown>> } }
+      }).providers.aliyun
+      provider.models = [{ id: 'gpt-4o-mini', reasoningEfforts: { high: 'high' }, input: ['text', 'image'] }]
+    }
+    const deps = makeDeps({ describeNamespace: async () => seeded })
+    const state = createScanState()
+    const entry = document.createElement('div')
+    entry.className = 'modelEntry'
+    entry.innerHTML = `<div class="modelRow">
+      <input aria-label="Model ID 3" value="gpt-4o-mini" />
+      <input aria-label="Display name 3" value="Draft Vision" />
+      <button aria-label="Capacities 3"></button>
+    </div>`
+    const trigger = entry.querySelector<HTMLButtonElement>('button[aria-label="Capacities 3"]')!
+    let visits = 0
+    trigger.addEventListener('click', () => {
+      visits += 1
+    })
+
+    const report = await adaptEveryModel(state, deps, 'aliyun', [
+      { id: 'gpt-4o-mini', name: 'Draft Vision', row: entry },
+    ])
+
+    expect(visits).toBe(0)
+    expect(entry.querySelector('.modelAdvanced')).toBeNull()
+    expect(entry.querySelectorAll('input[type="checkbox"]')).toHaveLength(0)
+    expect(report).toEqual({ held: 0, unsuggested: 0 })
   })
 
   it('refreshes a staged new row before the official Save', async () => {

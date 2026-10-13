@@ -1587,6 +1587,28 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    pair. The section's own visibility stays a pane decision (below). */
 .bre-tabbed .bre-headers-host { display: block; }
 
+/* The create-provider card's CUSTOM form has no slot to render a bar into: the
+   official page dispatches the provider-card slot inside the catalogue half
+   only, so the create-card pass (injection/add-card.ts) mounts a bar of its own
+   at the top of the form. Same contract as the mount above — hidden until the
+   pass marks the card, the card's own gap rhythm once it does — so an
+   untaken-over card is exactly the official one. */
+.bre-create-host {
+  display: none;
+}
+.bre-tabbed .bre-create-host {
+  display: block;
+}
+
+/* With the custom API form the only way left to add a provider, the official
+   "How to add" switch has nothing to switch. The pass hides it ONLY once that
+   form is really up: a card that has no custom form to offer, or a takeover
+   that stepped back, keeps the switch — and with it the official explanation
+   of why the other half is unavailable. */
+.bre-add-mode-picker {
+  display: none;
+}
+
 .bre-editor-tab {
   flex: 1 1 0;
   min-width: 0;
@@ -1638,11 +1660,24 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   display: none !important;
 }
 
-/* The advanced tab: the official body — fields, model list, action row and the
-   editor's own header — steps aside for the request-header section, which is a
-   complete form with its own save/cancel and becomes the pane under the very
-   same bar. */
-.bre-tabbed[data-bre-tab='advanced'] [data-bre-editor-body] {
+/* The advanced tab: the official body — fields, model list — steps aside for the
+   request-header section, which is a complete form with its own save/cancel and
+   becomes the pane under the very same bar. What does NOT step aside is the
+   card's own commit row wherever the pass has marked one (data-bre-footer): on
+   the create card that row IS the 创建提供商 this pane's draft is written with,
+   and a user who has just typed the headers is standing on this tab. An ordinary
+   card keeps the old behaviour — its body steps aside wholesale, advanced pane
+   and save included, because that pane carries a save of its own. */
+.bre-tabbed[data-bre-tab='advanced'] [data-bre-editor-body]:not([data-bre-footer]) {
+  display: none !important;
+}
+
+/* A card whose commit row is kept: the body and every wrapper on the path to that
+   row stay, but inside them only the path shows. The row is marked 'row' and not
+   'path' on purpose: a wrapper's unmarked children are exactly the fields and
+   layout the tab is stepping away from, while the row's children are the buttons
+   being kept. Panes the tabs own stay hidden by the region rule above. */
+.bre-tabbed[data-bre-tab='advanced'] [data-bre-footer='path'] > *:not([data-bre-footer]) {
   display: none !important;
 }
 
@@ -1747,20 +1782,30 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    strands the fetch link in the middle of the card. So the free space is handed
    to the fetch link's own leading auto margin instead — an auto margin absorbs
    the space BEFORE justify-content is consulted, whatever the official rule
-   says. The fetch link is the button the seat sits after, which is also the
-   only control present when the provider is not overridden: the pair then
-   simply holds the right edge. align-items centres the taller host links
-   against the seat. */
+   says. align-items centres the taller host links against the seat.
+
+   The pin must NOT wait for the seat to exist: a card with no models shows the
+   fetch link alone, and space-between puts a lone child at the START — so the
+   link sat at the left edge until the first fetch seated the control beside it
+   and shoved it right, the jump the user reported. Hence two selectors: the
+   link that the seat follows, and the fetch link while it is still the LAST
+   control of the head (the seat is a button too, so a last-of-type selector
+   alone would eventually pin the seat instead). Either way the link holds the
+   right edge from the first paint to the last. */
 .bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] {
   align-items: center;
 }
-.bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] > button:has(+ .bre-auto-effort) {
+.bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] > button:has(+ .bre-auto-effort),
+.bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] > button:not(.bre-auto-effort):last-of-type {
   margin-left: auto;
 }
 
 /* The click's answer, as a bubble at the top of the window that takes itself
-   away again. The control is left alone on purpose: its label is what the user
-   aimed at, and a button that rewrites itself is a button that moved. The
+   away again — and the official save line's answer too
+   (injection/saved-notice.ts), which is raised the same way with the same
+   done phase, so one shape covers both. The control is left alone on
+   purpose: its label is what the user aimed at, and a button that rewrites
+   itself is a button that moved. The
    bubble is a fixed overlay on the body — not a child of the head, which is the
    host's flex row and would take a fourth item — and it clears the settings
    dialog's opaque overlay for the same reason the drop line does. It follows

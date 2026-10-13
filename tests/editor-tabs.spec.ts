@@ -240,6 +240,97 @@ describe('reconcileEditorTabs', () => {
     // stylesheet hides it on every tab.
     expect(root.querySelector('.editorHeader')?.getAttribute('data-bre-region')).toBe('none')
     expect(root.querySelectorAll('[data-bre-region]')).toHaveLength(5)
+
+    // A provider that already exists keeps its commit row on the provider tab
+    // only: its advanced pane carries a save of its own, so the pass marks no
+    // footer here and the advanced tab keeps hiding the whole body.
+    expect(root.querySelector('.editorActions')?.hasAttribute('data-bre-footer')).toBe(false)
+    expect(root.querySelector('.editor')?.hasAttribute('data-bre-footer')).toBe(false)
+  })
+
+  it('dresses only the visible half of a two-form create card', () => {
+    // The create-provider card keeps BOTH of its forms mounted once visited and
+    // hides the inactive one. Each half carries a plugin mount of its own — the
+    // catalogue's comes from the official slot, the custom form's from the
+    // create-card pass — so the pass has to read the visible half only, or the
+    // hidden catalogue's provider would dress the custom form.
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <ul class="rows">
+        <li class="addCard">
+          <div class="addPanel" id=":r1:-catalog-panel" hidden>
+            <div class="bre-headers-host" data-bre-provider="ghost"></div>
+            <div class="editor">
+              <div class="field"><input aria-label="API key" type="password" /></div>
+              <div class="editorActions">
+                <button class="secondaryButton" type="button">Cancel</button>
+                <button class="primaryButton" type="button">Add</button>
+              </div>
+            </div>
+          </div>
+          <div class="addPanel" id=":r1:-custom-panel">
+            <div class="bre-create-host"></div>
+            <div class="editor">
+              <p class="advancedHint">Lowercase identifier, starting with a letter.</p>
+              <div class="field"><input aria-label="Base URL" /></div>
+              <section class="modelCatalog"><div class="modelListHead"></div></section>
+              <div class="editorActions">
+                <button class="secondaryButton" type="button">Cancel</button>
+                <button class="primaryButton" type="button">Create</button>
+              </div>
+            </div>
+          </div>
+        </li>
+      </ul>
+    `
+    for (const host of Array.from(root.querySelectorAll('.bre-headers-host, .bre-create-host'))) {
+      host.insertBefore(tabBar(), host.firstChild)
+    }
+    document.body.appendChild(root)
+
+    reconcileEditorTabs(root, depsFor('zh'), createEditorTabsState())
+
+    const card = root.querySelector('li.addCard') as HTMLElement
+    const catalog = root.querySelector('#\\:r1\\:-catalog-panel') as HTMLElement
+    const custom = root.querySelector('#\\:r1\\:-custom-panel') as HTMLElement
+    const customBody = custom.querySelector('.editor') as HTMLElement
+
+    expect(card.classList.contains('bre-tabbed')).toBe(true)
+    expect(customBody.hasAttribute('data-bre-editor-body')).toBe(true)
+    expect((catalog.querySelector('.editor') as HTMLElement).hasAttribute('data-bre-editor-body')).toBe(false)
+
+    // The panes are the visible half's: its fields are the provider pane, its
+    // catalogue is the models pane, and the hidden half is touched nowhere.
+    expect((custom.querySelector('.field') as HTMLElement).getAttribute('data-bre-region')).toBe('provider')
+    expect((catalog.querySelector('.field') as HTMLElement).hasAttribute('data-bre-region')).toBe(false)
+    expect((custom.querySelector('.modelCatalog') as HTMLElement).getAttribute('data-bre-region')).toBe('models')
+    // The id field's hint is a bare paragraph among the identity fields, not a
+    // pane of its own. A pane hides only what is tagged, so an untagged hint
+    // stayed on screen under the model list — it belongs to the fields' pane.
+    expect((custom.querySelector('.advancedHint') as HTMLElement).getAttribute('data-bre-region')).toBe('provider')
+    expect(catalog.querySelector('.bre-headers')?.hasAttribute('data-bre-region')).not.toBe(true)
+    expect(root.querySelectorAll('[data-bre-region]')).toHaveLength(3)
+
+    // The visible half's commit row is the 创建提供商 the 高级配置 pane's draft is
+    // written with, so the pass marks it, and the wrapper that holds it, as the
+    // footer the advanced tab must keep. The hidden half is marked nowhere.
+    const customActions = custom.querySelector('.editorActions') as HTMLElement
+    expect(customActions.getAttribute('data-bre-footer')).toBe('row')
+    expect(customBody.getAttribute('data-bre-footer')).toBe('path')
+    expect((catalog.querySelector('.editorActions') as HTMLElement).hasAttribute('data-bre-footer')).toBe(false)
+    expect(catalog.querySelector('.editor')?.hasAttribute('data-bre-footer')).toBe(false)
+
+    // The labelled bar is the visible half's — the hidden one must keep the
+    // structure its own component rendered, and the available panes are the
+    // visible form's: no request-header route exists before the provider does.
+    const customBar = custom.querySelector(`.${EDITOR_TABS_CLASS}`) as HTMLElement
+    const catalogBar = catalog.querySelector(`.${EDITOR_TABS_CLASS}`) as HTMLElement
+    expect(customBar.getAttribute('aria-label')).toBe('编辑器分区')
+    expect(tabOf(custom, 'provider')?.textContent).toBe('供应商配置')
+    expect(tabOf(custom, 'models')?.getAttribute('aria-selected')).toBe('false')
+    expect(tabOf(custom, 'advanced')?.hidden).toBe(true)
+    expect(catalogBar.getAttribute('aria-label')).toBeNull()
+    expect(catalogBar.querySelectorAll(`[${EDITOR_TAB_ID_ATTR}]`)[0]?.textContent).toBe('')
   })
 
   it('tabs a create-provider card that has no header row', () => {
@@ -552,5 +643,34 @@ describe('teardownEditorTabs', () => {
 
     expect(details.open).toBe(false)
     expect(details.hasAttribute('data-bre-details')).toBe(false)
+  })
+
+  it('drops the footer mark with the rest of them', () => {
+    // The create card's commit row is the official card's own DOM — the pass only
+    // borrows it for the advanced tab, so the withdrawal must unhook it and leave
+    // the row where it was.
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <li class="addCard">
+        <div class="addPanel">
+          <div class="bre-create-host"></div>
+          <div class="editor">
+            <div class="field"><input aria-label="Base URL" /></div>
+            <div class="editorActions">
+              <button class="secondaryButton" type="button">Cancel</button>
+              <button class="primaryButton" type="button">Create</button>
+            </div>
+          </div>
+        </div>
+      </li>
+    `
+    document.body.appendChild(root)
+    reconcileEditorTabs(root, depsFor('en'), createEditorTabsState())
+    expect((root.querySelector('.editorActions') as HTMLElement).getAttribute('data-bre-footer')).toBe('row')
+
+    teardownEditorTabs()
+
+    expect(document.querySelectorAll('[data-bre-footer]')).toHaveLength(0)
+    expect((root.querySelector('.editorActions') as HTMLElement).textContent).toContain('Create')
   })
 })

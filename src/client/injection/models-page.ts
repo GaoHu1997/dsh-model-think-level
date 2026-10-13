@@ -35,6 +35,13 @@ import {
   type EditorTabsDeps,
 } from './editor-tabs.js'
 import {
+  createAddCardState,
+  reconcileAddCards,
+  teardownAddCards,
+  type AddCardDeps,
+} from './add-card.js'
+import { createStagedHeadersState, flushStagedRequestHeaders } from './staged-headers.js'
+import {
   createProviderOrderState,
   reconcileProviderOrder,
   rowsListOf,
@@ -59,6 +66,7 @@ import {
   type ProviderDisabledGroupDeps,
 } from './provider-disabled-group.js'
 import { teardownAutoEffortSeats } from './auto-effort-seat.js'
+import { reconcileSavedNotice, teardownSavedNotice } from './saved-notice.js'
 import {
   createModelOrderState,
   modelListMutation,
@@ -99,6 +107,9 @@ const HOST_LABEL_KEYS = {
   // (the DeepSeek rows), so the template must be resolved in the page's own
   // language rather than assumed.
   editProvider: ['editProvider', 'Edit {provider}'],
+  // The official input-types control's image choice. Its sibling (`Text`) is
+  // never matched: the box this plugin prints a verdict on is the image one.
+  inputImage: ['modelInputImage', 'Image'],
 } as const satisfies Record<keyof HostLabels, readonly [string, string, ...string[]]>
 
 /** What the Models-page injection needs from its host. */
@@ -169,11 +180,20 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       apply: resolve(HOST_LABEL_KEYS.apply),
       cancel: resolve(HOST_LABEL_KEYS.cancel),
       editProvider: resolve(HOST_LABEL_KEYS.editProvider),
+      inputImage: resolve(HOST_LABEL_KEYS.inputImage),
     }
   }
 
   /** Debounce window for DOM-mutation scans (one scan per render burst). */
   const SCAN_DEBOUNCE_MS = 120
+
+  /**
+   * Gap between scans while a released request-header draft waits for the route
+   * its card was still creating when it closed. Deliberately unhurried: the
+   * write it is waiting for is the card's own, so a slow second beats a scan
+   * storm on a page nobody is touching.
+   */
+  const DEFERRED_RETRY_MS = 1_000
   const scanState = createScanState()
   const providerOrderState = createProviderOrderState()
   const providerOrderDeps: ProviderOrderDeps = { t, labels }
@@ -190,6 +210,27 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   const modelOrderDeps: ModelOrderDeps = { t, labels }
   const editorTabsState = createEditorTabsState()
   const editorTabsDeps: EditorTabsDeps = { t }
+  // The create-provider card is the one card with two forms; this pass reduces
+  // it to the custom one and hangs the pane the official card does not render
+  // there. It runs BEFORE the tab pass at every call site, because the half the
+  // tab pass may dress is the half this pass decides.
+  //
+  // That pane edits headers for a route the card's own 保存 has not declared
+  // yet, so its drafts wait in the session ledger below until the route shows up
+  // in the document — the create landing is the only thing that may trigger the
+  // write, and it is also the proof the write is allowed.
+  const addCardState = createAddCardState()
+  const stagedHeadersState = createStagedHeadersState()
+  const addCardDeps: AddCardDeps = {
+    t,
+    api,
+    routeIdLabels: () => labels().routeId,
+    staged: stagedHeadersState,
+    // Same seam the injector mounts its editors through: the pane's copy has to
+    // follow a language switch, and a foreign root only hears about one through
+    // the locale refresh wrapper.
+    refreshed,
+  }
   let scanTimer: number | undefined
   let retryTimer: number | undefined
   let observer: MutationObserver | undefined
@@ -283,6 +324,11 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     reconcileProviderDeleteSeat(root, providerDeleteDeps)
     reconcileProviderDisabledGroup(root, providerDisabledDeps, providerDisabledState)
     reconcileModelOrder(root, modelOrderDeps, modelOrderState)
+    // Last: the official save line, which this pass takes out of the flow and
+    // answers with a bubble. It runs last because it watches the panel for text
+    // the save has just produced, and every pass above may still move a node
+    // that lands in the same burst.
+    reconcileSavedNotice(root)
   }
 
   function schedule(): void {
@@ -296,6 +342,9 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // preference flip.
       composerMutation?.()
       reconcile(panelRoot(), injectorDeps, scanState)
+      // The create-provider card is reduced to its custom form first: the tab
+      // pass below dresses the half this pass leaves showing.
+      reconcileAddCards(panelRoot(), addCardDeps, addCardState)
       // The tab pass rides the settled scan as well, after the editor injector
       // has stocked the open card. Its reactive path is the observer above; this
       // one covers the paths no mutation carries — a boot over an editor that
@@ -305,6 +354,15 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // These passes are also run synchronously by the observer. Repeating them
       // here covers preference flips and retry scans that have no DOM mutation.
       reconcileDom()
+      // LAST, and only here: the create card's held request headers drain on the
+      // scan that finds their route declared. This is the one scan with wire
+      // work already in it — the observer's synchronous pass must stay
+      // wire-free, and the drain is a settings write of its own. A draft whose
+      // card is already gone gets no further mutation to ride, so the scan keeps
+      // coming until the ledger is empty (the held grace window bounds that).
+      void flushStagedRequestHeaders(stagedHeadersState, api).then((waiting) => {
+        if (waiting > 0) scheduleRetry(DEFERRED_RETRY_MS)
+      })
     }, SCAN_DEBOUNCE_MS)
   }
 
@@ -336,6 +394,11 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // debounced scan below, the opened editor would paint as the official
       // one long column and then visibly re-sort itself a frame or more later
       // — the "click Edit and the tabbed editor flickers in" report.
+      // The create-provider card's pass leads the tab pass here for the same
+      // reason, and one more: it is what SWITCHES the card to its custom form,
+      // and the official control commits that synchronously, so the tab pass
+      // that follows in this very microtask already sees the half to dress.
+      reconcileAddCards(panelRoot(), addCardDeps, addCardState)
       reconcileEditorTabs(panelRoot(), editorTabsDeps, editorTabsState)
       // All other page decorations are DOM-only as well. They must land in this
       // same microtask, otherwise navigating to Models first paints the official
@@ -401,9 +464,16 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // And for the auto-adapt seats: raw DOM this plugin put in the official
     // catalogue head, which a dead fiber must not leave clickable-looking.
     teardownAutoEffortSeats()
+    // And for the official save line: it is the HOST's own node, and a dead
+    // fiber must not leave a provider saved with the page saying nothing.
+    teardownSavedNotice()
     // And for the model grips inside an open editor, whose own lists live
     // outside the provider rows' seat.
     teardownModelOrder(modelOrderState)
+    // And for the create-provider card: the bar mount is raw DOM this plugin
+    // put inside an official form, and the switch it hid stands for a control
+    // the page owns.
+    teardownAddCards(addCardState)
     // And for the editor tabs: the bar and the region tags are raw DOM and
     // attributes this plugin owns inside the official card — a dead fiber must
     // not leave the page keyed to tabs nothing maintains anymore.

@@ -21,7 +21,7 @@
  * @module dsh-model-think-level/client/injection/provider-card-slot
  */
 
-import { createElement, useEffect, useRef } from 'react'
+import { createElement, useCallback, useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { PI_AI_NS, PLUGIN_ID } from '../../constants.js'
@@ -48,6 +48,36 @@ interface ProviderCardOccurrence {
 export type ProviderCardSlotProps = ProviderCardOccurrence & { api: RemoteApi; t: Translate }
 
 /**
+ * Press the official editor's own dismiss button for this card.
+ *
+ * The two sibling panes (供应商配置 / 模型配置) end an edit with the official
+ * footer's `取消`, whose handler calls `onClose(false)` and closes the whole
+ * editor. The takeover keeps that footer mounted but hides it on the 高级配置
+ * pane (`[data-bre-editor-body]`), so the only way this pane's 取消 can mean the
+ * same thing is to press that very button: its React handler is the one piece
+ * of card state no plugin can reach directly.
+ *
+ * The resolver mirrors the tiers `models-page-editor`'s `actionsOf` walks over
+ * the same row (kept local on purpose: that one also carries the HostLabels copy
+ * matching, and it backs the write fence): the row is the `editorActions`
+ * container, the dismiss button is the `secondaryButton` inside it, and — were
+ * a future build to drop the CSS-module class — the second-to-last button,
+ * because the official footer puts the commit LAST. Unresolved or disabled means
+ * no press: the caller has already reset its draft.
+ * @param card - the card row the editor is mounted in, or null.
+ */
+function dismissCard(card: HTMLElement | null): void {
+  if (card === null) return
+  const row = card.querySelector('[class*="editorActions"]')
+  if (row === null) return
+  const buttons = Array.from(row.querySelectorAll('button'))
+  const dismiss: HTMLElement | null = row.querySelector<HTMLElement>('button[class*="secondaryButton"]') ?? buttons.at(-2) ?? null
+  if (dismiss === null) return
+  if (dismiss instanceof HTMLButtonElement && dismiss.disabled) return
+  dismiss.click()
+}
+
+/**
  * The occurrence component: resolve this card's route, render the editor with
  * its tab bar, and publish the card's open/closed state so the section reveals
  * itself with the official editor. Exported for its own tests (the registration
@@ -55,6 +85,9 @@ export type ProviderCardSlotProps = ProviderCardOccurrence & { api: RemoteApi; t
  */
 export function ProviderCardSlot({ provider, api, t }: ProviderCardSlotProps): ReactNode {
   const host = useRef<HTMLDivElement | null>(null)
+  // The card is read at press time, not captured: the row a slot mounts in is
+  // the section's to re-render, and the editor itself holds no DOM knowledge.
+  const dismiss = useCallback((): void => { dismissCard(editorCardOf(host.current)) }, [])
 
   useEffect(() => {
     const wrapper = host.current
@@ -120,7 +153,7 @@ export function ProviderCardSlot({ provider, api, t }: ProviderCardSlotProps): R
     // with the tabbed editor and stays hidden on a card the pass left alone
     // (the DeepSeek account editor).
     createElement(EditorTabBar, { host, t }),
-    createElement(HeadersEditor, { route, api, t }),
+    createElement(HeadersEditor, { route, api, t, onDismiss: dismiss }),
   )
 }
 

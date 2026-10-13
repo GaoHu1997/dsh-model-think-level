@@ -360,6 +360,15 @@ describe('reconcileAutoEffortSeats', () => {
     // there are three children (it would strand the fetch link mid-card), so
     // the free space goes to the fetch link's own auto margin.
     expect(STYLES).toContain("[class*='modelListHead'] > button:has(+ .bre-auto-effort)")
+    // The pin cannot wait for the seat: a card with no models yet shows the
+    // fetch link alone, and space-between puts a lone child at the START — so
+    // the link sat at the left edge until the first fetch seated the control
+    // beside it and shoved it right (the reported jump). The second selector
+    // holds it at the right edge before the seat exists, and stops applying
+    // once the seat is the head's last button (hence :not(.bre-auto-effort)).
+    expect(STYLES).toContain(
+      "[class*='modelListHead'] > button:not(.bre-auto-effort):last-of-type",
+    )
     expect(STYLES).toContain('  margin-left: auto;\n')
   })
 })

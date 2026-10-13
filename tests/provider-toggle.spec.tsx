@@ -47,6 +47,7 @@ const LABELS: HostLabels = {
   apply: ['Apply'],
   cancel: ['Cancel'],
   editProvider: ['Edit {provider}'],
+  inputImage: ['Image'],
 }
 
 /** The toggle module's dependencies with a translator that echoes its key. */

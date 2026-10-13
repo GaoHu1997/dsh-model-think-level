@@ -184,4 +184,39 @@ describe('ProviderCardSlot', () => {
       await act(async () => { root!.unmount() })
     }
   })
+
+  it("presses the official editor's own dismiss button from the pane cancel", async () => {
+    const { row, unmount } = await renderCard()
+    try {
+      addOfficialEditor(row)
+      // The official footer, as the takeover classifies it: an `editorActions`
+      // row whose dismiss button carries the `secondaryButton` class and whose
+      // commit is last. The takeover keeps it mounted on the 高级配置 pane and
+      // only hides it, so it is still the button that closes the card.
+      const actions = document.createElement('div')
+      actions.className = 'editorActions'
+      const dismiss = document.createElement('button')
+      dismiss.className = 'secondaryButton'
+      dismiss.textContent = 'Cancel'
+      const submit = document.createElement('button')
+      submit.className = 'primaryButton'
+      submit.textContent = 'Apply'
+      actions.append(dismiss, submit)
+      row.appendChild(actions)
+      // The mark the editor-tabs pass writes on the section: what makes this
+      // section the pane, and gives its 取消 the card dismissal.
+      row.querySelector('.bre-headers')!.setAttribute('data-bre-region', 'advanced')
+      await settle()
+
+      const pressed = vi.fn()
+      dismiss.addEventListener('click', pressed)
+      const paneCancel = Array.from(row.querySelectorAll<HTMLButtonElement>('.bre-effort-actions button'))
+        .find(button => button.textContent === en.headersCancel)
+      expect(paneCancel).toBeDefined()
+      await act(async () => { paneCancel!.click() })
+      expect(pressed).toHaveBeenCalledTimes(1)
+    } finally {
+      await unmount()
+    }
+  })
 })
