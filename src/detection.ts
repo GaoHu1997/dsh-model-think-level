@@ -111,21 +111,47 @@ export function analyzeListingEntry(entry: unknown): EndpointSignal {
   // has read it since the 0.3.5 line): thinking.supported and effort.supported
   // are the two disclosures that say a model reasons. An explicit false is a
   // refusal, not silence.
+  //
+  // The two slots are separate disclosures and must not mask each other:
+  // thinking.toggle=false with effort.supported=true is the "adaptive
+  // thinking, no off switch" shape (always-on models like haiku-5.5 on
+  // aggregator listings) -- a positive disclosure on either slot wins over a
+  // negative on the other; a lone refusal keeps its own slot as the source.
   const capabilities = isRecord(entry['capabilities']) ? entry['capabilities'] : undefined
   if (capabilities !== undefined) {
     const thinking = capabilities['thinking']
-    if (isRecord(thinking) && typeof thinking['supported'] === 'boolean') {
+    const thinkingSupported = isRecord(thinking) && typeof thinking['supported'] === 'boolean'
+      ? (thinking['supported'] as boolean)
+      : undefined
+    const effort = capabilities['effort']
+    const effortSupported = isRecord(effort) && typeof effort['supported'] === 'boolean'
+      ? (effort['supported'] as boolean)
+      : undefined
+    if (effortSupported === true) {
       return {
         ...signalParts(entry),
-        reasoning: thinking['supported'] as boolean,
+        reasoning: true,
+        source: 'capabilities.effort.supported',
+      }
+    }
+    if (thinkingSupported === true) {
+      return {
+        ...signalParts(entry),
+        reasoning: true,
         source: 'capabilities.thinking.supported',
       }
     }
-    const effort = capabilities['effort']
-    if (isRecord(effort) && typeof effort['supported'] === 'boolean') {
+    if (thinkingSupported === false) {
       return {
         ...signalParts(entry),
-        reasoning: effort['supported'] as boolean,
+        reasoning: false,
+        source: 'capabilities.thinking.supported',
+      }
+    }
+    if (effortSupported === false) {
+      return {
+        ...signalParts(entry),
+        reasoning: false,
         source: 'capabilities.effort.supported',
       }
     }

@@ -127,6 +127,93 @@ describe('matchKnowledgeBase', () => {
     expect(matchKnowledgeBase('claude-mythos-5')?.id).toBe('anthropic-claude-5')
   })
 
+  it('keys claude-haiku-5.5 to the Claude 5.5 generation entry (ofox auto-adapt regression)', () => {
+    // Haiku 5.5 is the first Haiku generation that takes the effort
+    // parameter. Before its own entry existed, every spelling fell through to
+    // the generic `claude` entry (efforts: false), so 自动适配 answered "no
+    // effort control" and the editor flipped the thinking switch OFF -- the
+    // user's second report (manual pick, then auto → thinking off).
+    // 2026-10 calibration: the haiku entry merged into the generation-wide
+    // anthropic-claude-5-5 entry after pi-ai 1.2.0 confirmed the FULL ladder
+    // (xhigh/max join; 1M/128K, not the 200K/64K first read off ofox).
+    for (const id of ['claude-haiku-5.5', 'claude-haiku-5-5', 'haiku-5.5', 'claude-haiku-5.5-20261001']) {
+      const s = suggestEfforts(id, { api: 'openai-completions' })
+      expect(s.entryId, id).toBe('anthropic-claude-5-5')
+      expect(s.efforts, id).toEqual({ low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' })
+      expect(s.efforts, id).not.toHaveProperty('off')
+      expect(s.defaultEffort, id).toBe('high')
+      expect(s.matched, id).toBe(true)
+    }
+    // The same entry answers for opus/sonnet-5-5.
+    expect(matchKnowledgeBase('claude-opus-5-5')?.id).toBe('anthropic-claude-5-5')
+    expect(matchKnowledgeBase('claude-sonnet-5-5')?.id).toBe('anthropic-claude-5-5')
+    // The generic claude entry keeps answering for the older line.
+    expect(matchKnowledgeBase('claude-haiku-4.5')?.id).toBe('anthropic-claude')
+    expect(matchKnowledgeBase('claude-3-5-haiku')?.id).toBe('anthropic-claude')
+  })
+
+  it('carries the 2026-10 calibration (pi-ai 1.2.0 pass)', () => {
+    // Claude 5.0/5.1 generations tightened to xhigh/max; 4.6 to max only.
+    expect(matchKnowledgeBase('claude-opus-5')?.efforts).toEqual({ xhigh: 'xhigh', max: 'max' })
+    expect(matchKnowledgeBase('claude-fable-5-1')?.efforts).toEqual({ xhigh: 'xhigh', max: 'max' })
+    expect(matchKnowledgeBase('claude-opus-4-7')?.efforts).toEqual({ xhigh: 'xhigh', max: 'max' })
+    expect(matchKnowledgeBase('claude-sonnet-4-6')?.efforts).toEqual({ max: 'max' })
+    // GPT context corrections: 272K per the 1.2.0 catalog (was 1.05M).
+    expect(KNOWLEDGE_BASE.find(c => c.id === 'openai-gpt-5-5')?.contextWindow).toBe(272_000)
+    expect(KNOWLEDGE_BASE.find(c => c.id === 'openai-gpt-5-4')?.contextWindow).toBe(272_000)
+    expect(KNOWLEDGE_BASE.find(c => c.id === 'openai-gpt-6-astra')?.contextWindow).toBe(272_000)
+    // gpt-5.3-codex accepts an explicit none (spelled 'none') in 1.2.0.
+    expect(matchKnowledgeBase('gpt-5.3-codex')?.efforts).toEqual({ off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' })
+    // New GPT entries: 5.2-chat (reasoning chat snapshot), 6 luna/sol/terra,
+    // daybreak, realtime.
+    const chat = matchKnowledgeBase('gpt-5.2-chat')
+    expect(chat?.id).toBe('openai-gpt-5-2-chat')
+    expect(chat?.efforts).toEqual({ off: null, medium: 'medium', xhigh: 'xhigh' })
+    const gpt6 = matchKnowledgeBase('gpt-6-luna')
+    expect(gpt6?.id).toBe('openai-gpt-6')
+    expect(gpt6?.efforts).toEqual({ off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' })
+    // The bare 'gpt-6' stem and 6.1-sol stay on the astra entry (omit-style
+    // off, no 'none' proven).
+    expect(matchKnowledgeBase('gpt-6')?.id).toBe('openai-gpt-6-astra')
+    expect(matchKnowledgeBase('gpt-6.1-sol')?.id).toBe('openai-gpt-6-astra')
+    const daybreak = matchKnowledgeBase('gpt-daybreak-blue-latest')
+    expect(daybreak?.id).toBe('openai-gpt-daybreak')
+    expect(daybreak?.contextWindow).toBe(1_050_000)
+    expect(matchKnowledgeBase('gpt-realtime-2.1')?.id).toBe('openai-gpt-realtime')
+    expect(matchKnowledgeBase('gpt-realtime-2.1')?.efforts).toEqual({ minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' })
+    // New xai capacity facts: 4.3 loses xhigh, gains maxTokens 30K.
+    expect(matchKnowledgeBase('grok-4.3')?.efforts).toEqual({ off: 'none', low: 'low', medium: 'medium', high: 'high' })
+    expect(KNOWLEDGE_BASE.find(c => c.id === 'xai-grok-4-7')?.maxTokens).toBe(500_000)
+    // Mistral: magistral reversed to the two-state reasoning ladder; large-4
+    // and the medium-2604/latest ids join mistral-medium-3; the
+    // non-reasoning line keys the new legacy entry.
+    expect(matchKnowledgeBase('magistral-medium-latest')?.efforts).toEqual({ off: 'none', high: 'high' })
+    expect(matchKnowledgeBase('mistral-large-4')?.id).toBe('mistral-medium-3')
+    expect(matchKnowledgeBase('mistral-medium-2604')?.id).toBe('mistral-medium-3')
+    expect(matchKnowledgeBase('mistral-large-2411')?.id).toBe('mistral-legacy')
+    expect(matchKnowledgeBase('mistral-large-2411')?.efforts).toBe(false)
+    // Gemma-4: three-slot map with upper-case enum spellings.
+    const gemma = matchKnowledgeBase('gemma-4-31b-it')
+    expect(gemma?.id).toBe('google-gemma-4')
+    expect(gemma?.efforts).toEqual({ off: null, minimal: 'MINIMAL', high: 'HIGH' })
+    // Kimi for Coding: anthropic-messages coding endpoint, four rungs.
+    const kfc = matchKnowledgeBase('kimi-for-coding')
+    expect(kfc?.id).toBe('kimi-for-coding')
+    expect(kfc?.efforts).toEqual({ low: 'low', high: 'high', max: 'max' })
+    // MiniMax M2 predates the thinking parameter (false), M3 keeps its toggle.
+    expect(matchKnowledgeBase('minimax-m2.5')?.id).toBe('minimax-m2')
+    expect(matchKnowledgeBase('minimax-m2.5')?.efforts).toBe(false)
+    expect(KNOWLEDGE_BASE.find(c => c.id === 'minimax-m3')?.maxTokens).toBe(512_000)
+    // Aggregator/relay additions.
+    expect(matchKnowledgeBase('ember-1')?.efforts).toEqual({ off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'max' })
+    expect(matchKnowledgeBase('inkling')?.efforts).toEqual({
+      off: 'none', minimal: 'minimal', low: 'low', medium: 'medium',
+      high: 'high', xhigh: 'xhigh', max: 'max',
+    })
+    expect(matchKnowledgeBase('ring-2.6-1t')?.efforts).toEqual({ high: 'high', xhigh: 'xhigh' })
+    expect(matchKnowledgeBase('ling-2.6-flash')?.efforts).toBe(false)
+  })
+
   it('matches the 2026-09 additions (Step 5, Grok 4.7, MiMo v2.6)', () => {
     // StepFun's only Step-5 id is step-5-preview: the same three-step ladder
     // as the 3.x line, thinking always on, and native image input.
@@ -187,7 +274,8 @@ describe('matchKnowledgeBase', () => {
     expect(matchKnowledgeBase('MiniMax-M3')?.id).toBe('minimax-m3')
     expect(matchKnowledgeBase('gpt-5.4-pro')?.id).toBe('openai-gpt-5-4')
     expect(matchKnowledgeBase('gpt-5.3-codex')?.id).toBe('openai-gpt-5-3')
-    expect(matchKnowledgeBase('gpt-5.2-chat')?.id).toBe('openai-chat')
+    // 2026-10: gpt-5.2-chat keys its own reasoning entry now.
+    expect(matchKnowledgeBase('gpt-5.2-chat')?.id).toBe('openai-gpt-5-2-chat')
     expect(matchKnowledgeBase('gpt-chat-latest')?.id).toBe('openai-chat')
     expect(matchKnowledgeBase('gpt-oss-120b')?.id).toBe('openai-gpt-oss')
     expect(matchKnowledgeBase('kimi-k2.7-code')?.id).toBe('kimi-k27-code')
@@ -214,9 +302,14 @@ describe('matchKnowledgeBase', () => {
     expect(matchKnowledgeBase('gpt-4-turbo')?.id).toBe('openai-gpt-4-turbo')
     expect(matchKnowledgeBase('gpt-4-turbo-preview')?.id).toBe('openai-gpt-4-turbo-preview')
     expect(matchKnowledgeBase('gpt-4-turbo-preview')?.input).toEqual(['text'])
-    // chat snapshots carry images per official model pages.
-    expect(matchKnowledgeBase('gpt-5.2-chat-latest')?.id).toBe('openai-chat')
+    // chat snapshots carry images per official model pages; gpt-5.2-chat
+    // split off to its own REASONING entry in the 2026-10 calibration
+    // (pi-ai 1.2.0 keys gpt-5.2-chat-latest with an effort map), so the
+    // non-reasoning openai-chat entry no longer answers for it.
+    expect(matchKnowledgeBase('gpt-5.2-chat-latest')?.id).toBe('openai-gpt-5-2-chat')
     expect(matchKnowledgeBase('gpt-5.2-chat-latest')?.input).toEqual(['text', 'image'])
+    expect(matchKnowledgeBase('gpt-5.1-chat-latest')?.id).toBe('openai-chat')
+    expect(matchKnowledgeBase('gpt-5.3-chat-latest')?.input).toEqual(['text', 'image'])
     // claude: mythos-preview lacks xhigh; opus-4-5 tops at high; the rest of
     // the 3.x/4.5 line declares no effort control.
     expect(matchKnowledgeBase('claude-mythos-preview')?.id).toBe('anthropic-claude-mythos-preview')
@@ -225,10 +318,12 @@ describe('matchKnowledgeBase', () => {
     expect(matchKnowledgeBase('claude-sonnet-4-5')?.id).toBe('anthropic-claude')
     expect(matchKnowledgeBase('claude-sonnet-4-5')?.efforts).toBe(false)
     expect(matchKnowledgeBase('claude-sonnet-5')?.id).toBe('anthropic-claude-5')
-    // grok-4.3 documents none/low/medium/high/xhigh per the official models
-    // page JSON (xhigh joined after the 2026-08 pass; defaultEffort is low).
-    expect(matchKnowledgeBase('grok-4.3')?.efforts).toEqual({ off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' })
+    // grok-4.3: 2026-10 calibration retires the "xhigh joined" reading --
+    // pi-ai 1.2.0's catalog lists none/low/medium/high only (xhigh joins at
+    // 4.6/4.7); maxTokens 30,000 from the same catalog.
+    expect(matchKnowledgeBase('grok-4.3')?.efforts).toEqual({ off: 'none', low: 'low', medium: 'medium', high: 'high' })
     expect(matchKnowledgeBase('grok-4.3')?.defaultEffort).toBe('low')
+    expect(KNOWLEDGE_BASE.find(c => c.id === 'xai-grok-4-3')?.maxTokens).toBe(30_000)
     // qwen3.8-max is multimodal per Alibaba's catalog; mistral-small-2603
     // (Mistral Small 4) is the reasoning_effort model; GLM-4.5V is a vision
     // line member; hy3's 256K is on the official README.

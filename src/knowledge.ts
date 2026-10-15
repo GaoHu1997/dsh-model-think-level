@@ -220,9 +220,14 @@ export interface EffortSuggestion {
  * plus first-party GitHub cards (openai/gpt-oss, mistralai/mistral-common,
  * Tencent-Hunyuan/Hy3, MiniMax-AI/MiniMax-M3) -- cross-checked against the
  * public OpenRouter catalog (input_modalities, supported_parameters) where
- * noted. Capacities are REFERENCE values: aggregators disagree, so the note
- * says so where the spread is wide, and families whose numbers stay contested
- * simply carry none.
+ * noted. 2026-10 全面校准 pass: the whole table was re-checked against
+ * pi-ai 1.2.0's official model catalog, whose thinkingLevelMap semantics
+ * are adopted here -- a level PRESENT in the map is accepted (a null value
+ * means it dispatches via omit/budget/toggle channels, NOT an active
+ * disable for the openai/anthropic families), and a level ABSENT is
+ * refused and must not be declared. Capacities are REFERENCE values:
+ * aggregators disagree, so the note says so where the spread is wide, and
+ * families whose numbers stay contested simply carry none.
  */
 export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
   {
@@ -346,52 +351,57 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     patterns: ['gpt-5.6'],
     // gpt-5.6 spans the full modern ladder including max; the sol/luna/terra
     // variants share it (official reasoning guide: values "can include none
-    // minimal low medium high xhigh, and max").
+    // minimal low medium high xhigh, and max"). pi-ai 1.2.0 catalog
+    // confirms the FULL ladder at a 272,000 context.
     efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
     defaultEffort: 'medium',
     compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
     input: ['text', 'image'],
-    contextWindow: 1_050_000,
+    contextWindow: 272_000,
     maxTokens: 128_000,
-    note: 'GPT-5.6（别名即 sol）档位：None / Low / Medium(默认) / High / XHigh / Max；sol/luna/terra 同档，带图输入。',
+    note: 'GPT-5.6（别名即 sol）档位：None / Low / Medium(默认) / High / XHigh / Max；sol/luna/terra 同档，带图输入。2026-10 校准：上下文按 pi-ai 1.2.0 目录记 272,000（此前误记 1,050,000）。',
   },
   {
     id: 'openai-gpt-5-5',
     patterns: ['gpt-5.5'],
     // gpt-5.5 defaults to medium (official reasoning guide) and tops out at
-    // xhigh; the -pro variant drops none/low (medium/high/xhigh only).
+    // xhigh (max is ABSENT from the pi-ai 1.2.0 catalog); the -pro variant
+    // (1.05M context, Responses-only) keeps high/xhigh only.
     efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' },
     defaultEffort: 'medium',
     compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
     input: ['text', 'image'],
-    contextWindow: 1_050_000,
+    contextWindow: 272_000,
     maxTokens: 128_000,
-    note: 'GPT-5.5 档位：None / Low / Medium(默认) / High / XHigh，带图输入。pro 变体仅 Medium / High(默认) / XHigh 且仅 Responses API。',
+    note: 'GPT-5.5 档位：None / Low / Medium(默认) / High / XHigh（无 Max 档），带图输入。pro 变体仅 High(默认) / XHigh、1.05M 上下文且仅 Responses API。2026-10 校准：上下文按 pi-ai 1.2.0 目录记 272,000（此前误记 1,050,000）。',
   },
   {
     id: 'openai-gpt-5-4',
     patterns: ['gpt-5.4'],
     // Official model page: none (default) / low / medium / high / xhigh;
-    // pro drops none+low and is Responses-only; mini/nano sit on 400K.
+    // pro drops none+low (medium/high/xhigh, 1.05M, Responses-only);
+    // mini/nano sit on 400K. pi-ai 1.2.0 catalog: 272,000 context.
     efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' },
     defaultEffort: 'off',
     compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
     input: ['text', 'image'],
-    contextWindow: 1_050_000,
+    contextWindow: 272_000,
     maxTokens: 128_000,
-    note: 'GPT-5.4 档位：None(默认) / Low / Medium / High / XHigh，带图输入。pro 变体仅 Medium/High/XHigh；mini/nano 为 400K 上下文。',
+    note: 'GPT-5.4 档位：None(默认) / Low / Medium / High / XHigh，带图输入。pro 变体仅 Medium/High/XHigh（1.05M）；mini/nano 为 400K 上下文。2026-10 校准：上下文按 pi-ai 1.2.0 目录记 272,000（此前误记 1,050,000）。',
   },
   {
     id: 'openai-gpt-5-3',
     patterns: ['gpt-5.3'],
-    // Official model page: low / medium / high / xhigh only -- no none.
-    efforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' },
+    // pi-ai 1.2.0 catalog (gpt-5.3-codex): none IS accepted on the codex
+    // line, spelled 'none' -- the older "no none" reading is retired.
+    // gpt-5.3-chat (non-reasoning) keys its own openai-chat entry.
+    efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' },
     defaultEffort: 'medium',
     compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
     input: ['text', 'image'],
     contextWindow: 400_000,
     maxTokens: 128_000,
-    note: 'GPT-5.3-Codex 档位：Low / Medium / High / XHigh（无 None 档），带图输入、400K；gpt-5.3-chat 为非推理聊天模型（见 chat 条目）。',
+    note: 'GPT-5.3-Codex 档位：None / Low / Medium(默认) / High / XHigh，带图输入、400K；2026-10 校准：None 档按 pi-ai 1.2.0 目录补回（此前按旧模型页记为无 None）。gpt-5.3-chat 为非推理聊天模型（见 chat 条目）。',
   },
   {
     id: 'openai-gpt-5-1',
@@ -438,22 +448,37 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     note: 'GPT-5 初代档位：Minimal / Low / Medium / High，无关闭档。',
   },
   {
+    id: 'openai-gpt-5-2-chat',
+    // pi-ai 1.2.0 catalog: gpt-5.2-chat-latest IS a reasoning model with a
+    // tiny ladder (off[omit] / medium / xhigh) at 128K -- it must not fall
+    // into the non-reasoning openai-chat entry below, which is why that
+    // entry's 'gpt-5.2-chat' pattern moved here.
+    patterns: ['gpt-5.2-chat'],
+    efforts: { off: null, medium: 'medium', xhigh: 'xhigh' },
+    compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
+    input: ['text', 'image'],
+    contextWindow: 128_000,
+    maxTokens: 16_384,
+    note: 'GPT-5.2-Chat（官方 id gpt-5.2-chat-latest）：pi-ai 1.2.0 目录记为推理模型，仅 Medium / XHigh 两档（off 以省略表达，非显式关闭），128K / 16,384 输出。2026-10 新增条目。',
+  },
+  {
     id: 'openai-chat',
     // Non-reasoning chat lines across generations: they take no
     // reasoning_effort at all (official model pages list no "Reasoning").
     // Official ids are the *-chat-latest snapshots; the bare -chat spellings
     // stay for gateways serving them. gpt-5-chat-latest was removed upstream
     // on 2026-07-23 and gpt-chat-latest has no model page anymore -- the
-    // patterns persist for compatibility only.
+    // patterns persist for compatibility only. ('gpt-5.2-chat' moved to its
+    // own reasoning entry above per pi-ai 1.2.0.)
     patterns: [
-      'gpt-5.1-chat-latest', 'gpt-5.2-chat-latest', 'gpt-5.3-chat-latest', 'gpt-5-chat-latest',
-      'gpt-chat-latest', 'gpt-5-chat', 'gpt-5.1-chat', 'gpt-5.2-chat', 'gpt-5.3-chat',
+      'gpt-5.1-chat-latest', 'gpt-5.3-chat-latest', 'gpt-5-chat-latest',
+      'gpt-chat-latest', 'gpt-5-chat', 'gpt-5.1-chat', 'gpt-5.3-chat',
     ],
     efforts: false,
     input: ['text', 'image'],
     contextWindow: 128_000,
     maxTokens: 16_384,
-    note: '-chat 系列（官方 id 为 gpt-5.x-chat-latest）为非推理聊天模型，不支持 effort 参数（勿勾思考档）；官方支持图片输入，128K / 16,384 输出。gpt-5-chat-latest 已于 2026-07-23 下架、gpt-chat-latest 已无官方页面（保留模式供网关）。',
+    note: '-chat 系列（官方 id 为 gpt-5.x-chat-latest）为非推理聊天模型，不支持 effort 参数（勿勾思考档）；官方支持图片输入，128K / 16,384 输出。gpt-5-chat-latest 已于 2026-07-23 下架、gpt-chat-latest 已无官方页面（保留模式供网关）。gpt-5.2-chat 另有推理条目。',
   },
   {
     id: 'openai-o',
@@ -489,19 +514,62 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     note: 'GPT-OSS 开源权重（Ollama/vLLM 常见）：reasoning effort Low / Medium / High，纯文本，131K 上下文 / 131K 输出。2026-09 复核：官方模型页现在写 Chat Completions = Not supported、无图片输入（默认 Low 来自官方 CLI，不是 API 页），因此这里不再声明 Off。',
   },
   {
+    id: 'openai-gpt-6',
+    // GPT-6 luna/sol/terra (2026, after astra): pi-ai 1.2.0 catalog carries
+    // the FULL ladder with an explicit 'none' off for luna/sol. astra keys
+    // its own entry above (its off is the omit-style null), and 6.1-sol's
+    // off is likewise omit-expressed there -- 'none' is not proven manually
+    // adjustable on it, so it stays in the astra entry's shape.
+    patterns: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-terra', 'gpt-6.1'],
+    efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+    compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
+    input: ['text', 'image'],
+    contextWindow: 272_000,
+    maxTokens: 128_000,
+    note: 'GPT-6 系（luna/sol/terra，2026-10 校准新增）：pi-ai 1.2.0 目录全档 None / Low / Medium / High / XHigh / Max，带图输入，272,000 上下文 / 128,000 输出。gpt-6-astra 见单独条目（裸 "gpt-6" 与 6.1-sol 由 astra 条目承接，off 以省略表达，"none" 未证实可手调）。',
+  },
+  {
     id: 'openai-gpt-6-astra',
     // Longest-pattern-wins keeps this ahead of the 5.x entries; 'astra' is the
     // only stable token an aggregator is likely to expose.
-    patterns: ['gpt-6-astra', 'gpt-6'],
+    patterns: ['gpt-6-astra', 'gpt-6', 'gpt-6.1-sol'],
     // Official reasoning guide: none returns HTTP 400 on this model, and the
-    // model page lists low/medium/high/xhigh/max. Official docs publish no
-    // default effort for it, so none is recorded rather than guessed.
+    // model page lists low/medium/high/xhigh/max. pi-ai 1.2.0 catalog adds
+    // minimal as present-null (omit-expressed) and keeps astra at 272,000.
+    // The bare 'gpt-6' stem lives here (not on the luna/sol/terra sibling)
+    // so gateways serving unversioned "gpt-6" keep the omit-style off that
+    // astra/6.1-sol actually use; 'gpt-6.1' likewise -- only 6.1-sol exists
+    // in the 1.2.0 catalog, and its off is omit-expressed like astra's.
     efforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
+    compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
+    input: ['text', 'image'],
+    contextWindow: 272_000,
+    maxTokens: 128_000,
+    note: 'GPT-6 Astra 档位：Low / Medium / High / XHigh / Max——**没有 None 档**（官方原文：设为 none 返回 HTTP 400），因此本条目不声明 Off。带图输入；2026-10 校准：上下文按 pi-ai 1.2.0 目录记 272,000（此前误记 1,050,000）。工具调用需走 Responses API。gpt-6 luna/sol/terra 见单独条目；裸 "gpt-6" 与 6.1-sol（off 以省略表达）由本条目承接。',
+  },
+  {
+    id: 'openai-gpt-daybreak',
+    // pi-ai 1.2.0 catalog: gpt-daybreak-blue-latest (1.05M) and -red-latest
+    // (400K) take the FULL modern ladder with an explicit 'none' off.
+    patterns: ['gpt-daybreak'],
+    efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
     compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
     input: ['text', 'image'],
     contextWindow: 1_050_000,
     maxTokens: 128_000,
-    note: 'GPT-6 Astra 档位：Low / Medium / High / XHigh / Max——**没有 None 档**（官方原文：设为 none 返回 HTTP 400），因此本条目不声明 Off。带图输入，1,050,000 上下文 / 128,000 输出；AI 官方默认档位未公布，故不填。工具调用需走 Responses API。',
+    note: 'GPT-Daybreak（blue-latest 1.05M / red-latest 400K，2026-10 新增）：pi-ai 1.2.0 目录全档 None / Low / Medium / High / XHigh / Max，带图输入 / 128,000 输出。',
+  },
+  {
+    id: 'openai-gpt-realtime',
+    // pi-ai 1.2.0 catalog: gpt-realtime-2.1 -- minimal joins the ladder as a
+    // real wire value (off stays omit-style), 128K in / 32K out.
+    patterns: ['gpt-realtime'],
+    efforts: { minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' },
+    compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
+    input: ['text', 'image'],
+    contextWindow: 128_000,
+    maxTokens: 32_000,
+    note: 'GPT-Realtime 2.1（2026-10 新增）：pi-ai 1.2.0 目录档位 Minimal / Low / Medium / High / XHigh（off 以省略表达），128,000 上下文 / 32,000 输出。',
   },
   {
     id: 'openai-gpt-5-6-cyber',
@@ -579,20 +647,19 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     note: 'GPT-4/3.5 代际：非推理模型，不支持 effort 参数（勿勾思考档）。gpt-4-turbo/4.1 起支持图片，见单独条目；新代请用 GPT-5 系（见 openai-chat/gpt-5.x 条目）。',
   },
   {
-    id: 'anthropic-claude-5',
-    // Claude 5th generation (fable/mythos/opus-5/sonnet-5, 2026): adaptive
-    // thinking with an effort ladder that adds xhigh and max; the fable and
-    // mythos entries think always-on, so no off level. Mythos Preview is
-    // split into its own entry: it takes max but NOT xhigh (official effort
-    // matrix), so the shared ladder's xhigh would be a 400.
-    patterns: ['claude-fable-5', 'claude-mythos-5', 'claude-opus-5', 'claude-sonnet-5'],
-    // Ladder per the official effort matrix (platform.claude.com
-    // docs/build-with-claude/effort). NOTE: Anthropic's own OpenAI-SDK
-    // compatibility layer IGNORES reasoning_effort (thinking is driven by
-    // its own param, on by default for Claude 5) -- the declaration bites
-    // on third-party gateways that map it; on the native
-    // anthropic-messages protocol, anthropicAdaptive pins the compat that
-    // makes pi-ai dispatch these as output_config.effort.
+    id: 'anthropic-claude-5-5',
+    // Claude 5.5 generation (2026-10): haiku/opus/sonnet-5-5 all take the
+    // FULL effort ladder per pi-ai 1.2.0's official catalog (off and
+    // minimal are present-null = omit-expressed, the five rungs dispatch as
+    // output_config.effort). Absorbs the turn-2 haiku-5.5 entry: pi-ai
+    // 1.2.0 names xhigh/max for the whole generation, the catalog size is
+    // 1M/128K (not the 200K/64K first read off ofox's aggregator listing),
+    // patterns cover the whole generation plus the bare aggregator
+    // spelling. ('claude-haiku-5-5' is NOT listed separately: loose
+    // normalization folds '-' and '.' identically, so the dotted spelling
+    // already keys the dash spelling -- listing both would trip the
+    // unique-normalized-pattern hygiene test.)
+    patterns: ['claude-haiku-5.5', 'claude-opus-5-5', 'claude-sonnet-5-5', 'haiku-5.5', 'claude-5-5'],
     efforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
     defaultEffort: 'high',
     // No thinkingFormat: pi-ai has no 'anthropic' member, and the
@@ -603,31 +670,58 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     input: ['text', 'image'],
     contextWindow: 1_000_000,
     maxTokens: 128_000,
-    note: 'Claude 5 代（Fable 5 / Mythos 5 / Opus 5 / Sonnet 5）档位：Low / Medium / High(默认) / XHigh / Max；Fable 5.1 与 Mythos 5.1 见单独条目，Mythos Preview 仅至 Max。1M 上下文 / 128K 输出（Batch 300K）。官方支持 PDF 输入。注意：Anthropic 官方 OpenAI 兼容层会忽略 effort 参数，声明在第三方网关映射时生效。',
+    note: 'Claude 5.5 代（Haiku 5.5 / Opus 5.5 / Sonnet 5.5）：pi-ai 1.2.0 官方目录全档 Low / Medium / High(默认) / XHigh / Max，自适应思考，1M 上下文 / 128K 输出。off/minimal 以省略表达（目录将两键记为 null，非显式关闭）。',
   },
   {
-    id: 'anthropic-claude-5-1',
-    // Ahead of the claude-5 entry, whose 'claude-fable-5' / 'claude-mythos-5'
-    // patterns are prefixes of these ids and would win the equal-length tie.
-    // Same ladder and default as the 5.0 generation per the official effort
-    // page; the meaningful difference is behavioural (these two are the
-    // models allowed to change effort mid-conversation), which this plugin
-    // does not declare per model.
-    patterns: ['claude-fable-5-1', 'claude-mythos-5-1'],
-    efforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
-    defaultEffort: 'high',
+    id: 'anthropic-claude-5',
+    // Claude 5th generation (fable/mythos-5/opus-5/sonnet-5, 2026): adaptive
+    // thinking. 2026-10 calibration against pi-ai 1.2.0's official catalog:
+    // low/medium/high were REMOVED from these models' effort maps (they
+    // remain on the 5.5 generation) -- fable-5 and opus-5 keep only
+    // xhigh/max (with an omit-expressed off), sonnet-5 keeps xhigh/max with
+    // no off at all. Mythos has no pi-ai entry; it stays matched here
+    // conservatively on the same-generation shape. Mythos Preview is split
+    // into its own entry below.
+    patterns: ['claude-fable-5', 'claude-mythos-5', 'claude-opus-5', 'claude-sonnet-5'],
+    // Ladder per pi-ai 1.2.0 (claude-fable-5 / claude-opus-5 /
+    // claude-sonnet-5). NOTE: Anthropic's own OpenAI-SDK compatibility
+    // layer IGNORES reasoning_effort (thinking is driven by its own param,
+    // on by default for Claude 5) -- the declaration bites on third-party
+    // gateways that map it; on the native anthropic-messages protocol,
+    // anthropicAdaptive pins the compat that makes pi-ai dispatch these as
+    // output_config.effort.
+    efforts: { xhigh: 'xhigh', max: 'max' },
+    // pi-ai 1.2.0 publishes no default rung for this generation; the old
+    // 'high' default was removed with the low/medium/high rungs themselves.
     compat: { supportsReasoningEffort: true },
     anthropicAdaptive: true,
     input: ['text', 'image'],
     contextWindow: 1_000_000,
     maxTokens: 128_000,
-    note: 'Claude Fable 5.1 / Mythos 5.1：官方档位 Low / Medium / High(默认) / XHigh / Max，自适应思考常开（不接受 enabled/disabled）。1M 上下文 / 128K 输出；这两型也是官方唯一允许会话中途改档的（需 beta header，本插件不涉及）。',
+    note: 'Claude 5 代（Fable 5 / Mythos 5 / Opus 5 / Sonnet 5）：2026-10 校准——pi-ai 1.2.0 官方目录已收紧为 XHigh / Max（low/medium/high 档已从该代 effort 目录移除；Fable 5 与 Opus 5 另接受以省略表达的 off，Sonnet 5 无 off）。1M 上下文 / 128K 输出（Batch 300K）。官方支持 PDF 输入。注意：Anthropic 官方 OpenAI 兼容层会忽略 effort 参数，声明在第三方网关映射时生效。',
+  },
+  {
+    id: 'anthropic-claude-5-1',
+    // Ahead of the claude-5 entry, whose 'claude-fable-5' / 'claude-mythos-5'
+    // patterns are prefixes of these ids and would win the equal-length tie.
+    // 2026-10 calibration: pi-ai 1.2.0 keeps fable-5-1 on the same tight
+    // xhigh/max map as fable-5 (plus mid-conversation effort support,
+    // which this plugin does not declare per model).
+    patterns: ['claude-fable-5-1', 'claude-mythos-5-1'],
+    efforts: { xhigh: 'xhigh', max: 'max' },
+    compat: { supportsReasoningEffort: true },
+    anthropicAdaptive: true,
+    input: ['text', 'image'],
+    contextWindow: 1_000_000,
+    maxTokens: 128_000,
+    note: 'Claude Fable 5.1 / Mythos 5.1：2026-10 校准——pi-ai 1.2.0 目录档位 XHigh / Max（off 以省略表达），自适应思考常开（不接受 enabled/disabled）。1M 上下文 / 128K 输出；Fable 5.1 支持会话中途改档（需 beta header，本插件不涉及）。',
   },
   {
     id: 'anthropic-claude-mythos-preview',
     // Official effort matrix: max is available, xhigh is NOT (the matrix's
     // xhigh list covers Fable 5 / Mythos 5 / Opus 5 / Opus 4.8 / Opus 4.7 /
-    // Sonnet 5 only).
+    // Sonnet 5 only). pi-ai 1.2.0 has no mythos entry at all; this entry
+    // keeps its doc-derived ladder unchanged.
     patterns: ['claude-mythos-preview'],
     efforts: { low: 'low', medium: 'medium', high: 'high', max: 'max' },
     // Anthropic's effort page: the API default is HIGH across the whole
@@ -638,35 +732,35 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     input: ['text', 'image'],
     contextWindow: 1_000_000,
     maxTokens: 128_000,
-    note: 'Claude Mythos Preview：官方档位 Low / Medium / High / Max（无 XHigh），1M 上下文。',
+    note: 'Claude Mythos Preview：官方档位 Low / Medium / High / Max（无 XHigh），1M 上下文。pi-ai 1.2.0 目录无 mythos 条目，本档位沿用官方 effort 矩阵。',
   },
   {
     id: 'anthropic-claude-opus-4-high',
     patterns: ['claude-opus-4-8', 'claude-opus-4-7'],
-    // Official effort page: Opus 4.7/4.8 take the full ladder including
-    // xhigh and max (xhigh is the recommended coding start on 4.7).
-    efforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
-    defaultEffort: 'high',
+    // 2026-10 calibration: pi-ai 1.2.0's catalog lists ONLY xhigh/max for
+    // opus-4-7/4-8 -- the low/medium/high rungs are gone from the official
+    // effort maps (xhigh remains the recommended coding start on 4.7).
+    efforts: { xhigh: 'xhigh', max: 'max' },
     compat: { supportsReasoningEffort: true },
     anthropicAdaptive: true,
     input: ['text', 'image'],
     contextWindow: 1_000_000,
     maxTokens: 128_000,
-    note: 'Claude Opus 4.7/4.8 档位：Low / Medium / High(默认) / XHigh / Max；xhigh 为官方推荐的编码起步档。1M 上下文。',
+    note: 'Claude Opus 4.7/4.8：2026-10 校准——pi-ai 1.2.0 官方目录档位仅 XHigh / Max（low/medium/high 已从该代目录移除；xhigh 为官方推荐的编码起步档）。1M 上下文。',
   },
   {
     id: 'anthropic-claude-4-6',
     patterns: ['claude-opus-4-6', 'claude-sonnet-4-6'],
-    // Official effort page: the 4.6 generation supports max but NOT xhigh
-    // ("some models that support max don't support xhigh").
-    efforts: { low: 'low', medium: 'medium', high: 'high', max: 'max' },
-    defaultEffort: 'high',
+    // 2026-10 calibration: pi-ai 1.2.0 narrows the 4.6 generation to a
+    // single rung -- max only (the official effort page's "some models that
+    // support max don't support xhigh" reading tightens further).
+    efforts: { max: 'max' },
     compat: { supportsReasoningEffort: true },
     anthropicAdaptive: true,
     input: ['text', 'image'],
     contextWindow: 1_000_000,
     maxTokens: 128_000,
-    note: 'Claude 4.6 代档位：Low / Medium / High / Max（无 XHigh——官方明言「支持 max 的部分型号不支持 xhigh」）。1M 上下文。',
+    note: 'Claude 4.6 代（Opus 4.6 / Sonnet 4.6）：2026-10 校准——pi-ai 1.2.0 官方目录仅剩 Max 一档（low/medium/high/xhigh 均已从目录移除）。1M 上下文。',
   },
   {
     id: 'anthropic-claude-opus-4-5',
@@ -687,18 +781,19 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     id: 'anthropic-claude',
     // Everything else in the Claude line: 3.x and the 4.5-generation
     // Sonnet/Haiku. Anthropic's official effort support list names exactly
-    // fable-5 / mythos-5 / mythos-preview / opus-5 / opus-4-8 / opus-4-7 /
-    // opus-4-6 / sonnet-5 / sonnet-4-6 / opus-4-5-20251101 -- none of the
-    // models matching this entry take the effort parameter (their thinking
-    // rides thinking.type), so a ladder here would be refused. `false` is
-    // the honest "no effort control" declaration, matching the openai-chat
-    // convention.
+    // the 5.5/5/5.1 generations plus opus-4-5/4-6/4-7/4-8/sonnet-4-6 -- none
+    // of the models matching this entry take the effort parameter (their
+    // thinking rides thinking.type), so a ladder here would be refused.
+    // `false` is the honest "no effort control" declaration, matching the
+    // openai-chat convention. (The 5.5 generation -- haiku/opus/sonnet-5-5,
+    // including aggregator spellings like 'haiku-5.5' -- keys its own
+    // strictly longer entry above.)
     patterns: ['claude'],
     efforts: false,
     input: ['text', 'image'],
     contextWindow: 200_000,
     maxTokens: 64_000,
-    note: 'Claude 3.x 与 Sonnet 4.5 / Haiku 4.5：官方 effort 参数不支持（仅 Fable/Mythos 5、Opus 5/4.6-4.8、Sonnet 5/4.6、Opus 4.5 支持），思考由 thinking.type 控制——勿勾思考档。参考容量 200K / 64K（Haiku 3.5 为纯文本，按需取消图片）。',
+    note: 'Claude 3.x 与 Sonnet 4.5 / Haiku 4.5：官方 effort 参数不支持（仅 5.5/5/5.1 代、Opus 4.5/4.6/4.7/4.8、Sonnet 4.6 支持），思考由 thinking.type 控制——勿勾思考档。参考容量 200K / 64K（Haiku 3.5 为纯文本，按需取消图片）。Haiku 5.5 及整个 5.5 代见上方 anthropic-claude-5-5 条目。',
   },
   {
     id: 'google-gemini',
@@ -715,27 +810,39 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     input: ['text', 'image'],
     contextWindow: 1_048_576,
     maxTokens: 65_536,
-    note: 'Gemini 通用安全档：Low / Medium / High（官方 OpenAI 兼容映射表另收 minimal：2.5 系映射为 1,024 预算、3.1 Flash-Lite/3 Flash 原生 minimal、3.1 Pro 落 low）。none 仅能关 2.5 非 Pro；2.5 Pro 与 3 代不可关；各型默认不一（flash-lite 默认关）。官方另收音频/视频/PDF。',
+    note: 'Gemini 通用安全档：Low / Medium / High（官方 OpenAI 兼容映射表另收 minimal：2.5 系映射为 1,024 预算、3.1 Flash-Lite/3 Flash 原生 minimal、3.1 Pro 落 low）。none 仅能关 2.5 非 Pro；2.5 Pro 与 3 代不可关；各型默认不一（flash-lite 默认关）。官方另收音频/视频/PDF。Gemma-4 见下条。',
+  },
+  {
+    id: 'google-gemma-4',
+    // 2026-10 calibration NEW entry: pi-ai 1.2.0 keys gemma-4-26b-a4b-it /
+    // gemma-4-31b-it with a THREE-slot map {off:null, minimal:'MINIMAL',
+    // high:'HIGH'} -- the Google native spelling for this open model goes
+    // upper-case enum style, and the medium/low rungs are ABSENT (they are
+    // not accepted). Vision per catalog; 262,144 in / 32,768 out.
+    patterns: ['gemma-4'],
+    efforts: { off: null, minimal: 'MINIMAL', high: 'HIGH' },
+    compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
+    input: ['text', 'image'],
+    contextWindow: 262_144,
+    maxTokens: 32_768,
+    note: 'Gemma 4（26b/31b-it）：三档 Minimal / High（档位线为官方大写枚举拼写），off 以省略表达；Low/Medium 不被接受。带图输入，262,144 / 32,768（2026-10 校准新增）。',
   },
   {
     id: 'xai-grok-4-7',
     // grok-4.7 shipped after the 2026-08 pass that read it as 404 upstream;
-    // that reading is retired here. xAI's own docs were unreachable for this
-    // pass, so every field below is a public-catalog reading rather than a
-    // first-party one: OpenRouter publishes the slug x-ai/grok-4.7 with
-    // reasoning_effort in its supported_parameters, and models.dev records
-    // the ladder as low/medium/high/xhigh -- the same four steps 4.6 takes,
-    // which is why the same declaration shape is reused. The default level
-    // and whether thinking can be closed are NOT established, so neither an
-    // `off` nor a defaultEffort is declared. Capacity follows the sources
-    // that agree (500K context); max output disagrees across catalogs
-    // (450K vs 500K), so it stays out.
+    // that reading is retired here. 2026-10 calibration: pi-ai 1.2.0 is
+    // now a first-party catalog entry -- the ladder
+    // off[omit]/low/medium/high/xhigh is confirmed (max stays ABSENT), and
+    // the earlier "xhigh unverified" hedge is retired. Capacity: 500K in /
+    // 500K out per the catalog, so the "max output disagrees across
+    // catalogs" note is resolved as 500,000.
     patterns: ['grok-4.7'],
     efforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' },
     compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
     input: ['text', 'image'],
     contextWindow: 500_000,
-    note: 'Grok 4.7（上游快照 grok-4.7-20260916）：档位 Low / Medium / High / XHigh——**取自公开目录**（OpenRouter 的 supported_parameters、models.dev 对 docs.x.ai 的转述），本次 xAI 官方文档站不可达、未能一手证实；默认档位与"能否关闭思考"同样未证实，故不声明 Off，也不写默认档。带图输入（目录记 text+image+file，PDF 存疑），500K 上下文；最大输出各目录给出 450K 与 500K 两种值，按"分歧即不写"处理。2026-08 那次"grok-4.7 不存在（官方 404）"的结论已随发布作废。',
+    maxTokens: 500_000,
+    note: 'Grok 4.7：档位 Low / Medium / High / XHigh，思考不可关闭（off 仅以省略表达）；带图输入，500K 上下文 / 500K 输出（2026-10 校准：pi-ai 1.2.0 官方目录确认档位与容量，"上游 404"与"档位未证实"两条旧记录作废）。grok-4.5 传 xhigh 被静默按 High 处理的说明见其条目。',
   },
   {
     id: 'xai-grok-high',
@@ -770,17 +877,18 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     // levels (none / low / medium / high) with a 1M context window; the
     // deprecated grok-4-fast/grok-4-1-fast/grok-4-0709 slugs redirect to
     // grok-4.3 at low/none. The old "no none for 4.3" reading of the docs
-    // was wrong and is fixed here.
+    // was wrong and is fixed here. 2026-10 calibration: pi-ai 1.2.0's
+    // catalog has NO xhigh for 4.3 (it joins at 4.6/4.7) and puts the
+    // output cap at 30,000 -- the xhigh rung from the earlier pass is
+    // retired.
     patterns: ['grok-4.3'],
-    // Official models page (docs.x.ai model JSON): supportedEfforts now
-    // spans none/low/medium/high/XHIGH with defaultEffort "low" -- xhigh
-    // joined the ladder after the 2026-08 pass, and low is the default.
-    efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' },
+    efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high' },
     defaultEffort: 'low',
     compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
     input: ['text', 'image'],
     contextWindow: 1_000_000,
-    note: 'Grok 4.3：官方四级 reasoning effort（None / Low / Medium / High），1M 上下文、带图输入；grok-4-fast 等旧 slug 2026-05-15 起自动重定向到本型号。',
+    maxTokens: 30_000,
+    note: 'Grok 4.3：官方四级 reasoning effort（None / Low(默认) / Medium / High），1M 上下文 / 30,000 输出（2026-10 校准：XHigh 档按 pi-ai 1.2.0 目录移除——它自 4.6 起才加入；带图输入）。grok-4-fast 等旧 slug 2026-05-15 起自动重定向到本型号。',
   },
   {
     id: 'xai-grok',
@@ -798,40 +906,61 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
   },
   {
     id: 'mistral-magistral',
-    // The native magistral line is a run-together thinking family with no
-    // reasoning_effort control of its own (its thinking is driven by
-    // prompt_mode / always-on), and Mistral marked the whole line
-    // deprecated on 2026-07-28 (phased out through mid-2026; reasoning now
-    // rides the generalist models). `false` is the honest "no effort
-    // control" declaration; gateways that happen to map an effort
-    // parameter onto magistral ids can be tuned by hand.
+    // 2026-10 calibration REVERSAL: pi-ai 1.2.0's official catalog keys
+    // magistral-medium-latest on the new mistral-conversations protocol
+    // WITH a two-state effort map (none/high, off spelled 'none') -- the
+    // earlier "no effort parameter / deprecated" reading is retired. The
+    // ladder is the same two-state shape the modern mistral-medium/small
+    // line takes; vision per the catalog; capacity 262,144 in / 16,384 out.
     patterns: ['magistral'],
-    efforts: false,
-    input: ['text'],
-    contextWindow: 32_768,
-    maxTokens: 32_768,
-    note: 'Magistral 原生思考线（无 effort 参数，为 prompt_mode 语义），官方已于 2026-07-28 声明弃用、逐步撤出；现役推理走 mistral-small-2603 / mistral-medium-3-5 的 reasoning_effort（见下条）。',
+    efforts: { off: 'none', high: 'high' },
+    // The catalog's no-parameter behaviour maps to the 'none' wire value.
+    defaultEffort: 'off',
+    compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
+    input: ['text', 'image'],
+    contextWindow: 262_144,
+    maxTokens: 16_384,
+    note: 'Magistral（magistral-medium-latest）：2026-10 校准——pi-ai 1.2.0 目录显示现役 magistral 走 mistral-conversations 协议并接受 effort（None / High 两档，默认 None），带图输入，262,144 / 16,384。早前"该线无 effort 参数且已弃用"的记录作废。',
   },
   {
     id: 'mistral-medium-3',
     // Official reasoning page + mistral-common request.py (the first-party
     // protocol enum) name the reasoning_effort models: values are exactly
-    // none/high. The API ids today are mistral-medium-3-5 (Medium 3.5's
-    // model page names the dotted spelling too) and mistral-small-2603
-    // (Mistral Small 4); mistral-small-latest is its alias. The dated
-    // "small-2506" builds are retiring and are NOT matched; the bare
-    // 'mistral-medium-3' stem was dropped so the 3.1 generation (no
-    // reasoning_effort) does not get the ladder.
+    // none/high. 2026-10 calibration adds pi-ai 1.2.0's catalog ids: the
+    // reasoning line now spans mistral-large-4 (1M/262K, vision),
+    // mistral-medium-2604 / mistral-medium-latest (262K/262K, vision) plus
+    // the earlier small-2603/small-latest pair -- all on the same
+    // two-state none/high map on the mistral-conversations protocol.
     // Normalization folds '.' and '-' to the same space, so the one dotted
     // spelling also keys the API id (mistral-medium-3-5).
-    patterns: ['mistral-medium-3.5', 'mistral-small-latest', 'mistral-small-2603'],
+    patterns: [
+      'mistral-medium-3.5', 'mistral-large-4', 'mistral-medium-2604',
+      'mistral-medium-latest', 'mistral-small-latest', 'mistral-small-2603',
+    ],
     efforts: { off: 'none', high: 'high' },
     // mistral-common's ModelSettings defaults reasoning_effort to None --
     // the endpoint's no-parameter behaviour IS the none/off level.
     defaultEffort: 'off',
     compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
     input: ['text', 'image'],
-    note: 'Mistral 现役推理档：None / High——官方 reasoning_effort 枚举（mistral-common 协议库）即 none/high；mistral-small-2603（Small 4）与 mistral-medium-3-5 经它控制，Medium 3.5 带视觉。容量未在官方目录页单列，不提供。',
+    note: 'Mistral 现役推理档（2026-10 扩充）：None / High 两档，官方 reasoning_effort 枚举即 none/high；现役型号 mistral-large-4（1M）、mistral-medium-3.5（2604/latest）、mistral-small-2603（Small 4）经它控制，均带视觉。容量：large-4 262,144 输出、medium 262,144 输出、small 256,000 输出（上下文均 262,144）。非推理旧款见下条。',
+  },
+  {
+    id: 'mistral-legacy',
+    // 2026-10 calibration: pi-ai 1.2.0 keys the NON-reasoning mistral line
+    // (r=false, no tlm) separately from the two-state reasoning line above.
+    // These slugs take no effort parameter at all; matching them here keeps
+    // auto-adapt from handing them the reasoning ladder via the generic
+    // 'mistral' stem. devstral/ministral/codestral/pixtral/voxtral carry
+    // the stem too and are covered by the same false declaration.
+    patterns: [
+      'mistral-large-2411', 'mistral-large-latest', 'mistral-large-2512',
+      'mistral-medium-2505', 'mistral-medium-2508', 'mistral-small-2506',
+      'mistral-nemo', 'devstral', 'ministral', 'codestral', 'pixtral', 'voxtral',
+    ],
+    efforts: false,
+    input: ['text', 'image'],
+    note: 'Mistral 非推理线（2026-10 新增条目）：large-2411/2512/latest、medium-2505/2508、small-2506、nemo 及 devstral/ministral/codestral/pixtral/voxtral 等专用线均不接受 effort 参数（勿勾思考档）。多数现役款带视觉（large-2411 为纯文本）。',
   },
   {
     id: 'qwen-vision',
@@ -1045,6 +1174,23 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     note: 'Kimi K2.7 Code（含高速版）：始终思考——thinking.type 仅接受 enabled（传 disabled 报错），无 Off 档；带视觉，256K。',
   },
   {
+    id: 'kimi-for-coding',
+    // 2026-10 calibration NEW entry: pi-ai 1.2.0 keys kimi-for-coding on
+    // anthropic-messages with a four-rung map (off omit-expressed, then
+    // low/high/max) plus forceAdaptiveThinking -- Moonshot's coding
+    // endpoint speaks the Anthropic shape, not the deepseek thinking.type
+    // switch the K2 line uses. -highspeed twin has NO tlm (no effort
+    // control); 1M in / 32,768 out, vision.
+    patterns: ['kimi-for-coding'],
+    efforts: { low: 'low', high: 'high', max: 'max' },
+    compat: { supportsReasoningEffort: true },
+    anthropicAdaptive: true,
+    input: ['text', 'image'],
+    contextWindow: 1_048_576,
+    maxTokens: 32_768,
+    note: 'Kimi for Coding：Moonshot 编码专线走 anthropic-messages 协议、自适应思考，档位 Low / High / Max（off 以省略表达）；带图输入，1M 上下文 / 32,768 输出。高速版（-highspeed）无 effort 控件（2026-10 校准新增）。',
+  },
+  {
     id: 'kimi-moonshot-v1-vision',
     // Legacy Moonshot V1 vision variants (official model list): plain
     // generation models with no thinking control, but they DO accept images
@@ -1160,17 +1306,34 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     note: '豆包档位：Off / Low / Medium / High——effort 阶梯仍是社区证据、官方 Ark 文档明列的为 thinking.type 开关（2026-08-24 复核仍未见到 effort 官方明文）。seed 代收图（1.5-pro 例外）。',
   },
   {
+    id: 'minimax-m2',
+    // 2026-10 calibration NEW entry: pi-ai 1.2.0 keys MiniMax-M2.5 (and the
+    // M2 line) with NO thinkingLevelMap and supportsReasoningEffort:false
+    // on the anthropic-messages protocol -- unlike M3 below, the M2
+    // generation predates the thinking parameter entirely. `false` keeps
+    // auto-adapt from handing it the M3 declaration. Text-only;
+    // 204,800 in / 131,072 out.
+    patterns: ['minimax-m2'],
+    efforts: false,
+    input: ['text'],
+    contextWindow: 204_800,
+    maxTokens: 131_072,
+    note: 'MiniMax-M2 / M2.5（含 -highspeed）：无思考控件、无 effort 参数（M3 才引入 thinking 参数），纯文本，204,800 / 131,072（2026-10 校准新增；M3 见下条）。',
+  },
+  {
     id: 'minimax-m3',
     // Official M3 README: a thinking parameter with enabled / adaptive /
     // disabled -- NO reasoning_effort ladder. That is exactly the
     // deepseek-shaped toggle, so the kimi-style declaration fits; "adaptive"
     // is not expressible in the level vocabulary and defaults apply.
+    // 2026-10 calibration adds the catalog's 512,000 output cap.
     patterns: ['minimax-m3'],
     efforts: { off: null, high: 'high' },
     compat: { thinkingFormat: 'deepseek' },
     input: ['text', 'image'],
     contextWindow: 1_048_576,
-    note: 'MiniMax-M3：官方 thinking 参数 enabled/adaptive/disabled（无 effort 档），开=High、关=disabled；原生多模态（图/视频，核心词表仅含图），1M 上下文。',
+    maxTokens: 512_000,
+    note: 'MiniMax-M3：官方 thinking 参数 enabled/adaptive/disabled（无 effort 档），开=High、关=disabled；原生多模态（图/视频，核心词表仅含图），1M 上下文 / 512,000 输出（2026-10 校准补容量）。',
   },
   {
     id: 'mimo-v2-6',
@@ -1221,6 +1384,65 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     input: ['text'],
     contextWindow: 131_072,
     note: '百度千帆 ERNIE 系：官方 OpenAI 兼容接口无 reasoning_effort 参数——思考由模型变体决定（-Thinking 系列始终思考、普通系列不思考），勿勾思考档。ERNIE 4.5 Turbo VL 支持图片，按需手勾；参考容量取 Turbo 128K 档。',
+  },
+  {
+    id: 'fireworks-ember',
+    // 2026-10 calibration NEW entry: Fireworks' ember-1 keys on
+    // anthropic-messages in pi-ai 1.2.0 with a five-rung map (off spelled
+    // 'none') plus forceAdaptiveThinking/allowEmptySignature -- a relay
+    // model that genuinely dispatches output_config.effort. Vision;
+    // 1,048,576 in / 131,072 out.
+    patterns: ['ember-1'],
+    efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'max' },
+    compat: { supportsReasoningEffort: true },
+    anthropicAdaptive: true,
+    input: ['text', 'image'],
+    contextWindow: 1_048_576,
+    maxTokens: 131_072,
+    note: 'Fireworks ember-1：anthropic-messages 协议自适应思考，档位 None(关) / Low / Medium / High / Max（off 显式 none 拼写）；带图输入，1M 上下文 / 131,072 输出（2026-10 校准新增）。',
+  },
+  {
+    id: 'thinkingmachines-inkling',
+    // 2026-10 calibration NEW entry: pi-ai 1.2.0 keys inkling (Thinking
+    // Machines) with the FULL seven-rung ladder incl. explicit max, vision,
+    // 524,288 in / 131,072 out. On together.ai the relay exposes
+    // supportsReasoningEffort:false -- the ladder below still keys the
+    // model name first; relays that forward it accept the rungs.
+    patterns: ['inkling'],
+    efforts: {
+      off: 'none', minimal: 'minimal', low: 'low', medium: 'medium',
+      high: 'high', xhigh: 'xhigh', max: 'max',
+    },
+    defaultEffort: 'medium',
+    compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
+    input: ['text', 'image'],
+    contextWindow: 524_288,
+    maxTokens: 131_072,
+    note: 'Thinking Machines Inkling：全档 Minimal / Low / Medium(默认) / High / XHigh / Max，off 显式 none；带图输入，512K 上下文 / 131,072 输出（2026-10 校准新增；together 中继侧 effort 参数未开放，需支持方转发）。',
+  },
+  {
+    id: 'antling-ring',
+    // 2026-10 calibration NEW entry: Ant Ling's Ring-2.6-1T takes a
+    // two-rung map (high/xhigh) with off omit-expressed; Ling-2.6(-flash)
+    // is r=false (non-reasoning) and keys the second entry. 262,144 in /
+    // 65,536 out per pi-ai 1.2.0.
+    patterns: ['ring-2.6'],
+    efforts: { high: 'high', xhigh: 'xhigh' },
+    compat: { thinkingFormat: 'openai', supportsReasoningEffort: true },
+    input: ['text'],
+    contextWindow: 262_144,
+    maxTokens: 65_536,
+    note: '蚂蚁 Ling Ring-2.6-1T：档位 High / XHigh（off 以省略表达）；262,144 / 65,536（2026-10 校准新增）。',
+  },
+  {
+    id: 'antling-ling',
+    // 2026-10 calibration NEW entry: Ling-2.6-1T / Ling-2.6-flash are
+    // non-reasoning (r=false, no tlm in pi-ai 1.2.0) -- declared false so
+    // auto-adapt does not hand them the Ring ladder.
+    patterns: ['ling-2.6'],
+    efforts: false,
+    input: ['text'],
+    note: '蚂蚁 Ling-2.6（含 -flash）：非思考模型，无 effort 控件（2026-10 校准新增；Ring-2.6 思考线见上条）。',
   },
 ]
 

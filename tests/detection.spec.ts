@@ -204,4 +204,27 @@ describe('Anthropic capabilities disclosures (kernel discovery shape)', () => {
     expect(s.source).toBeNull()
     expect(s.input).toEqual(['image'])
   })
+
+  it('does not let a thinking-toggle refusal mask an effort-ladder yes (haiku-5.5 on aggregator listings)', () => {
+    // The always-on adaptive shape: the model takes the effort parameter but
+    // has no thinking toggle. Reading the slots in series answered
+    // thinking.supported=false first and reported an outright refusal -- the
+    // endpoint signal then outranked the knowledge base and auto-adapt
+    // declared "no effort control" for a model that accepts one.
+    const e = analyzeListingEntry({
+      id: 'claude-haiku-5.5',
+      capabilities: { thinking: { supported: false }, effort: { supported: true } },
+    })
+    expect(e.reasoning).toBe(true)
+    expect(e.source).toBe('capabilities.effort.supported')
+    // Both slots negative is a real refusal; a lone refusal keeps its slot.
+    expect(analyzeListingEntry({
+      capabilities: { thinking: { supported: false }, effort: { supported: false } },
+    }).reasoning).toBe(false)
+    expect(analyzeListingEntry({ capabilities: { effort: { supported: false } } }).source).toBe('capabilities.effort.supported')
+    // A positive thinking disclosure still wins over a negative effort one.
+    expect(analyzeListingEntry({
+      capabilities: { thinking: { supported: true }, effort: { supported: false } },
+    }).source).toBe('capabilities.thinking.supported')
+  })
 })
