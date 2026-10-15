@@ -948,7 +948,12 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     // variant the 5.3 ladder (low/high/max). Native multimodal (320B), which
     // the text-only glm-5.3 entry must NOT claim — hence this separate entry;
     // the longer pattern wins over plain 'glm-5.3'.
-    patterns: ['glm-5.3-flash'],
+    // 'glm-5.3-flashx' is the same model under a relay spelling (ofox lists
+    // 'z-ai/glm-5.3-flashx' named 'GLM-5.3-FlashX'). It must be listed
+    // explicitly: boundary matching rejects the bare 'glm 5 3 flash' needle
+    // there because the next character is the alnum 'x', and the shorter
+    // 'glm-5.3' would then claim the id as the text-only model.
+    patterns: ['glm-5.3-flash', 'glm-5.3-flashx'],
     efforts: { low: 'low', high: 'high', max: 'max' },
     defaultEffort: 'max',
     compat: { thinkingFormat: 'zai', supportsReasoningEffort: true },

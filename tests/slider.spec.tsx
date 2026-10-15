@@ -277,6 +277,32 @@ describe('ComposerSlider model picker', () => {
     expect(badges('Qwen Plus')).toEqual(['tagThinking'])
     root.unmount()
   })
+
+  it('badges a vision model the catalog row does not describe from the knowledge base', async () => {
+    // The Host's catalog rows carry no `input` (id/name/reasoning only), so for
+    // a relay's spelling the eye badge rests on the knowledge base alone. The
+    // trailing 'x' of 'GLM-5.3-FlashX' is an alnum neighbour that blocks the
+    // bare flash needle, and the shorter 'glm-5.3' would read the model as
+    // text-only: the failure the user sees as a missing icon.
+    const { directory } = fixture({
+      current: { provider: 'aliyun', model: 'z-ai/glm-5.3-flashx', reasoningEffort: 'max' },
+      groups: onlyModel({
+        id: 'z-ai/glm-5.3-flashx',
+        name: 'GLM-5.3-FlashX',
+        reasoning: { defaultEffort: 'max', efforts: [
+          { id: 'low', name: 'Low' },
+          { id: 'high', name: 'High' },
+          { id: 'max', name: 'Max' },
+        ] },
+      }),
+    })
+    const { root, container } = await mount(directory)
+    click(rows(container)[0])
+    await vi.waitFor(() => expect(container.querySelector('.bre-panel-models')).not.toBeNull())
+    const option = optionNamed(modelOptions(container), 'GLM-5.3-FlashX')
+    expect(Array.from(option?.querySelectorAll('.bre-tag') ?? []).map(el => el.getAttribute('title'))).toEqual(['tagVision', 'tagThinking'])
+    root.unmount()
+  })
 })
 
 describe('ComposerSlider commit', () => {

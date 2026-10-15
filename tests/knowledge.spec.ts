@@ -72,6 +72,12 @@ describe('matchKnowledgeBase', () => {
     // refines, so the family entry never overrides it (longest-boundary-hit
     // wins regardless of entry order).
     expect(matchKnowledgeBase('glm-5.3-flash')?.id).toBe('glm-5-3-flash')
+    // The relay spelling with the concatenated 'x' (ofox: 'z-ai/glm-5.3-flashx'
+    // named 'GLM-5.3-FlashX'): the trailing 'x' is an alnum neighbour, so the
+    // bare 'glm 5 3 flash' needle fails its boundary check and the shorter
+    // 'glm-5.3' would claim the id as the text-only model.
+    expect(matchKnowledgeBase('z-ai/glm-5.3-flashx')?.id).toBe('glm-5-3-flash')
+    expect(matchKnowledgeBase('glm-5.3-flashx')?.input).toEqual(['text', 'image'])
     expect(matchKnowledgeBase('glm-5.3')?.id).toBe('glm-5-3')
     expect(matchKnowledgeBase('qwen3.8-27b')?.id).toBe('qwen-3-8-27b')
     // The org-qualified spelling (Qwen/Qwen3.8-Flash-Next) must still land
