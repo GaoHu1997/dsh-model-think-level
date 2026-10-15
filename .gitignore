@@ -18,12 +18,20 @@ Thumbs.db
 # Local tooling state
 .reasonix/
 
+# Deploy backups: lib/ snapshots taken before swapping the installed bundle
+# (timestamped lib-YYYYMMDD-HHMMSS/ directories) — local evidence, never shipped.
+.deploy-backup/
+
 # Scratch release notes / packed artifacts working area
 .tmp-rel/
 
 # Scratch workspace: throwaway probes and the app.asar entries they extract
 # (the official Models-page client bundle) — evidence kept locally, never shipped.
 .tmp/
+
+# Loose scratch files at the workspace root: throwaway probes, saved test runs,
+# recon notes. The .tmp prefix is the working convention ("delete me freely").
+.tmp-*
 
 # Fetched official-document snapshots used to re-verify the knowledge base.
 # Kept in the workspace as evidence, never released: the third-party files in
