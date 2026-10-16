@@ -3,7 +3,7 @@
 # without its release.
 #
 # Publishing is guarded the way dsh-git-branch learned to: an empty or
-# truncated NPM_TOKEN fails loudly before any build, and a `pnpm whoami`
+# truncated NPM_TOKEN fails loudly before publishing, and an `npm whoami`
 # preflight distinguishes a rejected credential from a missing package, so a
 # 404 after auth is never misread as a permission problem.
 #
@@ -35,6 +35,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run check:package
       - name: Guard the publish credential
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

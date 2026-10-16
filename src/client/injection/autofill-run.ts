@@ -23,6 +23,8 @@ export interface IdleAutofillDeps {
 export interface IdleAutofill {
   /** Run the complement; fire-and-forget on the injector's idle pass. */
   run: () => void
+  /** Drop the host-switch snapshot; the next idle run reads it again. */
+  invalidate: () => void
 }
 
 /**
@@ -32,30 +34,38 @@ export interface IdleAutofill {
  */
 export function createIdleAutofill(deps: IdleAutofillDeps): IdleAutofill {
   let autofillSwitches: Promise<{ autofill: boolean; modalityAutofill: boolean }> | undefined
+  let generation = 0
 
   /**
-   * The host's autofill switches, read once. A `dsh.client` declaration carries
-   * no plugin config, so a deployment configured `autofill: false` would
-   * otherwise still be written to from the page. An unreachable or older host
-   * keeps the documented defaults rather than silently disabling the feature.
+   * Cache successful host-switch reads until refresh. A `dsh.client`
+   * declaration carries no plugin config, so a deployment configured
+   * `autofill: false` would otherwise still be written to from the page.
+   * An unreachable or older host keeps the documented defaults for this run,
+   * but a later run retries instead of retaining a permissive failure forever.
    */
   const autofillSwitchesOf = (): Promise<{ autofill: boolean; modalityAutofill: boolean }> => {
-    autofillSwitches ??= (async () => {
-      const fallback = { autofill: true, modalityAutofill: true }
+    if (autofillSwitches !== undefined) return autofillSwitches
+    const request = (async () => {
       try {
         const response = await fetch(AUTOFILL_CONFIG_PATH, { method: 'GET' })
-        if (!response.ok) return fallback
+        if (!response.ok) return undefined
         const body = (await response.json()) as { ok?: boolean; data?: { autofill?: unknown; modalityAutofill?: unknown } }
-        if (body?.ok !== true) return fallback
+        if (body?.ok !== true) return undefined
         return {
           autofill: body.data?.autofill !== false,
           modalityAutofill: body.data?.modalityAutofill !== false,
         }
       } catch {
-        return fallback
+        return undefined
       }
-    })()
-    return autofillSwitches
+    })().then((switches) => {
+      // An older failed read must not clear the replacement request created
+      // after refresh. Successful stale reads never write the cache either.
+      if (switches === undefined && autofillSwitches === request) autofillSwitches = undefined
+      return switches ?? { autofill: true, modalityAutofill: true }
+    })
+    autofillSwitches = request
+    return request
   }
 
   /**
@@ -64,16 +74,17 @@ export function createIdleAutofill(deps: IdleAutofillDeps): IdleAutofill {
    * documents). Runs on the idle pass only.
    */
   const runIdleAutofill = async (): Promise<void> => {
+    const runGeneration = generation
     try {
       const switches = await autofillSwitchesOf()
-      if (!switches.autofill) return
+      if (runGeneration !== generation || !switches.autofill) return
       // Fresh: the scope mirror folds a just-settled write in asynchronously,
       // so reading it here would fence this fill on a superseded revision and
       // manufacture a `settings/conflict` (the same reason a conflict retry
       // re-reads the wire).
       const join = await describeNamespace(deps.api, { fresh: true })
       const namespace = join.namespace
-      if (namespace === undefined || join.writable !== true) return
+      if (runGeneration !== generation || namespace === undefined || join.writable !== true) return
       const userProviders = userProvidersOf(namespace)
       if (userProviders === undefined) return
       const patch = buildAutofillPatch(
@@ -98,5 +109,11 @@ export function createIdleAutofill(deps: IdleAutofillDeps): IdleAutofill {
     }
   }
 
-  return { run: () => { void runIdleAutofill() } }
+  return {
+    run: () => { void runIdleAutofill() },
+    invalidate: () => {
+      generation += 1
+      autofillSwitches = undefined
+    },
+  }
 }

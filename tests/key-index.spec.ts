@@ -4,10 +4,8 @@
  * This file is the only place the plugin keeps key METADATA (references and
  * labels — never a value), and it is written by the host on every key operation
  * while the official page may be writing the provider profile next to it. Two
- * properties therefore matter more than the shape: a read never throws (a
- * manager that cannot open is worse than one that opens empty, because the
- * enabled reference is merged in from the profile anyway), and a write is atomic
- * (a half-written index would silently lose keys the user still has).
+ * properties therefore matter more than the shape: an existing unreadable or
+ * malformed index must fail closed, and a write must be atomic.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -59,20 +57,27 @@ describe('readKeyIndex', () => {
     expect(readKeyIndex(fileOf())).toEqual({ version: 1, providers: {} })
   })
 
-  it('opens empty on malformed content', () => {
+  it('refuses malformed content without replacing it during an update', () => {
     writeKeyIndex(emptyKeyIndex(), fileOf())
 
-    for (const payload of ['{ not json', '"a string"', JSON.stringify({ version: 1 }), '[]', 'null']) {
+    for (const payload of ['{ not json', '"a string"', JSON.stringify({ version: 1 }), '[]', 'null',
+      '{"providers":[]}', '{"providers":{"route":[{"bad":"entry"}]}}']) {
       writeFileSync(fileOf(), payload, 'utf8')
-      expect(readKeyIndex(fileOf())).toEqual(emptyKeyIndex())
+      expect(() => readKeyIndex(fileOf())).toThrow()
+      expect(() => updateKeyIndex(document => withKeyEntry(document, 'route', 'NEW'), fileOf())).toThrow()
+      expect(readFileSync(fileOf(), 'utf8')).toBe(payload)
     }
   })
 
-  it('opens empty when the path is not readable as a file at all', () => {
-    // A directory where the file should be: readFileSync throws, and the
-    // manager opens empty rather than failing to open.
+  it('throws when the path is not readable as a file', () => {
     mkdirSync(fileOf(), { recursive: true })
-    expect(readKeyIndex(fileOf())).toEqual(emptyKeyIndex())
+    expect(() => readKeyIndex(fileOf())).toThrow()
+  })
+
+  it('retains normalization of valid unversioned indexes', () => {
+    writeKeyIndex(emptyKeyIndex(), fileOf())
+    writeFileSync(fileOf(), '{"providers":{"route":[{"ref":"A","alias":" main "},{"ref":"A"}]}}')
+    expect(readKeyIndex(fileOf())).toEqual({ version: 1, providers: { route: [{ ref: 'A', alias: 'main' }] } })
   })
 })
 

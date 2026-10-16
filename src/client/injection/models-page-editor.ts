@@ -218,6 +218,8 @@ export interface EditorMountProps {
 
 /** Mutable scan state kept across reconcile invocations. */
 export interface ScanState {
+  /** The owning page was torn down; late reads must not mount new roots. */
+  disposed: boolean
   /** Currently mounted editors, keyed by their container element. */
   mounted: Map<HTMLElement, { editor: MountedEditor; props: EditorMountProps }>
   /** The last describe promise, folded so scans never stack reads. */
@@ -501,6 +503,7 @@ export function flushOnUnload(state: ScanState, deps: InjectorDeps): void {
 
 export function createScanState(): ScanState {
   const state: ScanState = {
+    disposed: false,
     mounted: new Map(),
     describePromise: undefined,
     pending: new Map(),
@@ -1079,15 +1082,22 @@ function disclosureTriggerOf(row: HTMLElement, capacityLabels: readonly string[]
     .find(button => capacityLabels.some(label => (button.getAttribute('aria-label') ?? '').startsWith(label)))
 }
 
-/** Wait for the browser's next frame, so a host that commits a click's render
- * asynchronously has painted its disclosure before the DOM is read again. */
+/** Wait for a render, with a timer bound for tabs that suspend animation frames. */
 function nextFrame(): Promise<void> {
   return new Promise<void>(resolve => {
     if (typeof window.requestAnimationFrame !== 'function') {
       resolve()
       return
     }
-    window.requestAnimationFrame(() => resolve())
+    let frame: number | undefined
+    const finish = (): void => {
+      window.clearTimeout(timer)
+      if (frame !== undefined) window.cancelAnimationFrame(frame)
+      resolve()
+    }
+    // One completion owns both handles, so neither winner leaves work behind.
+    const timer = window.setTimeout(finish, 100)
+    frame = window.requestAnimationFrame(finish)
   })
 }
 
@@ -1241,7 +1251,7 @@ function seatEmptyCatalog(
   join: SettingsJoin,
   labels: HostLabels,
 ): void {
-  if (!root.isConnected) return
+  if (state.disposed || !root.isConnected) return
   if (officialCardOf(root) === undefined) return
   const stillEmpty = !Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
     .some(button => labels.capacity.some(label => (button.getAttribute('aria-label') ?? '').startsWith(label)))
@@ -1848,6 +1858,12 @@ interface RepinWindow {
 
 /** The window running on each scroll host, so at most one ever fights the anchoring. */
 const REPINS = new WeakMap<HTMLElement, RepinWindow>()
+const LIVE_REPINS = new Set<RepinWindow>()
+
+/** Restore anchoring and remove every live re-pin window's frame and listeners. */
+export function releaseModelListRepins(): void {
+  for (const pin of Array.from(LIVE_REPINS)) pin.release()
+}
 
 /**
  * How long each source of height change keeps its card pinned.
@@ -1994,6 +2010,7 @@ function pinCardTop(card: HTMLElement, windowMs: number): void {
   // called `window` would shadow the global the frame APIs come from.
   const pin: RepinWindow = { deadline: now + windowMs, startedAt: now, frame: undefined, release: () => {} }
   const release = (): void => {
+    if (!LIVE_REPINS.delete(pin)) return
     if (pin.frame !== undefined) {
       window.cancelAnimationFrame(pin.frame)
       pin.frame = undefined
@@ -2013,6 +2030,7 @@ function pinCardTop(card: HTMLElement, windowMs: number): void {
   }
   pin.release = release
   REPINS.set(host, pin)
+  LIVE_REPINS.add(pin)
   document.addEventListener('wheel', onUserInput, { capture: true, passive: true })
   document.addEventListener('touchstart', onUserInput, { capture: true, passive: true })
   document.addEventListener('pointerdown', onUserInput, { capture: true })
@@ -2566,7 +2584,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // (chat streaming, typing anywhere) fire while no model row exists at
   // all. One prefix query per locale answers "is the Models page here?" —
   // when it is not and nothing is mounted, the scan costs nothing more.
-  if (!root.isConnected) return
+  if (state.disposed || !root.isConnected) return
   // One label read per scan, taken before the cheap DOM gate below: the gate
   // itself matches on them, and reading lazily is what keeps a language switch
   // in step with the page (the labels the host renders change with it).
@@ -2657,7 +2675,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // stale.
   state.describePromise ??= deps.describeNamespace()
   const run = (join: SettingsJoin): void => {
-    if (!root.isConnected) return
+    if (state.disposed || !root.isConnected) return
     const namespace = join.namespace
     const providers = providersOf(namespace)
 

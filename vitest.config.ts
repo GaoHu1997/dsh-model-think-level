@@ -5,8 +5,7 @@ export default defineConfig({
     environment: 'node',
     setupFiles: ['tests/setup.ts'],
     include: ['tests/**/*.spec.{ts,tsx}'],
-    coverage: {
-      reporter: ['text', 'html'],
-    },
+    // DOM-heavy suites can exhaust memory when every logical CPU gets a worker.
+    maxWorkers: 4,
   },
 })

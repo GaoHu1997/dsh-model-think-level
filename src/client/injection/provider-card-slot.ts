@@ -85,10 +85,13 @@ function dismissCard(card: HTMLElement | null): void {
  */
 export function ProviderCardSlot({ provider, api, t }: ProviderCardSlotProps): ReactNode {
   const host = useRef<HTMLDivElement | null>(null)
+  const route = provider?.provider
   // The card is read at press time, not captured: the row a slot mounts in is
   // the section's to re-render, and the editor itself holds no DOM knowledge.
   const dismiss = useCallback((): void => { dismissCard(editorCardOf(host.current)) }, [])
 
+  // An occurrence can acquire its route after its first render, or lose it
+  // and mount a new wrapper later. Rebind whenever that route changes.
   useEffect(() => {
     const wrapper = host.current
     // No card row around us (a bare render) means no card state to observe:
@@ -131,9 +134,8 @@ export function ProviderCardSlot({ provider, api, t }: ProviderCardSlotProps): R
     return () => {
       observer.disconnect()
     }
-  }, [])
+  }, [route])
 
-  const route = provider?.provider
   // A card with no resolvable route is not this section's business: render
   // nothing rather than an editor that could not address a settings key.
   if (typeof route !== 'string' || route.length === 0) return null

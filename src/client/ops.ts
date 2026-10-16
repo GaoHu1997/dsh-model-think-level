@@ -482,10 +482,7 @@ function mergeRowIntent(
       // declaration edit. A key this write omits is left exactly as stored.
       const stored = isRecord(model['compat']) ? (model['compat'] as Record<string, unknown>) : {}
       const merged: Record<string, unknown> = { ...stored, ...(compat ?? {}) }
-      if (Object.keys(stored).length > 0 || Object.keys(merged).length > 0) {
-        if (Object.keys(merged).length === 0) delete copy['compat']
-        else copy['compat'] = merged
-      }
+      if (Object.keys(merged).length > 0) copy['compat'] = merged
     }
   }
   // The modality part rides the same mutate. An omitted intent touches nothing

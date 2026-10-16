@@ -263,6 +263,32 @@ describe('staged declaration vs host autofill', () => {
 })
 
 describe('review findings (staged flush vs the autofilled compat block)', () => {
+  it.each([
+    { api: 'openai-completions', compat: { thinkingTokenBudgetField: 'thinking_budget', vllmPriority: 5, supportsStore: true } },
+    { api: 'openai-responses', compat: { supportsMaxOutputTokens: false, supportsStore: true } },
+  ])('preserves retired and manual compat fields through a held $api editor write', async ({ api, compat }) => {
+    const host = makeHost()
+    const deps = makeDeps(host)
+    const state = createScanState()
+    commitProvider(host, { id: MODEL, reasoningEfforts: { low: 'low', high: 'high' }, compat })
+    const profile = host.doc[ROUTE] as Record<string, unknown>
+    profile['api'] = api
+    await reopenEditCard(deps, state)
+    const editor = deps.editors.at(-1)?.props
+    expect(editor).toBeDefined()
+    const userEfforts = { low: 'low', medium: 'medium', high: 'high' }
+    await editor!.api.writeEfforts(ROUTE, MODEL, userEfforts, undefined, ['text', 'image'])
+    // The official card remains open, so the write must pass through its held
+    // ledger before the real idle flush merges it with the latest stored row.
+    expect(host.mutate).not.toHaveBeenCalled()
+    await closeCard(deps, state)
+    const row = (host.doc[ROUTE] as { models: Record<string, unknown>[] }).models[0]
+    expect(row['reasoningEfforts']).toEqual(userEfforts)
+    expect(row['input']).toEqual(['text', 'image'])
+    expect(row['compat']).toEqual(compat)
+    expect(state.queued.size).toBe(0)
+  })
+
   it('never lets a stale staging override a row the user disabled reasoning on', async () => {
     // The ladder becomes the boolean `false` once the user disables reasoning;
     // the provenance marker must not survive that, or a stale staging would be

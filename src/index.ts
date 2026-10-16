@@ -226,6 +226,30 @@ async function forgetCredential(credentials: CredentialsService | undefined, ref
   }
 }
 
+/** A host dependency failed to answer a read; never report this as absence. */
+class HostReadError extends Error {}
+
+async function resolveCredential(credentials: CredentialsService | undefined, ref: string): Promise<string | undefined> {
+  if (credentials === undefined || typeof credentials.resolve !== 'function') {
+    throw new HostReadError('the credential store is unavailable')
+  }
+  let hit: unknown
+  try {
+    hit = await credentials.resolve(ref)
+  } catch {
+    throw new HostReadError('the credential store could not read the reference')
+  }
+  if (isRefusal(hit) || (hit !== undefined && !isRecord(hit))) {
+    throw new HostReadError('the credential store could not read the reference')
+  }
+  if (hit === undefined) return undefined
+  const value = (hit as Record<string, unknown>)['value']
+  if (value !== undefined && typeof value !== 'string') {
+    throw new HostReadError('the credential store returned an invalid value')
+  }
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
 /** What the store will say about one reference: configured, and its masked value. */
 interface CredentialFacts {
   configured: boolean
@@ -251,7 +275,8 @@ async function credentialFacts(
   const describe = credentials.describe
   if (typeof describe === 'function') {
     try {
-      const records = describeRecords(await describe.call(credentials, [...refs]))
+      const answer = await describe.call(credentials, [...refs])
+      const records = isRefusal(answer) ? undefined : describeRecords(answer)
       for (const ref of refs) {
         const info = records?.[ref]
         if (isRecord(info) && typeof info['configured'] === 'boolean') {
@@ -262,11 +287,9 @@ async function credentialFacts(
       // Unanswered references fall through to resolve() below.
     }
   }
-  const resolve = credentials.resolve
   for (const ref of refs) {
     try {
-      const hit = await resolve.call(credentials, ref)
-      const value = hit !== undefined && typeof hit.value === 'string' ? hit.value : undefined
+      const value = await resolveCredential(credentials, ref)
       const configured = out[ref]?.configured ?? (value !== undefined && value.length > 0)
       const masked = value === undefined ? undefined : maskKeyValue(value)
       out[ref] = masked === undefined || masked.length === 0 ? { configured } : { configured, masked }
@@ -632,18 +655,21 @@ export function apply(ctx: Context, config: Config = {}): void {
   // last resolved section until the settings document reports that it moved.
   let piSectionCache: unknown
   let piSectionCached = false
-  const piSection = (): unknown => {
+  const piSection = (required = false): unknown => {
     if (piSectionCached) return piSectionCache
     let value: unknown
     try {
       value = settings.describe().find(entry => entry.ns === PI_NS)?.value
     } catch {
-      // The guard and probe are advisory: an unavailable settings form must
-      // not turn a model call into a plugin failure.
+      if (required) throw new HostReadError('the llm-pi-ai settings could not be read')
+      // Dispatch guards remain advisory while interactive routes report errors.
       return undefined
     }
     // A missing namespace is expected during boot and must be retried.
-    if (value === undefined) return undefined
+    if (value === undefined) {
+      if (required) throw new HostReadError('the llm-pi-ai settings entry is unavailable')
+      return undefined
+    }
     piSectionCache = value
     piSectionCached = true
     return value
@@ -737,11 +763,17 @@ export function apply(ctx: Context, config: Config = {}): void {
       // dispatch keeps the service as receiver through .call.
       const origPrepare = llm.prepareCall
       const origStream = llm.stream
-      llm.prepareCall = (callConfig, signal) => origPrepare.call(llm, guardCallConfig(callConfig, piSection()), signal)
-      llm.stream = (options) => origStream.call(llm, guardCallConfig(options, piSection()))
+      let disposed = false
+      const prepare: LlmDispatchLike['prepareCall'] = (callConfig, signal) =>
+        origPrepare.call(llm, disposed ? callConfig : guardCallConfig(callConfig, piSection()), signal)
+      const stream: LlmDispatchLike['stream'] = (options) =>
+        origStream.call(llm, disposed ? options : guardCallConfig(options, piSection()))
+      llm.prepareCall = prepare
+      llm.stream = stream
       ctx.effect(() => () => {
-        llm.prepareCall = origPrepare
-        llm.stream = origStream
+        disposed = true
+        if (llm.prepareCall === prepare) llm.prepareCall = origPrepare
+        if (llm.stream === stream) llm.stream = origStream
       }, 'dsh-model-think-level: default-guard')
     })
   }
@@ -834,7 +866,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // Read once: what sits on disk changes only when the user installs or patches
   // something, and a restart is the honest moment to re-read it.
-  const headerConflicts: HeaderConflictReport = detectHeaderConflicts()
+  const environmentConflicts: HeaderConflictReport = detectHeaderConflicts()
 
   // Same-origin probe route: the browser half's Auto-adapt asks the endpoint's
   // RAW /models listing through here, because the sanctioned llm wire call
@@ -871,7 +903,13 @@ export function apply(ctx: Context, config: Config = {}): void {
               return
             }
             const route = url.searchParams.get('route') ?? ''
-            const section = piSection()
+            let section: unknown
+            try {
+              section = piSection(true)
+            } catch {
+              sendJson(res, 502, { ok: false, error: 'the llm-pi-ai settings could not be read' })
+              return
+            }
             const profile = isRecord(section) && isRecord(section['providers'])
               ? section['providers'][route]
               : undefined
@@ -908,13 +946,10 @@ export function apply(ctx: Context, config: Config = {}): void {
             let apiKey: string | undefined
             if (apiKeyEnv !== undefined) {
               try {
-                const credentials = ctx.get('credentials') as CredentialsService | undefined
-                const hit = credentials === undefined ? undefined : await credentials.resolve(apiKeyEnv)
-                apiKey = hit !== undefined && typeof hit.value === 'string' && hit.value.length > 0
-                  ? hit.value
-                  : undefined
+                apiKey = await resolveCredential(ctx.get('credentials') as CredentialsService | undefined, apiKeyEnv)
               } catch {
-                // Unresolvable credential: probe unauthenticated rather than fail.
+                sendJson(res, 502, { ok: false, error: 'the credential store could not read the reference' })
+                return
               }
             }
             try {
@@ -1034,7 +1069,13 @@ export function apply(ctx: Context, config: Config = {}): void {
             }
             const url = new URL(req.url ?? '/', 'http://x')
             const route = url.searchParams.get('route') ?? ''
-            const section = piSection()
+            let section: unknown
+            try {
+              section = piSection(true)
+            } catch {
+              sendJson(res, 502, { ok: false, error: 'the llm-pi-ai settings could not be read' })
+              return
+            }
             const profile = isRecord(section) && isRecord(section['providers'])
               ? section['providers'][route]
               : undefined
@@ -1048,9 +1089,15 @@ export function apply(ctx: Context, config: Config = {}): void {
             // one is served only when the route's index lists it, so this route
             // can never become a resolver for arbitrary reference names.
             const named = url.searchParams.get('ref') ?? ''
-            const ref = named.length > 0
-              ? (named === apiKeyEnv || hasKeyEntry(readKeyIndex(keyIndexFilePath()), route, named) ? named : undefined)
-              : apiKeyEnv
+            let ref: string | undefined
+            try {
+              ref = named.length > 0
+                ? (named === apiKeyEnv || hasKeyEntry(readKeyIndex(keyIndexFilePath()), route, named) ? named : undefined)
+                : apiKeyEnv
+            } catch {
+              sendJson(res, 500, { ok: false, error: 'the key index could not be read' })
+              return
+            }
             if (ref === undefined) {
               sendJson(res, 404, {
                 ok: false,
@@ -1062,13 +1109,10 @@ export function apply(ctx: Context, config: Config = {}): void {
             }
             let value: string | undefined
             try {
-              const credentials = ctx.get('credentials') as CredentialsService | undefined
-              const hit = credentials === undefined ? undefined : await credentials.resolve(ref)
-              value = hit !== undefined && typeof hit.value === 'string' && hit.value.length > 0
-                ? hit.value
-                : undefined
+              value = await resolveCredential(ctx.get('credentials') as CredentialsService | undefined, ref)
             } catch {
-              value = undefined
+              sendJson(res, 502, { ok: false, error: 'the credential store could not read the reference' })
+              return
             }
             if (value === undefined) {
               sendJson(res, 404, { ok: false, error: `no credential is configured for ${ref}` })
@@ -1088,6 +1132,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     // writes and the browser half only ever handles references, labels and
     // booleans. That is the same surface the official page works with, and it
     // needs no new Remote face to get it.
+    let keyMutationTail = Promise.resolve()
     ctx.effect(
       () =>
         webServerCtx.webServer.register({
@@ -1105,99 +1150,108 @@ export function apply(ctx: Context, config: Config = {}): void {
             }
             const url = new URL(req.url ?? '/', 'http://x')
             const route = url.searchParams.get('route') ?? ''
-            // Read the entry fresh rather than through the cached section: this
-            // route writes to it, and an answer built from a pre-write snapshot
-            // would show the user the state they just changed away from.
-            const entryOf = (): { value: unknown; revision: number } | undefined => {
-              try {
-                const found = settings.describe().find(candidate => candidate.ns === PI_NS)
-                return found === undefined ? undefined : { value: found.value, revision: found.revision }
-              } catch {
-                return undefined
-              }
-            }
-            if (route.length === 0 || providerProfileOf(entryOf()?.value, route) === undefined) {
-              sendJson(res, 400, { ok: false, error: `no llm-pi-ai provider route "${route}"` })
-              return
-            }
-            const credentials = ctx.get('credentials') as CredentialsService | undefined
-            const indexFile = keyIndexFilePath()
-
-            /** The reference the profile names right now, read fresh. */
-            const enabledNow = (): string | undefined => enabledRefOf(providerProfileOf(entryOf()?.value, route))
-
-            /**
-             * Hand the "in use" seat to one reference; undefined clears it. The
-             * seat IS the profile's `apiKeyEnv`, so nothing else has to know
-             * which key is active — every consumer of the profile, in the GUI or
-             * not, resolves exactly the key the user enabled.
-             * @param ref - reference to enable, or undefined to name none.
-             * @returns The refusal text, or undefined when the write landed.
-             */
-            const setEnabledKey = async (ref: string | undefined): Promise<string | undefined> => {
-              for (let attempt = 0; attempt < 2; attempt += 1) {
-                const entry = entryOf()
-                if (entry === undefined) return 'the llm-pi-ai settings entry is unavailable'
-                try {
-                  await settings.mutate(
-                    PI_NS,
-                    ref === undefined
-                      ? [{ op: 'unset', path: ['providers', route, 'apiKeyEnv'] }]
-                      : [{ op: 'set', path: ['providers', route, 'apiKeyEnv'], value: ref }],
-                    entry.revision,
-                  )
-                  return undefined
-                } catch (error) {
-                  // Another writer (the official card's Save, another tab, the
-                  // autofill pass) moved the document between this read and
-                  // this write: re-read once and fence on the new revision.
-                  if (attempt === 0 && isConflictError(error)) continue
-                  return error instanceof Error ? error.message : String(error)
-                }
-              }
-              return 'the settings document kept changing; try again'
-            }
-
-            /** The whole list, as the browser half renders it. */
-            const payload = async (): Promise<unknown> => {
-              const enabledRef = enabledNow()
-              const listed = keyEntriesOf(readKeyIndex(indexFile), route)
-              const refs = listed.map(entry => entry.ref)
-              // The key in use is always on the list, even when it was written
-              // by the official page or by hand and this plugin has never seen
-              // it: the panel must be able to show and act on what is active.
-              if (enabledRef !== undefined && !refs.includes(enabledRef)) refs.push(enabledRef)
-              const facts = await credentialFacts(credentials, refs)
-              const entries: KeyEntryView[] = refs.map(ref => {
-                const fact = facts[ref]
-                const view: KeyEntryView = {
-                  ref,
-                  enabled: ref === enabledRef,
-                  configured: fact?.configured ?? null,
-                }
-                if (fact?.masked !== undefined) view.masked = fact.masked
-                const stored = listed.find(candidate => candidate.ref === ref)
-                if (stored?.alias !== undefined) view.alias = stored.alias
-                return view
-              })
-              return { ok: true, route, enabledRef: enabledRef ?? null, entries }
-            }
-
-            if (req.method === 'GET') {
-              sendJson(res, 200, await payload())
-              return
-            }
-
-            const body = await readJsonBody(req)
-            const op = isRecord(body) && typeof body['op'] === 'string' ? body['op'] : ''
-            const ref = isRecord(body) && typeof body['ref'] === 'string' ? body['ref'] : undefined
-            const alias = isRecord(body) ? normalizeKeyAlias(body['alias']) : undefined
-            const value = isRecord(body) && typeof body['value'] === 'string' ? body['value'] : undefined
-            // Every mutation is a set of steps that must not half-apply, so each
-            // branch refuses BEFORE it writes anything it cannot undo.
-            const refuse = (error: string): void => sendJson(res, 400, { ok: false, error })
-
+            let releaseMutation: (() => void) | undefined
             try {
+              if (req.method === 'POST') {
+                // Routes can share credential refs, including normalized names.
+                // Keep each write/rollback sequence together; reads never queue.
+                const previous = keyMutationTail
+                keyMutationTail = new Promise<void>(resolve => { releaseMutation = resolve })
+                await previous
+              }
+              // Read the entry fresh rather than through the cached section: this
+              // route writes to it, and an answer built from a pre-write snapshot
+              // would show the user the state they just changed away from.
+              const entryOf = (): { value: unknown; revision: number } | undefined => {
+                try {
+                  const found = settings.describe().find(candidate => candidate.ns === PI_NS)
+                  if (found === undefined) throw new HostReadError('the llm-pi-ai settings entry is unavailable')
+                  return { value: found.value, revision: found.revision }
+                } catch {
+                  throw new HostReadError('the llm-pi-ai settings could not be read')
+                }
+              }
+              if (route.length === 0 || providerProfileOf(entryOf()?.value, route) === undefined) {
+                sendJson(res, 400, { ok: false, error: `no llm-pi-ai provider route "${route}"` })
+                return
+              }
+              const credentials = ctx.get('credentials') as CredentialsService | undefined
+              const indexFile = keyIndexFilePath()
+
+              /** The reference the profile names right now, read fresh. */
+              const enabledNow = (): string | undefined => enabledRefOf(providerProfileOf(entryOf()?.value, route))
+
+              /**
+               * Hand the "in use" seat to one reference; undefined clears it. The
+               * seat IS the profile's `apiKeyEnv`, so nothing else has to know
+               * which key is active — every consumer of the profile, in the GUI or
+               * not, resolves exactly the key the user enabled.
+               * @param ref - reference to enable, or undefined to name none.
+               * @returns The refusal text, or undefined when the write landed.
+               */
+              const setEnabledKey = async (ref: string | undefined): Promise<string | undefined> => {
+                for (let attempt = 0; attempt < 2; attempt += 1) {
+                  const entry = entryOf()
+                  if (entry === undefined) return 'the llm-pi-ai settings entry is unavailable'
+                  try {
+                    await settings.mutate(
+                      PI_NS,
+                      ref === undefined
+                        ? [{ op: 'unset', path: ['providers', route, 'apiKeyEnv'] }]
+                        : [{ op: 'set', path: ['providers', route, 'apiKeyEnv'], value: ref }],
+                      entry.revision,
+                    )
+                    return undefined
+                  } catch (error) {
+                    // Another writer (the official card's Save, another tab, the
+                    // autofill pass) moved the document between this read and
+                    // this write: re-read once and fence on the new revision.
+                    if (attempt === 0 && isConflictError(error)) continue
+                    return error instanceof Error ? error.message : String(error)
+                  }
+                }
+                return 'the settings document kept changing; try again'
+              }
+
+              /** The whole list, as the browser half renders it. */
+              const payload = async (): Promise<unknown> => {
+                const enabledRef = enabledNow()
+                const listed = keyEntriesOf(readKeyIndex(indexFile), route)
+                const refs = listed.map(entry => entry.ref)
+                // The key in use is always on the list, even when it was written
+                // by the official page or by hand and this plugin has never seen
+                // it: the panel must be able to show and act on what is active.
+                if (enabledRef !== undefined && !refs.includes(enabledRef)) refs.push(enabledRef)
+                const facts = await credentialFacts(credentials, refs)
+                const entries: KeyEntryView[] = refs.map(ref => {
+                  const fact = facts[ref]
+                  const view: KeyEntryView = {
+                    ref,
+                    enabled: ref === enabledRef,
+                    configured: fact?.configured ?? null,
+                  }
+                  if (fact?.masked !== undefined) view.masked = fact.masked
+                  const stored = listed.find(candidate => candidate.ref === ref)
+                  if (stored?.alias !== undefined) view.alias = stored.alias
+                  return view
+                })
+                return { ok: true, route, enabledRef: enabledRef ?? null, entries }
+              }
+
+              if (req.method === 'GET') {
+                sendJson(res, 200, await payload())
+                return
+              }
+
+              const body = await readJsonBody(req)
+              const op = isRecord(body) && typeof body['op'] === 'string' ? body['op'] : ''
+              const ref = isRecord(body) && typeof body['ref'] === 'string' ? body['ref'] : undefined
+              const alias = isRecord(body) ? normalizeKeyAlias(body['alias']) : undefined
+              const value = isRecord(body) && typeof body['value'] === 'string' ? body['value'] : undefined
+              // Validate each operation before its first write and compensate
+              // later failures across the independent settings and key stores.
+              const refuse = (error: string): void => sendJson(res, 400, { ok: false, error })
+
               if (op === 'add') {
                 if (!isLegalKeyValue(value)) {
                   refuse('a key must be printable ASCII without spaces')
@@ -1210,7 +1264,17 @@ export function apply(ctx: Context, config: Config = {}): void {
                 // provider is running on.
                 const active = enabledNow()
                 if (active !== undefined && !taken.includes(active)) taken.push(active)
-                const created = nextKeyRef(route, taken)
+                let created = nextKeyRef(route, taken)
+                // Metadata cannot enumerate the credential store. Check each
+                // candidate against both read faces before writing a new value.
+                for (;;) {
+                  const facts = await credentialFacts(credentials, [created])
+                  const configured = facts[created]?.configured
+                  if (configured === undefined) throw new HostReadError('the credential store could not confirm a free reference')
+                  if (!configured && await resolveCredential(credentials, created) === undefined) break
+                  taken.push(created)
+                  created = nextKeyRef(route, taken)
+                }
                 // The value goes into the store first: a reference the index
                 // lists but the store cannot hold would render as a key the
                 // user can never reveal, enable or remove.
@@ -1219,15 +1283,26 @@ export function apply(ctx: Context, config: Config = {}): void {
                   refuse(refused)
                   return
                 }
-                updateKeyIndex(document => withKeyEntry(document, route, created, alias), indexFile)
-                // The first key on a provider that names none is the key in
-                // use: adding it is how a route becomes configured at all.
-                if (enabledNow() === undefined) {
-                  const failed = await setEnabledKey(created)
-                  if (failed !== undefined) {
-                    refuse(failed)
-                    return
+                let indexed = false
+                try {
+                  updateKeyIndex(document => withKeyEntry(document, route, created, alias), indexFile)
+                  indexed = true
+                  // Adding the first key also configures the route.
+                  if (enabledNow() === undefined) {
+                    const failed = await setEnabledKey(created)
+                    if (failed !== undefined) throw new Error(failed)
                   }
+                } catch (error) {
+                  const rollback = await forgetCredential(credentials, created)
+                  // Keep metadata if cleanup failed, so the retained secret can
+                  // still be found and removed by a later manager request.
+                  if (rollback === undefined && indexed) {
+                    updateKeyIndex(document => withoutKeyEntry(document, route, created), indexFile)
+                  }
+                  if (rollback !== undefined) {
+                    throw new Error(`${error instanceof Error ? error.message : String(error)}; credential rollback failed for ${created}: ${rollback}`)
+                  }
+                  throw error
                 }
               } else if (op === 'enable') {
                 const listed = readKeyIndex(indexFile)
@@ -1302,38 +1377,61 @@ export function apply(ctx: Context, config: Config = {}): void {
                   refuse('that key is not listed for this provider')
                   return
                 }
-                if (ref === enabledNow()) {
-                  // The seat is handed over BEFORE the value goes, so the
-                  // profile never names a key the store has just lost while
-                  // another listed key was available to take it. When none is,
-                  // the reference is unset rather than left dangling.
-                  const remaining = keyEntriesOf(document, route)
-                    .map(candidate => candidate.ref)
-                    .filter(candidate => candidate !== ref)
-                  const failed = await setEnabledKey(remaining[0])
+                const configured = (await credentialConfigured(credentials, [ref]))[ref]
+                if (configured === undefined) throw new HostReadError('the credential store could not read the reference')
+                const wasEnabled = ref === enabledNow()
+                const remaining = keyEntriesOf(document, route)
+                  .map(candidate => candidate.ref)
+                  .filter(candidate => candidate !== ref)
+                const replacement = remaining[0]
+                if (wasEnabled) {
+                  // Move the profile before forgetting its credential.
+                  const failed = await setEnabledKey(replacement)
                   if (failed !== undefined) {
                     refuse(failed)
                     return
                   }
                 }
-                const configured = (await credentialConfigured(credentials, [ref]))[ref]
-                if (configured !== false) {
-                  const refused = await forgetCredential(credentials, ref)
-                  if (refused !== undefined) {
-                    refuse(refused)
-                    return
+                try {
+                  // Commit metadata before deleting the secret: a disk failure
+                  // must leave the original credential available for rollback.
+                  updateKeyIndex(document2 => withoutKeyEntry(document2, route, ref), indexFile)
+                  if (configured) {
+                    const refused = await forgetCredential(credentials, ref)
+                    if (refused !== undefined) throw new Error(refused)
                   }
+                } catch (error) {
+                  const failures: string[] = []
+                  try {
+                    updateKeyIndex(current => {
+                      const providers = { ...current.providers }
+                      const original = document.providers[route]
+                      if (original === undefined) delete providers[route]
+                      else providers[route] = original
+                      return { version: 1, providers }
+                    }, indexFile)
+                  } catch {
+                    failures.push('key index rollback failed')
+                  }
+                  // Do not undo a later profile change by another writer.
+                  if (wasEnabled && enabledNow() === replacement) {
+                    const failed = await setEnabledKey(ref)
+                    if (failed !== undefined) failures.push(`profile rollback failed: ${failed}`)
+                  }
+                  throw new Error([error instanceof Error ? error.message : String(error), ...failures].join('; '))
                 }
-                updateKeyIndex(document2 => withoutKeyEntry(document2, route, ref), indexFile)
               } else {
                 refuse(`unknown key operation "${op}"`)
                 return
               }
+              sendJson(res, 200, await payload())
             } catch (error) {
-              sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
-              return
+              sendJson(res, error instanceof HostReadError ? 502 : 500, {
+                ok: false, error: error instanceof Error ? error.message : String(error),
+              })
+            } finally {
+              releaseMutation?.()
             }
-            sendJson(res, 200, await payload())
           },
         }),
       'dsh-model-think-level: key index route',
@@ -1405,7 +1503,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 /** Same-origin differences for any configured request header. */
                 headerConflicts: index.headerConflicts,
                 /** What was found of the plugins that rewrite the same surface. */
-                environment: headerConflicts,
+                environment: environmentConflicts,
               },
             })
           },

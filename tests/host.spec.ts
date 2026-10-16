@@ -4,7 +4,8 @@
  * active profile entry, and there is deliberately no get().
  */
 
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import * as keyIndex from '../src/key-index.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -344,6 +345,22 @@ describe('apply() autofill', () => {
 })
 
 describe('apply() header overlay lifecycle', () => {
+  it('recovers on a settings event after header boot retries are exhausted', async () => {
+    vi.useFakeTimers()
+    const settings = fakeSettings(undefined)
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { ctx, emitUpdated } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false, bootRetryDelaysMs: [5] })
+    await vi.advanceTimersByTimeAsync(50)
+    settings.register('llm-pi-ai', { relay: { baseURL: 'https://relay.example.com/v1', headers: { 'x-company': 'late' } } })
+    emitUpdated('llm-pi-ai')
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions')
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, { headers: HeadersInit }]
+    expect(new Headers(init.headers).get('x-company')).toBe('late')
+  })
+
   it('refreshes headers when the pi-ai settings namespace registers after boot', async () => {
     vi.useFakeTimers()
     const settings = fakeSettings(undefined)
@@ -799,6 +816,19 @@ describe('apply() probe route', () => {
     vi.unstubAllGlobals()
   })
 
+  it('returns 502 without probing when a configured credential cannot be read', async () => {
+    const settings = fakeSettings({ aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', apiKeyEnv: 'ALIYUN_KEY' } })
+    const { ctx, routes } = fakeHost(settings, { credentials: { resolve: async () => { throw new Error('unavailable') } } })
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false })
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, out } = fakeRes()
+    await routes.get(PROBE_PATH)!(fakeReq(), res)
+    expect(out().status).toBe(502)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('probes unauthenticated when no credential resolves', async () => {
     const settings = fakeSettings({ aliyun: { api: 'openai-completions', baseURL: 'https://gw.example.com/v1', models: [] } })
     const { ctx, routes } = fakeHost(settings)
@@ -948,6 +978,29 @@ describe('apply() provider-key route', () => {
     expect(out().status).toBe(404)
     expect(String(out().body['error'])).toContain('ALIYUN_KEY')
     expect(headers['cache-control']).toBe('no-store')
+  })
+
+  it('reports unavailable credentials as 502 rather than an absent key', async () => {
+    for (const credentials of [undefined, { resolve: async () => { throw new Error('unavailable') } },
+      { resolve: async () => ({ ok: false, error: 'unavailable' }) }]) {
+      const handler = await routeFor({ aliyun: profile }, credentials as Parameters<typeof routeFor>[1])
+      const { res, headers, out } = fakeRes()
+      await handler(fakeReq(), res)
+      expect(out().status).toBe(502)
+      expect(headers['cache-control']).toBe('no-store')
+      expect(out().body).not.toHaveProperty('key')
+    }
+  })
+
+  it('reports unreadable settings as 502 rather than a missing route', async () => {
+    const settings = fakeSettings({ aliyun: profile })
+    settings.describe = () => { throw new Error('unavailable') }
+    const { ctx, routes } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false, bootRetryDelaysMs: [] })
+    const { res, out } = fakeRes()
+    await routes.get(KEY_PATH)!(fakeReq(), res)
+    expect(out().status).toBe(502)
   })
 
   it('reports a profile that names no credential reference', async () => {
@@ -1295,6 +1348,190 @@ describe('apply() key-index route', () => {
     expect(existsSync(indexFile())).toBe(false)
   })
 
+  it.each([
+    ['aliyun', 'aliyun', 'ALIYUN_API_KEY'],
+    ['foo-bar', 'foo_bar', 'FOO_BAR_API_KEY'],
+  ] as const)('keeps concurrent adds distinct for %s and %s while reads remain independent', async (firstRoute, secondRoute, baseRef) => {
+    const credentials = credentialStore()
+    const writes: string[] = []
+    let writesWhilePending: string[] = []
+    let enterFirst!: () => void
+    let releaseFirst!: () => void
+    const entered = new Promise<void>(resolve => { enterFirst = resolve })
+    const gate = new Promise<void>(resolve => { releaseFirst = resolve })
+    const originalSet = credentials.set!.bind(credentials)
+    credentials.set = async (ref, value) => {
+      writes.push(value)
+      if (value === 'sk-first') {
+        enterFirst()
+        await gate
+      }
+      return originalSet(ref, value)
+    }
+    const { handler } = await mounted({ [firstRoute]: profile, [secondRoute]: profile }, credentials)
+    const first = fakeRes()
+    const second = fakeRes()
+    const addingFirst = handler(fakeReq({ method: 'POST', url: `?route=${firstRoute}`, body: { op: 'add', value: 'sk-first' } }), first.res)
+    await entered
+    const addingSecond = handler(fakeReq({ method: 'POST', url: `?route=${secondRoute}`, body: { op: 'add', value: 'sk-second' } }), second.res)
+    try {
+      // Drain the current turn so both unprotected POSTs can reach set().
+      await new Promise<void>(resolve => setImmediate(resolve))
+      writesWhilePending = [...writes]
+      const listing = fakeRes()
+      await handler(fakeReq({ url: `?route=${firstRoute}` }), listing.res)
+      expect(listing.out().status).toBe(200)
+    } finally {
+      releaseFirst()
+      await Promise.all([addingFirst, addingSecond])
+    }
+    expect(first.out().status).toBe(200)
+    expect(second.out().status).toBe(200)
+    expect(credentials.values[baseRef]).toBe('sk-first')
+    expect(credentials.values[`${baseRef}_2`]).toBe('sk-second')
+    expect(writesWhilePending).toEqual(['sk-first'])
+    const document = readKeyIndex(indexFile())
+    if (firstRoute === secondRoute) {
+      expect(document.providers[firstRoute]).toEqual([{ ref: baseRef }, { ref: `${baseRef}_2` }])
+    } else {
+      expect(document.providers[firstRoute]).toEqual([{ ref: baseRef }])
+      expect(document.providers[secondRoute]).toEqual([{ ref: `${baseRef}_2` }])
+    }
+  })
+
+  it('keeps a queued rename after a failed remove rolls metadata back', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'SPARE', alias: 'old' }] } }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'original', SPARE: 'spare' })
+    let enterUnset!: () => void
+    let releaseUnset!: () => void
+    const entered = new Promise<void>(resolve => { enterUnset = resolve })
+    const gate = new Promise<void>(resolve => { releaseUnset = resolve })
+    credentials.unset = async () => {
+      enterUnset()
+      await gate
+      return { ok: false, error: 'read-only' }
+    }
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+    const removed = fakeRes()
+    const renamed = fakeRes()
+    const removing = handler(fakeReq({ method: 'POST', body: { op: 'remove', ref: 'ALIYUN_KEY' } }), removed.res)
+    await entered
+    const renaming = handler(fakeReq({ method: 'POST', body: { op: 'rename', ref: 'SPARE', alias: 'new' } }), renamed.res)
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve))
+    } finally {
+      releaseUnset()
+      await Promise.all([removing, renaming])
+    }
+    expect(removed.out().status).toBe(500)
+    expect(renamed.out().status).toBe(200)
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY' }, { ref: 'SPARE', alias: 'new' }])
+  })
+
+  it('skips occupied credential references absent from the index', async () => {
+    const credentials = credentialStore({ ALIYUN_API_KEY: 'original', ALIYUN_API_KEY_2: 'second' })
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-third' } }), res)
+    expect(out().status).toBe(200)
+    expect(credentials.values).toEqual({ ALIYUN_API_KEY: 'original', ALIYUN_API_KEY_2: 'second', ALIYUN_API_KEY_3: 'sk-third' })
+  })
+
+  it('fails closed on malformed index reads before changing credentials', async () => {
+    writeKeyIndex({ version: 1, providers: {} }, indexFile())
+    writeFileSync(indexFile(), '{ broken', 'utf8')
+    const credentials = credentialStore({ ALIYUN_API_KEY: 'original' })
+    const set = vi.spyOn(credentials, 'set')
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+    for (const request of [fakeReq(), fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-new' } })]) {
+      const { res, out } = fakeRes()
+      await handler(request, res)
+      expect(out().status).toBe(500)
+    }
+    expect(set).not.toHaveBeenCalled()
+    expect(readFileSync(indexFile(), 'utf8')).toBe('{ broken')
+    expect(credentials.values['ALIYUN_API_KEY']).toBe('original')
+  })
+
+  it('keeps failed credential reads unknown and refuses to add or remove', async () => {
+    const credentials = credentialStore({ ALIYUN_KEY: 'original' })
+    credentials.resolve = async () => ({ ok: false, error: 'unavailable' }) as unknown as { value: string }
+    const set = vi.spyOn(credentials, 'set')
+    const unset = vi.spyOn(credentials, 'unset')
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+    const listing = fakeRes()
+    await handler(fakeReq(), listing.res)
+    expect(listing.out().body['entries']).toEqual([{ ref: 'ALIYUN_KEY', enabled: true, configured: null }])
+    for (const body of [{ op: 'add', value: 'sk-new' }, { op: 'remove', ref: 'ALIYUN_KEY' }]) {
+      const { res, out } = fakeRes()
+      await handler(fakeReq({ method: 'POST', body }), res)
+      expect(out().status).toBe(502)
+    }
+    expect(set).not.toHaveBeenCalled()
+    expect(unset).not.toHaveBeenCalled()
+    expect(settings.mutations).toHaveLength(0)
+  })
+
+  it('reports settings outages rather than a nonexistent route', async () => {
+    const { handler, settings } = await mounted({ aliyun: profile }, credentialStore())
+    settings.describe = () => { throw new Error('unavailable') }
+    const { res, out } = fakeRes()
+    await handler(fakeReq(), res)
+    expect(out().status).toBe(502)
+  })
+
+  it('rolls back a new key when activating the first key fails', async () => {
+    const credentials = credentialStore()
+    const { handler, settings } = await mounted({ aliyun: { ...profile, apiKeyEnv: undefined } }, credentials)
+    settings.failNextMutation(2)
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-new' } }), res)
+    expect(out().status).toBe(500)
+    expect(credentials.values).toEqual({})
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toBeUndefined()
+    expect(settings.providers()?.['aliyun']).not.toHaveProperty('apiKeyEnv', 'ALIYUN_API_KEY')
+  })
+
+  it('removes a newly stored secret when its index write fails', async () => {
+    const credentials = credentialStore()
+    const { handler } = await mounted({ aliyun: profile }, credentials)
+    vi.spyOn(keyIndex, 'updateKeyIndex').mockImplementationOnce(() => { throw new Error('disk full') })
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'add', value: 'sk-new' } }), res)
+    expect(out().status).toBe(500)
+    expect(credentials.values).toEqual({})
+    expect(existsSync(indexFile())).toBe(false)
+  })
+
+  it('restores the active key and ordered metadata when unset fails', async () => {
+    const document = { version: 1 as const, providers: { aliyun: [{ ref: 'ALIYUN_KEY', alias: 'main' }, { ref: 'SPARE' }] } }
+    writeKeyIndex(document, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'original', SPARE: 'spare' })
+    credentials.unset = async () => ({ ok: false, error: 'read-only' })
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'remove', ref: 'ALIYUN_KEY' } }), res)
+    expect(out().status).toBe(500)
+    expect(readKeyIndex(indexFile())).toEqual(document)
+    expect(settings.providers()?.['aliyun']).toHaveProperty('apiKeyEnv', 'ALIYUN_KEY')
+    expect(credentials.values['ALIYUN_KEY']).toBe('original')
+  })
+
+  it('restores the active key without deleting its value when index removal fails', async () => {
+    const document = { version: 1 as const, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'SPARE' }] } }
+    writeKeyIndex(document, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'original', SPARE: 'spare' })
+    const unset = vi.spyOn(credentials, 'unset')
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+    vi.spyOn(keyIndex, 'updateKeyIndex').mockImplementationOnce(() => { throw new Error('disk full') })
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'remove', ref: 'ALIYUN_KEY' } }), res)
+    expect(out().status).toBe(500)
+    expect(unset).not.toHaveBeenCalled()
+    expect(readKeyIndex(indexFile())).toEqual(document)
+    expect(settings.providers()?.['aliyun']).toHaveProperty('apiKeyEnv', 'ALIYUN_KEY')
+  })
+
   it('mints a reference that skips the ones the index already holds', async () => {
     writeKeyIndex(
       { version: 1, providers: { aliyun: [{ ref: 'ALIYUN_API_KEY' }, { ref: 'ALIYUN_API_KEY_2' }] } },
@@ -1630,6 +1867,20 @@ describe('apply() default-guard', () => {
     expect(llm.streamed[0]).toMatchObject({ reasoningEffort: 'max' })
   })
 
+  it('preserves a prepared-call envelope for consumers that stream prepared.config', async () => {
+    const settings = fakeSettings(GUARD_PROVIDERS)
+    const llm = fakeLlm()
+    llm.svc.prepareCall = async config => ({ config, transport: 'prepared' })
+    const { ctx } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false })
+    const prepared = await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash' })
+    expect(prepared['transport']).toBe('prepared')
+    expect(prepared['config']).toMatchObject({ reasoningEffort: 'max' })
+    llm.svc.stream({ ...(prepared['config'] as Record<string, unknown>), messages: [] })
+    expect(llm.streamed[0]).toMatchObject({ reasoningEffort: 'max', messages: [] })
+  })
+
   it('reads SettingsForms once until a document update invalidates the cache', async () => {
     const settings = fakeSettings(GUARD_PROVIDERS)
     const llm = fakeLlm()
@@ -1707,6 +1958,41 @@ describe('apply() default-guard', () => {
     expect(llm.svc.stream).toBe(origStream)
     await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash' })
     expect('reasoningEffort' in llm.prepared[0]).toBe(false)
+  })
+
+  it('preserves later wrappers and makes captured guards inert on disposal', async () => {
+    const settings = fakeSettings(GUARD_PROVIDERS)
+    const llm = fakeLlm()
+    const { ctx, dispose } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false })
+    const guardedPrepare = llm.svc.prepareCall
+    const guardedStream = llm.svc.stream
+    const laterPrepare = vi.fn((config: Record<string, unknown>) => guardedPrepare(config))
+    const laterStream = vi.fn((options: Record<string, unknown>) => guardedStream(options))
+    llm.svc.prepareCall = laterPrepare
+    llm.svc.stream = laterStream
+    dispose()
+    expect(llm.svc.prepareCall).toBe(laterPrepare)
+    expect(llm.svc.stream).toBe(laterStream)
+    await llm.svc.prepareCall({ provider: 'suiyue', model: 'glm-5.3-flash' })
+    llm.svc.stream({ provider: 'suiyue', model: 'glm-5.3-flash' })
+    expect(llm.prepared[0]).not.toHaveProperty('reasoningEffort')
+    expect(llm.streamed[0]).not.toHaveProperty('reasoningEffort')
+  })
+
+  it('restores each method independently when only one is still owned', async () => {
+    const settings = fakeSettings(GUARD_PROVIDERS)
+    const llm = fakeLlm()
+    const originalStream = llm.svc.stream
+    const { ctx, dispose } = fakeHost(settings, { llm: llm.svc })
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false })
+    const laterPrepare = async () => ({})
+    llm.svc.prepareCall = laterPrepare
+    dispose()
+    expect(llm.svc.prepareCall).toBe(laterPrepare)
+    expect(llm.svc.stream).toBe(originalStream)
   })
 
   it('restores the originals on dispose (uninstall-clean)', async () => {

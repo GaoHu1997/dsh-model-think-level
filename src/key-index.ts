@@ -13,8 +13,9 @@
  *
  * The file holds no secrets: references and labels only, which is what makes it
  * safe to keep in plain text and easy for a user to inspect or repair by hand.
- * Every read is defensive (a corrupted file degrades to "nothing listed") and
- * every write is atomic (`write` to a sibling temp file, then `rename`), so a
+ * Existing unreadable or malformed files fail closed, so a mutation cannot
+ * replace lost metadata with a fresh index. Every write is atomic (`write` to a
+ * sibling temp file, then `rename`), so a
  * crash mid-write cannot leave a half-parsed index behind.
  *
  * All of it is synchronous on purpose: the host is single-threaded, so a
@@ -93,16 +94,37 @@ export function parseKeyIndex(raw: unknown): KeyIndexDocument {
   return { version: 1, providers: out }
 }
 
-/** Read the index at one path, or an empty one when there is nothing to read. */
+/** Read the index; only an absent file means a fresh, empty document. */
 export function readKeyIndex(file: string = keyIndexFilePath()): KeyIndexDocument {
+  let text: string
   try {
-    return parseKeyIndex(JSON.parse(readFileSync(file, 'utf8')))
-  } catch {
-    // Missing, unreadable and malformed are the same answer here: the manager
-    // opens with an empty list, and the profile's own enabled reference is
-    // merged into what it lists anyway.
-    return emptyKeyIndex()
+    text = readFileSync(file, 'utf8')
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      return emptyKeyIndex()
+    }
+    throw error
   }
+  const raw: unknown = JSON.parse(text)
+  const record = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+    ? raw as Record<string, unknown> : undefined
+  const providers = record?.['providers']
+  if (record === undefined || (record['version'] !== undefined && record['version'] !== 1) ||
+      typeof providers !== 'object' || providers === null || Array.isArray(providers)) {
+    throw new Error('the key index is malformed; repair it before changing keys')
+  }
+  for (const [route, entries] of Object.entries(providers)) {
+    if (route.length === 0 || !Array.isArray(entries) || entries.some((entry: unknown) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return true
+      const ref = (entry as Record<string, unknown>)['ref']
+      return typeof ref !== 'string' || ref.length === 0
+    })) {
+      throw new Error('the key index is malformed; repair it before changing keys')
+    }
+  }
+  // Keep the existing normalization, including unversioned documents, aliases
+  // and duplicate references, for valid indexes written by older versions.
+  return parseKeyIndex(raw)
 }
 
 /** Write the index at one path, atomically. */

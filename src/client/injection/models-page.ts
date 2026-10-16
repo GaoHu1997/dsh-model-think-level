@@ -22,7 +22,7 @@ import { PLUGIN_ID } from '../../constants.js'
 import { EffortEditor } from '../EffortEditor.tsx'
 import {
   createScanState, flushOnTeardown, flushOnUnload, pinModelListCards, reconcile,
-  unwatchModelListOffsets, watchModelListOffsets,
+  releaseModelListRepins, unwatchModelListOffsets, watchModelListOffsets,
   type HostLabels, type InjectorDeps, type ScanState,
 } from './models-page-editor.js'
 import { describeNamespace } from '../ops.ts'
@@ -289,7 +289,14 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       }
       renderEditor(props)
       return {
-        unmount: () => { reactRoot.unmount() },
+        unmount: () => {
+          try {
+            reactRoot.unmount()
+          } finally {
+            // The synchronous hasEditor marker belongs to this mount as well.
+            rootEl.remove()
+          }
+        },
         render: renderEditor,
       }
     },
@@ -331,6 +338,14 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     reconcileSavedNotice(root)
   }
 
+  const safely = (phase: string, run: () => void): void => {
+    try {
+      run()
+    } catch (error) {
+      console.error(`[bre] ${phase} failed:`, error)
+    }
+  }
+
   function schedule(): void {
     if (stopped || scanTimer !== undefined) return
     // Debounce: the official page re-renders in bursts (typing, expanding,
@@ -340,7 +355,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // The composer path rides along: the debounced scan is the only thing
       // that covers the paths no mutation carries — apply boot and a slider
       // preference flip.
-      composerMutation?.()
+      safely('composer mutation', () => { composerMutation?.() })
       reconcile(panelRoot(), injectorDeps, scanState)
       // The create-provider card is reduced to its custom form first: the tab
       // pass below dresses the half this pass leaves showing.
@@ -371,13 +386,15 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     composerMutation = onComposerMutation
     // A session may already be resident when the fiber starts (page reload,
     // HMR): wire it before the first mutation has a chance to land.
-    onComposerMutation()
-    reconcileDom()
+    safely('models page startup', () => {
+      onComposerMutation()
+      reconcileDom()
+    })
     // Where a click inside a model list leaves the scroll position: the row
     // deletion's clamp takes that position away before any later pass can read
     // it, so it has to be recorded from the event that starts the deletion.
     watchModelListOffsets()
-    observer = new MutationObserver((records) => {
+    const onMutation = (records: MutationRecord[]): void => {
       // The composer path runs SYNCHRONOUSLY on the mutation microtask: the
       // React commit that opens the menu and this callback are delivered
       // before the browser's next paint, so the FIRST painted frame already
@@ -416,6 +433,9 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
         // the stale editor's re-render by the debounced scan below.
         pinModelListCards(panelRoot())
       }
+    }
+    observer = new MutationObserver((records) => {
+      safely('models mutation', () => { onMutation(records) })
       schedule()
     })
     observer.observe(document.body, { childList: true, subtree: true })
@@ -437,7 +457,10 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   }
 
   const teardown = (): void => {
+    if (scanState.disposed) return
     stopObserver()
+    scanState.disposed = true
+    releaseModelListRepins()
     // Land what the session held back before the fiber goes away: a plugin
     // disable or HMR must not strand the user's intent in memory alone. The
     // ledgers stay in sessionStorage WITH their commit evidence, so the next

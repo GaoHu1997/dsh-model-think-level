@@ -7,7 +7,7 @@
 
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { absorbDelta, adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, pinModelListCards, queueWriteInto, reconcile, stageEffortsInto, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
+import { absorbDelta, adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, pinModelListCards, releaseModelListRepins, queueWriteInto, reconcile, stageEffortsInto, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
 import { suggestEfforts, type ReasoningEfforts } from '../src/knowledge.js'
 import type { RemoteApi } from '../src/client/types.js'
 
@@ -168,6 +168,8 @@ beforeEach(() => {
   // queued intent would be restored into the next case's scan state.
   sessionStorage.clear()
 })
+
+afterEach(() => { releaseModelListRepins() })
 
 /** Run reconcile then flush the describe-then-mount microtask chain. */
 async function settle(reconcileFn: () => void, state: ReturnType<typeof createScanState>): Promise<void> {
@@ -2402,6 +2404,69 @@ describe('the auto-adapt seat', () => {
   })
 })
 
+describe('provider adaptation frame waits', () => {
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }) })
+  afterEach(() => { vi.useRealTimers() })
+
+  it.each(['timer', 'frame'] as const)('finishes a collapsed-row visit via the %s and cancels the other handle', async (winner) => {
+    const callbacks = new Map<number, FrameRequestCallback>()
+    const timeout = vi.spyOn(window, 'setTimeout')
+    const clear = vi.spyOn(window, 'clearTimeout')
+    const request = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+      callbacks.set(42, callback)
+      return 42
+    })
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { callbacks.delete(id) })
+    const row = document.createElement('div')
+    row.className = 'modelEntry'
+    row.innerHTML = '<button aria-label="Capacities 1"></button>'
+    document.body.append(row)
+    let opened = false
+    let image: HTMLInputElement | undefined
+    row.querySelector('button')!.addEventListener('click', () => {
+      opened = !opened
+      if (!opened) {
+        row.querySelector('.modelAdvanced')?.remove()
+        return
+      }
+      // The host commits its disclosure after the click's synchronous handler.
+      window.setTimeout(() => {
+        row.insertAdjacentHTML('beforeend', `<div class="modelAdvanced"><fieldset class="modelInputTypes">
+          <label><input type="checkbox" checked /><span>Text</span></label>
+          <label><input type="checkbox" /><span>Image</span></label>
+        </fieldset></div>`)
+        image = row.querySelectorAll<HTMLInputElement>('input')[1]
+      }, 0)
+    })
+    const deps = makeDeps()
+    const state = createScanState()
+    const operation = adaptEveryModel(state, deps, 'acme-gateway', [{ id: 'gpt-4o-mini', name: 'Draft Vision', row }])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(state.adapting.has('acme-gateway')).toBe(true)
+    if (winner === 'frame') {
+      const callback = callbacks.get(42)!
+      callbacks.delete(42)
+      callback(performance.now())
+    } else {
+      await vi.advanceTimersByTimeAsync(99)
+      expect(state.adapting.has('acme-gateway')).toBe(true)
+      await vi.advanceTimersByTimeAsync(1)
+    }
+    expect(await operation).toEqual({ held: 1, unsuggested: 0 })
+    expect(image?.checked).toBe(true)
+    expect(opened).toBe(false)
+    expect(row.querySelector('.modelAdvanced')).toBeNull()
+    expect(state.adapting.size).toBe(0)
+    expect(state.pending.get('acme-gateway')?.get('gpt-4o-mini')?.input).toBeUndefined()
+    expect(cancel).toHaveBeenCalledWith(42)
+    expect(callbacks.size).toBe(0)
+    const fallback = timeout.mock.calls.findIndex(([, delay]) => delay === 100)
+    expect(fallback).toBeGreaterThanOrEqual(0)
+    expect(clear).toHaveBeenCalledWith(timeout.mock.results[fallback]!.value)
+  })
+})
+
 /**
  * Re-pinning a card's top across a model row's disclosure toggle.
  *
@@ -2413,6 +2478,13 @@ describe('the auto-adapt seat', () => {
  * a loop that released three stable frames after the click did.
  */
 describe('disclosure re-pin', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame', 'Date', 'performance'] })
+  })
+  afterEach(() => {
+    releaseModelListRepins()
+    vi.useRealTimers()
+  })
   /** A scroll host the injector can find, carrying the metrics jsdom lacks. */
   function scrollHostAround(section: HTMLElement): HTMLElement {
     const host = document.createElement('div')
@@ -2444,7 +2516,7 @@ describe('disclosure re-pin', () => {
     }
   }
 
-  const wait = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
+  const wait = async (ms: number): Promise<void> => { await vi.advanceTimersByTimeAsync(ms) }
 
   it('still holds the host when the editor mounts a scan after the click', async () => {
     const section = buildModelsDom()

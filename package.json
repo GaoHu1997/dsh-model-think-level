@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-think-level",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "DSH 的第三方模型补齐思考等级：在官方 Models 页每个模型行注入 Thinking 开关和强度/模态编辑器，在输入框模型菜单加供应商→模型选择器、视觉徽章与等级行，并带搜索、拖拽排序、供应商启用开关；以及按路由接管请求头与 user-agent。",
   "license": "MIT",
   "author": "GaoHu1997 <gaohu9712@163.com>",
@@ -52,13 +52,15 @@
     "lib/",
     "cordis.patch.yml",
     "README.md",
-    "README.zh.md",
     "LICENSE",
     "assets/",
-    "docs/*.svg",
+    "docs/image*.png",
     "icon.svg",
     "locale/*.json"
   ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
   "icon": "./icon.svg",
   "dsh": {
     "bundle": {
@@ -72,6 +74,8 @@
     "build": "npm run build:clean && npm run build:host && npm run build:client && npm run build:types",
     "build:clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",
     "check:styles": "node scripts/check-styles.mjs",
+    "check:package": "npm pack --dry-run --ignore-scripts --json > .tmp-pack-manifest.json && node scripts/check-package.mjs .tmp-pack-manifest.json",
+    "docs:models": "node scripts/generate-models-doc.mjs",
     "build:client": "npm run check:styles && node scripts/build-client.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -83,10 +87,21 @@
     "node": "^22.19.0 || >=24"
   },
   "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.3",
+    "@deepseek-ai/dsh-api-session-controller": "^0.1.5-alpha.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-client-ui-model-selection": "^0.1.5-alpha.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-alpha.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.2.0-rc.1",
     "@deepseek-ai/dsh-api-remotes": "^0.1.5-alpha.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.2.0-rc.1",
     "@deepseek-ai/dsh-settings": "^0.1.5-alpha.1 || ^0.1.6-alpha.1 || ^0.1.7-alpha.1 || ^0.1.7-rc.1 || ^0.2.0-rc.1",
     "@deepseek-ai/schemastery": "^3.18.0",
-    "react": "^18.2.0 || ^19.0.0"
+    "react": "^18.2.0 || ^19.0.0",
+    "react-dom": "^18.2.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-api-session-controller": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-model-selection": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-slots": { "optional": true }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.3",

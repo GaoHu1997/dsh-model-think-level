@@ -52,29 +52,37 @@ function fakeApi(): RemoteApi {
 }
 
 /** Mount the slot occurrence inside a card row, the way the official page does. */
-async function renderCard(): Promise<{ row: HTMLElement; unmount(): Promise<void> }> {
+async function renderCard(initialRoute: string | null = 'local-test'): Promise<{
+  row: HTMLElement
+  renderRoute(route: string | null): Promise<void>
+  unmount(): Promise<void>
+}> {
   const row = document.createElement('li')
   row.className = 'rowCard'
   row.appendChild(document.createElement('div'))
   document.body.appendChild(row)
   const host = document.createElement('div')
   row.appendChild(host)
-  let root: Root | undefined
-  await act(async () => {
-    root = createRoot(host)
-    // The official `Translate` types its params as Record<string, unknown>;
-    // this suite's stand-in narrows them to the shapes it substitutes, so it
-    // asserts at the one place the component takes the seat.
-    root.render(createElement(ProviderCardSlot, {
-      provider: { provider: 'local-test' },
-      api: fakeApi(),
-      t: t as unknown as Translate,
-    }))
-  })
+  const root: Root = createRoot(host)
+  const api = fakeApi()
+  const renderRoute = async (route: string | null): Promise<void> => {
+    await act(async () => {
+      // The official `Translate` types its params as Record<string, unknown>;
+      // this suite's stand-in narrows them to the shapes it substitutes, so it
+      // asserts at the one place the component takes the seat.
+      root.render(createElement(ProviderCardSlot, {
+        provider: route === null ? {} : { provider: route },
+        api,
+        t: t as unknown as Translate,
+      }))
+    })
+  }
+  await renderRoute(initialRoute)
   return {
     row,
+    renderRoute,
     async unmount() {
-      await act(async () => { root!.unmount() })
+      await act(async () => { root.unmount() })
       row.remove()
     },
   }
@@ -142,6 +150,47 @@ describe('ProviderCardSlot', () => {
       await settle()
       expect(editState(row)).toBe('1')
 
+      editor.remove()
+      await settle()
+      expect(editState(row)).toBe('0')
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('observes a route that arrives after the initial empty render', async () => {
+    const { row, renderRoute, unmount } = await renderCard(null)
+    try {
+      expect(row.querySelector('.bre-headers-host')).toBeNull()
+      const editor = addOfficialEditor(row)
+      await renderRoute('local-test')
+      expect(editState(row)).toBe('1')
+
+      editor.remove()
+      await settle()
+      expect(editState(row)).toBe('0')
+      addOfficialEditor(row)
+      await settle()
+      expect(editState(row)).toBe('1')
+    } finally {
+      await unmount()
+    }
+  })
+
+  it('disconnects the old wrapper and observes a restored route', async () => {
+    const { row, renderRoute, unmount } = await renderCard()
+    try {
+      const oldWrapper = row.querySelector<HTMLElement>('.bre-headers-host')!
+      expect(oldWrapper.dataset['edit']).toBe('0')
+      await renderRoute('')
+      expect(row.querySelector('.bre-headers-host')).toBeNull()
+      const editor = addOfficialEditor(row)
+      await settle()
+      // The detached wrapper must no longer follow the card.
+      expect(oldWrapper.dataset['edit']).toBe('0')
+
+      await renderRoute('local-test')
+      expect(editState(row)).toBe('1')
       editor.remove()
       await settle()
       expect(editState(row)).toBe('0')

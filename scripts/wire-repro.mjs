@@ -4,11 +4,20 @@
 // 用法：node scripts/wire-repro.mjs
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
-// 经 llm-pi-ai 的 node_modules symlink 解析，DSH 升级 pi-ai 后依然有效。
-const PI_API = pathToFileURL(
-  'D:/Project/deepseek-harness-dev/packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js',
-).href;
+// Resolve from the installed adapter, including nested/non-hoisted dependencies.
+const adapterRequire = createRequire(import.meta.resolve('@deepseek-ai/dsh-llm-pi-ai'));
+const piRoot = adapterRequire.resolve.paths('@earendil-works/pi-ai')
+  ?.map(dir => join(dir, '@earendil-works/pi-ai'))
+  .find(dir => existsSync(join(dir, 'package.json')));
+if (!piRoot) throw new Error('Install project dependencies before running wire-repro');
+const piPackage = JSON.parse(readFileSync(join(piRoot, 'package.json'), 'utf8'));
+const apiExport = piPackage.exports?.['./api/*']?.import;
+if (typeof apiExport !== 'string') throw new Error('Installed pi-ai does not export ./api/*');
+const PI_API = pathToFileURL(resolve(piRoot, apiExport.replace('*', 'openai-completions'))).href;
 const { streamSimple } = await import(PI_API);
 
 const captured = [];

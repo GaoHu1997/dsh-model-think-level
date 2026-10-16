@@ -241,6 +241,7 @@ export function apply(ctx: ClientContext): void {
       // update (or a fresh connection) must not leave stale picks behind.
       configuredEfforts.invalidate()
       configuredInputs.invalidate()
+      autofill.invalidate()
       modelsPage.schedule()
     }
     const disposers = [

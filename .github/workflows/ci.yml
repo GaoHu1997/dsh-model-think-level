@@ -1,13 +1,4 @@
-# Every pull request and every push to master runs the three gates this repo
-# already has locally: typecheck, the vitest suite, and the release build.
-#
-# Nothing else looks at code quality: release.yml only runs for a pushed v* tag,
-# and sync-to-gitee.yml only mirrors. Before this workflow a red typecheck, a
-# failing test or a broken bundle could therefore reach master -- and a
-# contributor's pull request could be merged -- with nothing saying so.
-#
-# For pull_request events GitHub takes the workflow definition from the base
-# branch, so this only starts guarding PRs once it lives on master.
+# Validate source, behavior, bundles and the npm package contents on main and PRs.
 name: ci
 
 on:
@@ -39,3 +30,4 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npm run check:package

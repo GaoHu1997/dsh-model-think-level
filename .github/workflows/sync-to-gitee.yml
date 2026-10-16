@@ -7,7 +7,7 @@ name: Sync to Gitee
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   release:
     types: [published, edited]
   workflow_dispatch:
