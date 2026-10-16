@@ -40,10 +40,9 @@ describe('suggestEfforts budget autofill', () => {
     const s = suggestEfforts('qwen-max', { api: 'openai-completions', baseURL: 'https://api.openai.com/v1' })
     expect(s.compat?.thinkingTokenBudgetField).toBeUndefined()
   })
-  it('never emits vllmPriority or supportsMaxOutputTokens from inference', () => {
+  it('never emits vllmPriority from inference', () => {
     const s = suggestEfforts('mystery-model-zzz', { api: 'openai-completions', baseURL: 'http://localhost:8000/v1' })
     expect(s.compat?.vllmPriority).toBeUndefined()
-    expect(s.compat?.supportsMaxOutputTokens).toBeUndefined()
   })
 })
 
@@ -52,9 +51,8 @@ describe('sanitizeCompatForProtocol', () => {
     expect(sanitizeCompatForProtocol({ thinkingFormat: 'openai', forceAdaptiveThinking: true }, 'anthropic-messages'))
       .toEqual({ forceAdaptiveThinking: true })
   })
-  it('keeps only supportsMaxOutputTokens on openai-responses', () => {
-    expect(sanitizeCompatForProtocol({ thinkingFormat: 'openai', supportsMaxOutputTokens: false }, 'openai-responses'))
-      .toEqual({ supportsMaxOutputTokens: false })
+  it('returns nothing for openai-responses now that no responses field is offered', () => {
+    expect(sanitizeCompatForProtocol({ thinkingFormat: 'openai' }, 'openai-responses')).toBeUndefined()
   })
   it('drops withheld catalog keys everywhere', () => {
     const dirty = { thinkingFormat: 'openai', supportsMidConvoEffort: true } as unknown as Parameters<typeof sanitizeCompatForProtocol>[0]
@@ -156,7 +154,7 @@ describe('writeEfforts dual-kernel', () => {
       },
     }
     const editor = createEditorApi(api)
-    const reply = await editor.writeEfforts('r', 'a', { high: 'high' }, { thinkingTokenBudgetField: 'thinking_token_budget', supportsMaxOutputTokens: false }, undefined)
+    const reply = await editor.writeEfforts('r', 'a', { high: 'high' }, { thinkingTokenBudgetField: 'thinking_token_budget' }, undefined)
     expect(reply).toEqual({ ok: true })
     expect(writes).toBe(2)
   })

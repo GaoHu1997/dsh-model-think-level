@@ -36,6 +36,7 @@ import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import { inferModalitiesFromName, matchKnowledgeBase } from '../knowledge.js'
 import { selectRefusalMessage } from './effort-memory.js'
+import { EMPTY_CONFIGURED_INPUTS, type ConfiguredInputs } from './configured-inputs.js'
 import {
   disabledProviders,
   subscribeDisabledProviders,
@@ -99,6 +100,8 @@ type Translator = (key: string, params?: Record<string, string | number>) => str
 export interface ComposerSliderProps {
   /** The session's shared model directory (load + select ride the official seam). */
   directory: ModelDirectoryLike
+  /** Saved provider/model inputs; the host catalog may omit modalities. */
+  configuredInputs?: ConfiguredInputs
   /** Localized copy (the plugin's bound translator). */
   t: Translator
   /**
@@ -240,28 +243,23 @@ function checkIcon(): ReactNode {
 }
 
 /**
- * Capability badge caches. The knowledge lookup is a linear scan with boundary
- * regexes; the model list re-renders on every panel toggle, so the answer is
- * memoized per model id.
+ * The knowledge lookup scans boundary regexes, so cache fallback answers by
+ * both lookup inputs. Relays can share an id but use different display names.
  */
 const VISION_CACHE = new Map<string, boolean>()
 
-/**
- * Whether the model accepts image input. The declaration the directory carries
- * wins; a model that declares nothing falls back to the plugin's own knowledge
- * base and then to its name heuristic — the same tiers the suggestion engine
- * uses, so the badge can never be more confident than the suggestion it would
- * write.
- */
-function supportsVision(model: ModelChoiceLike): boolean {
-  if (Array.isArray(model.input)) return model.input.includes('image')
-  const cached = VISION_CACHE.get(model.id)
+/** Saved settings win over a directory declaration, then knowledge/name guesses. */
+function supportsVision(model: ModelChoiceLike, configuredInput?: readonly string[]): boolean {
+  const declared = configuredInput ?? model.input
+  if (Array.isArray(declared) && declared.length > 0) return declared.includes('image')
+  const key = JSON.stringify([model.id, model.name])
+  const cached = VISION_CACHE.get(key)
   if (cached !== undefined) return cached
   const known = matchKnowledgeBase(model.id, model.name)?.input
   const verdict = known !== undefined
     ? known.includes('image')
     : (inferModalitiesFromName(model.id) ?? []).includes('image')
-  VISION_CACHE.set(model.id, verdict)
+  VISION_CACHE.set(key, verdict)
   return verdict
 }
 
@@ -315,9 +313,9 @@ function thinkingIcon(label: string): ReactNode {
 }
 
 /** The capability badges of one model, or null when it declares neither. */
-function modelTags(model: ModelChoiceLike, t: Translator): ReactNode {
+function modelTags(model: ModelChoiceLike, t: Translator, configuredInput?: readonly string[]): ReactNode {
   const badges: ReactNode[] = []
-  if (supportsVision(model)) {
+  if (supportsVision(model, configuredInput)) {
     badges.push(createElement(
       'span',
       { key: 'vision', className: 'bre-tag', title: t('tagVision') },
@@ -348,11 +346,15 @@ interface SelectInput {
  * (optimistic, rolled back on refusal).
  */
 export function ComposerSlider(props: ComposerSliderProps): ReactNode {
-  const { directory, t } = props
+  const { directory, t, configuredInputs } = props
   const layoutChange = props.onLayoutChange
   const state = useSyncExternalStore(
     (notify: () => void) => directory.store.subscribe(notify),
     () => directory.store.getSnapshot(),
+  )
+  const inputDeclarations = useSyncExternalStore(
+    notify => configuredInputs?.subscribe(notify) ?? (() => undefined),
+    () => configuredInputs?.getSnapshot() ?? EMPTY_CONFIGURED_INPUTS,
   )
   const levels = sliderLevels(state)
   const [effort, setEffort] = useState('')
@@ -385,6 +387,10 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   useEffect(() => {
     directory.load().catch(() => undefined)
   }, [directory])
+
+  useEffect(() => {
+    configuredInputs?.load().catch(() => undefined)
+  }, [configuredInputs])
 
   const current = state.current
   const group = state.groups.find(candidate => candidate.id === current?.provider)
@@ -640,7 +646,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
                 // No tick on a model row: it would sit right beside the
                 // capability badges and read as one of them. The accent colour
                 // (plus the row tint in CSS) is the whole selection signal.
-                modelTags(choice, t),
+                modelTags(choice, t, inputDeclarations.get(shownProvider as string)?.get(choice.id)),
               )
             })),
         ),

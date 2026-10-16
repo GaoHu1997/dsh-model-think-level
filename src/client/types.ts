@@ -292,8 +292,6 @@ export interface HeldWrite {
   compat?: CompatSuggestion
   /** The modality part, when this edit made one. */
   input?: InputIntent
-  /** Compat fields this edit owns and left empty (deleted on the replay). */
-  clearCompatKeys?: readonly string[]
   /** The per-model default-effort pick, when this edit made one. */
   defaultEffort?: DefaultEffortIntent
 }
@@ -315,16 +313,14 @@ export interface PendingWrite {
   compat?: CompatSuggestion
   /** The modality part, when this edit made one. */
   input?: InputIntent
-  /** Compat fields this edit owns and left empty (deleted when it lands). */
-  clearCompatKeys?: readonly string[]
   /** The per-model default-effort pick, when this edit made one. */
   defaultEffort?: DefaultEffortIntent
 }
 
 /**
  * The parts {@link pendingWriteOf} assembles into one {@link PendingWrite}:
- * the already-resolved ladder and modality intents plus the compat triple the
- * merge needs. Shared by the two writers of a suggestion — the row's own
+ * the already-resolved ladder and modality intents plus the compat block the
+ * write carries. Shared by the two writers of a suggestion — the row's own
  * editor and the injector's provider-wide adapt — so one suggestion can never
  * produce two different documents.
  */
@@ -333,15 +329,9 @@ export interface PendingWriteParts {
   efforts: EffortWriteIntent
   /** The modality intent, when this write made one. */
   input?: InputIntent
-  /**
-   * The compat fields the caller assembled by hand. A row whose editor never
-   * touched them passes the row's OWN stored compat: a hand-tuned field the
-   * suggestion does not carry must survive the write, not be cleared by it.
-   */
-  manualCompat?: CompatSuggestion
-  /** The compat block of an applied suggestion, which the manual fields override. */
+  /** The compat block of an applied suggestion. */
   appliedCompat?: CompatSuggestion
-  /** The route's wire protocol: what decides the owned (clearable) compat keys. */
+  /** The route's wire protocol: what decides the thinking-budget default. */
   routeApi?: string
   /**
    * The row's stored compat, read only for the thinking-budget default: an
@@ -389,12 +379,6 @@ export interface EffortEditorApi {
    * written only when one is supplied alongside a dict declaration -- an
    * omitted compat leaves whatever the document already holds untouched.
    *
-   * `clearCompatKeys` names the compat fields this edit OWNS and left empty: a
-   * key in neither the written block nor that list survives (a hand-tuned field
-   * the editor does not show is never dropped), while a listed one is deleted,
-   * which is what makes "Unset" mean unset instead of "keep the last choice
-   * forever".
-   *
    * Public seam: the one-row case of the injector's batch writer, kept on the
    * editor API for embedders and covered by the write-path tests. The editor
    * itself reports through {@link commit} since C2, and the injector's ledgers
@@ -406,7 +390,6 @@ export interface EffortEditorApi {
     efforts: EffortWriteIntent,
     compat?: CompatSuggestion,
     input?: InputIntent,
-    clearCompatKeys?: readonly string[],
     defaultEffort?: DefaultEffortIntent,
   ): Promise<WriteEffortsReply>
   /**

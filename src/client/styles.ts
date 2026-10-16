@@ -168,35 +168,6 @@ export const STYLES = `
 /* The master thinking switch, which lives OUTSIDE the card it gates: with it
    off that card is not rendered at all, so nothing here has to be hidden. */
 .bre-thinking-switch { margin: 0; }
-/* ---- Endpoint-compatibility controls ----
-   Same shape as the official capacity fields the editor sits under: a caption
-   above the control, the control capped at the official enum width (a field
-   width dropdown reads as a text field the user is expected to fill), and a
-   hint line beneath. Tokens are the official ones — the plugin's own --dsh-*
-   names are defined nowhere in this app, so their light-mode literals used to
-   render in both themes. */
-.bre-compat {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.bre-compat-row {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-.bre-compat-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.bre-compat-label {
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-tertiary);
-}
-.bre-compat-hint {
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-tertiary);
-}
 .bre-select, .bre-text-input {
   box-sizing: border-box;
   width: 100%;

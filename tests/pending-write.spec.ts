@@ -11,7 +11,7 @@
 
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { compatDraftOf, ladderIntent, pendingWriteOf } from '../src/client/EffortEditor.js'
+import { ladderIntent, pendingWriteOf } from '../src/client/EffortEditor.js'
 
 describe('ladderIntent', () => {
   it('writes the built ladder when the switch is on', () => {
@@ -35,48 +35,25 @@ describe('ladderIntent', () => {
   })
 })
 
-describe('compatDraftOf', () => {
-  it('is undefined for a row with no compat block', () => {
-    expect(compatDraftOf(undefined)).toBeUndefined()
-  })
-
-  it('drops a key the editor does not show', () => {
-    // A fresh editor's draft is the stored block restricted to the three fields
-    // it renders, so a hand-tuned key is not the draft's to rewrite.
-    expect(compatDraftOf({ thinkingFormat: 'qwen', supportsDeveloperRole: false })).toBeUndefined()
-  })
-
-  it('mirrors the three visible fields', () => {
-    expect(compatDraftOf({
-      thinkingTokenBudgetField: 'thinking_budget',
-      vllmPriority: 3,
-      supportsMaxOutputTokens: true,
-    })).toEqual({
-      thinkingTokenBudgetField: 'thinking_budget',
-      vllmPriority: 3,
-      supportsMaxOutputTokens: true,
-    })
-  })
-
-  it('keeps a meaningful false and a zero priority', () => {
-    expect(compatDraftOf({ supportsMaxOutputTokens: false })).toEqual({ supportsMaxOutputTokens: false })
-    expect(compatDraftOf({ vllmPriority: 0 })).toEqual({ vllmPriority: 0 })
-  })
-})
-
 describe('pendingWriteOf', () => {
-  it('lets the manual field win while the applied suggestion still contributes', () => {
+  it('writes the compat block the applied suggestion carries', () => {
+    // Nothing is restated here: the write carries the suggestion's own bytes,
+    // and the ledger merges them OVER the row's stored block, so a key this
+    // write never names is left exactly as the document held it.
     expect(pendingWriteOf({
       efforts: { high: 'high' },
       appliedCompat: { thinkingFormat: 'qwen', supportsReasoningEffort: true },
-      manualCompat: { supportsMaxOutputTokens: true },
-      routeApi: 'openai-responses',
+      routeApi: 'openai-completions',
     })).toEqual({
       efforts: { high: 'high' },
-      compat: { thinkingFormat: 'qwen', supportsReasoningEffort: true, supportsMaxOutputTokens: true },
-      // 'openai-responses' owns supportsMaxOutputTokens, and it is SET.
-      clearCompatKeys: [],
+      compat: { thinkingFormat: 'qwen', supportsReasoningEffort: true },
     })
+  })
+
+  it('attaches nothing on a protocol that owns no compat field', () => {
+    // openai-responses owned exactly one key, and its control is retired: a
+    // write there touches no compat key at all.
+    expect(pendingWriteOf({ efforts: 'keep', routeApi: 'openai-responses' })).toEqual({ efforts: 'keep' })
   })
 
   it('adds the openai-completions budget default an untouched endpoint needs', () => {
@@ -90,8 +67,6 @@ describe('pendingWriteOf', () => {
       thinkingFormat: 'openai',
       thinkingTokenBudgetField: 'thinking_token_budget',
     })
-    // The protocol owns both fields, and this write sets neither.
-    expect(write.clearCompatKeys).toEqual(['supportsThinkingTokenBudget', 'vllmPriority'])
   })
 
   it('leaves the budget field alone on another protocol', () => {
@@ -102,13 +77,12 @@ describe('pendingWriteOf', () => {
       initialCompat: { supportsThinkingTokenBudget: true },
     })
     expect(write.compat).toEqual({ thinkingFormat: 'openai' })
-    expect(write.clearCompatKeys).toEqual([])
   })
 
-  it('does not invent the default when the draft already names a field', () => {
+  it('does not invent the default when the applied suggestion already names a field', () => {
     const write = pendingWriteOf({
       efforts: false,
-      manualCompat: { thinkingTokenBudgetField: 'thinking_budget' },
+      appliedCompat: { thinkingTokenBudgetField: 'thinking_budget' },
       routeApi: 'openai-completions',
       initialCompat: { supportsThinkingTokenBudget: true },
     })
@@ -116,17 +90,10 @@ describe('pendingWriteOf', () => {
   })
 
   it('does not invent the default for an endpoint that never claimed the capability', () => {
-    const write = pendingWriteOf({ efforts: false, routeApi: 'openai-completions' })
-    expect(write.compat).toBeUndefined()
-    // No capability claim means no budget default. The clear list is still
-    // reported: on a protocol that owns fields, an empty draft is a decision to
-    // unset them, and the provider-wide path must land on exactly the bytes the
-    // row's own editor would have written.
-    expect(write.clearCompatKeys).toEqual([
-      'thinkingTokenBudgetField',
-      'supportsThinkingTokenBudget',
-      'vllmPriority',
-    ])
+    // No capability claim means no budget default -- and no clear list either:
+    // the editor owns no compat field any more, so a draft that names none is
+    // not a decision to unset anything.
+    expect(pendingWriteOf({ efforts: false, routeApi: 'openai-completions' })).toEqual({ efforts: false })
   })
 
   it('carries only the modality the caller resolved', () => {
@@ -145,7 +112,7 @@ describe('pendingWriteOf', () => {
       .toEqual({ efforts: false, defaultEffort: 'high' })
   })
 
-  it('reports a bare array-free clear list for a route that owns no compat field', () => {
+  it('reports a bare payload for a route that owns no compat field', () => {
     // The whole payload, so the shape a caller spreads into the ledger cannot
     // drift: an unrelated route keeps the shape it always had.
     expect(pendingWriteOf({ efforts: 'keep', routeApi: 'anthropic-messages' })).toEqual({ efforts: 'keep' })

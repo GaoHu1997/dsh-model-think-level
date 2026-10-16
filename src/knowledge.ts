@@ -79,9 +79,16 @@ export interface CompatSuggestion {
   thinkingTokenBudgetField?: ThinkingTokenBudgetField
   supportsThinkingTokenBudget?: boolean
   vllmPriority?: number
-  supportsMaxOutputTokens?: boolean
 }
 
+/**
+ * Compat keys a kernel older than their introduction does not know, so an
+ * autofill patch carrying one is stripped before the downgrade retry.
+ *
+ * `supportsMaxOutputTokens` is RETIRED -- the row editor no longer offers the
+ * control -- but a profile written by an earlier version still carries the key,
+ * and that stored value rides an autofill patch, so it stays on this list.
+ */
 export const NEW_COMPAT_KEYS = ['thinkingTokenBudgetField', 'vllmPriority', 'supportsMaxOutputTokens'] as const
 
 /** One knowledge-base entry: which model families it matches and what to declare. */
@@ -1600,25 +1607,25 @@ export function isSelfHostedEndpoint(baseURL: string | undefined): boolean {
   return host.includes(':')
 }
 
-/** Drop catalog-withheld keys pi-ai never accepts from a profile (defensive). */
+/**
+ * Drop catalog-withheld keys pi-ai never accepts from a profile (defensive).
+ *
+ * openai-responses now falls through to `undefined`: the plugin suggests no
+ * compat field on that gate since its max_output_tokens control was retired, so
+ * such a profile keeps exactly what it already stores.
+ */
 export function sanitizeCompatForProtocol(compat: CompatSuggestion, api: string): CompatSuggestion | undefined {
   const norm = normalize(api)
   const copy: Record<string, unknown> = { ...compat }
   delete copy['supportsMidConvoEffort']
   delete copy['allowedFallbackModels']
   if (norm === ANTHROPIC_PROTOCOL) {
-    for (const key of ['thinkingFormat', 'supportsReasoningEffort', 'thinkingTokenBudgetField', 'supportsThinkingTokenBudget', 'vllmPriority', 'supportsMaxOutputTokens'] as const) delete copy[key]
+    for (const key of ['thinkingFormat', 'supportsReasoningEffort', 'thinkingTokenBudgetField', 'supportsThinkingTokenBudget', 'vllmPriority'] as const) delete copy[key]
     if (copy['forceAdaptiveThinking'] === undefined) return undefined
     return { forceAdaptiveThinking: copy['forceAdaptiveThinking'] as boolean }
   }
-  if (norm === 'openai-responses') {
-    for (const key of ['thinkingFormat', 'supportsReasoningEffort', 'thinkingTokenBudgetField', 'supportsThinkingTokenBudget', 'vllmPriority'] as const) delete copy[key]
-    if (copy['supportsMaxOutputTokens'] === undefined) return undefined
-    return { supportsMaxOutputTokens: copy['supportsMaxOutputTokens'] as boolean }
-  }
   if (norm !== COMPAT_CAPABLE_PROTOCOL) return undefined
   delete copy['forceAdaptiveThinking']
-  delete copy['supportsMaxOutputTokens']
   return Object.keys(copy).length === 0 ? undefined : (copy as CompatSuggestion)
 }
 

@@ -831,6 +831,93 @@ describe('client apply()', () => {
     }
   })
 
+  it.each([
+    'agentrouter/deepseek-v4-flash',
+    'group/auto-deepseek-v4-1-flash',
+  ])('follows saved image declarations per provider even when the catalog omits input (%s)', async modelId => {
+    const providers = {
+      free: {
+        displayName: '免费',
+        api: 'openai-completions',
+        models: [
+          { id: modelId, name: 'ds v4 f', input: ['text', 'image'] },
+          { id: 'gpt-4o', input: ['text'] },
+        ],
+      },
+      other: {
+        displayName: 'Other',
+        api: 'openai-completions',
+        models: [{ id: modelId, name: 'ds v4 f', input: ['text'] }],
+      },
+    }
+    let join = makeJoin(providers)
+    const api = fakeApi(() => Promise.resolve(join))
+    const directory = directoryFixture()
+    directory.update({
+      ...directory.store.getSnapshot(),
+      current: { provider: 'free', model: modelId, reasoningEffort: 'high' },
+      groups: [
+        { id: 'free', name: '免费', models: [{ id: modelId, name: 'ds v4 f' }, { id: 'gpt-4o', name: 'GPT-4o' }] },
+        { id: 'other', name: 'Other', models: [{ id: modelId, name: 'ds v4 f' }] },
+      ],
+    })
+    const catalog = directory.store.getSnapshot()
+    // The host refreshes its mirror asynchronously after each settings push.
+    const staleScope = {
+      status: 'ready' as const,
+      revision: 1,
+      writable: true,
+      value: { providers: structuredClone(providers) },
+    }
+    const h = makeCtx(api, {
+      services: {
+        configForms: { get: () => ({ getSnapshot: () => staleScope }) },
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => directory },
+      },
+    })
+    const hasVision = (): boolean => document.querySelector('.bre-provider-models .bre-option-name[aria-label="ds v4 f"]')
+      ?.closest('.bre-option')?.querySelector('.bre-tag[title="' + en.tagVision + '"]') != null
+    const chooseProvider = (name: string): void => {
+      const button = Array.from(document.querySelectorAll<HTMLButtonElement>('.bre-provider'))
+        .find(candidate => candidate.querySelector('.bre-option-name')?.textContent === name)
+      expect(button).toBeDefined()
+      button!.click()
+    }
+    try {
+      buildComposerMenu()
+      const { apply } = await import('../src/client/index.js')
+      apply(h.ctx as unknown as Ctx)
+      await waitFor(() => document.querySelector('.bre-row-control') !== null)
+      document.querySelector<HTMLButtonElement>('.bre-row-control')!.click()
+      await waitFor(hasVision)
+      // Explicit text-only settings also override a vision-capable family.
+      const gpt = Array.from(document.querySelectorAll('.bre-provider-models .bre-option'))
+        .find(option => option.querySelector('.bre-option-name')?.textContent === 'GPT-4o')
+      await waitFor(() => gpt?.querySelector('.bre-tag') === null)
+
+      chooseProvider('Other')
+      await waitFor(() => document.querySelector('.bre-provider.is-open .bre-option-name')?.textContent === 'Other')
+      expect(hasVision()).toBe(false)
+      chooseProvider('免费')
+      await waitFor(hasVision)
+
+      // A settings push updates an already-open menu without a catalog reload.
+      providers.free.models[0]!.input = ['text']
+      join = makeJoin(providers)
+      h.emitRemote('settings/document-updated', PI_AI_NS)
+      await waitFor(() => !hasVision())
+      providers.free.models[0]!.input = ['text', 'image']
+      join = makeJoin(providers)
+      h.emitLocal('connection/reset')
+      await waitFor(hasVision)
+      expect(directory.store.getSnapshot()).toBe(catalog)
+      expect(api.settings.mutate).not.toHaveBeenCalled()
+    } finally {
+      h.disposeAll()
+    }
+  })
+
   it('sweeps the wiretap of a session whose scope is gone, keeping the live one', async () => {
     // Two resident sessions, each with its own directory; the host resolver
     // refuses an id whose session scope tore down (service.ts deletes the

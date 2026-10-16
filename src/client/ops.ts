@@ -252,7 +252,6 @@ export function createEditorApi(
         efforts: write.efforts,
         ...(write.compat === undefined ? {} : { compat: write.compat }),
         ...(write.input === undefined ? {} : { input: write.input }),
-        ...(write.clearCompatKeys === undefined ? {} : { clearCompatKeys: write.clearCompatKeys }),
         ...(write.defaultEffort === undefined ? {} : { defaultEffort: write.defaultEffort }),
       })
     },
@@ -262,7 +261,7 @@ export function createEditorApi(
     stageEfforts(route, modelId, efforts, compat, input, defaultEffort) {
       stage?.(route, modelId, efforts, compat, input, defaultEffort)
     },
-    async writeEfforts(route, modelId, rawEfforts, compat, input, clearCompatKeys, defaultEffort) {
+    async writeEfforts(route, modelId, rawEfforts, compat, input, defaultEffort) {
       // While an editor owns the document (the official editing card is open)
       // commit nothing: that card froze its own revision baseline, so any
       // write from here makes the user's NEXT save in it fail with
@@ -275,7 +274,6 @@ export function createEditorApi(
           efforts: rawEfforts,
           ...(compat === undefined ? {} : { compat }),
           ...(input === undefined ? {} : { input }),
-          ...(clearCompatKeys === undefined ? {} : { clearCompatKeys }),
           ...(defaultEffort === undefined ? {} : { defaultEffort }),
         })
         return { ok: true, staged: true }
@@ -289,7 +287,6 @@ export function createEditorApi(
         efforts: rawEfforts,
         ...(compat === undefined ? {} : { compat }),
         ...(input === undefined ? {} : { input }),
-        ...(clearCompatKeys === undefined ? {} : { clearCompatKeys }),
         ...(defaultEffort === undefined ? {} : { defaultEffort }),
       }], describe)
       const result = results[0] ?? { ok: false, error: 'no-result' }
@@ -313,7 +310,6 @@ export interface RowIntent {
   efforts: EffortWriteIntent
   compat?: CompatSuggestion
   input?: InputIntent
-  clearCompatKeys?: readonly string[]
   defaultEffort?: DefaultEffortIntent
 }
 
@@ -482,13 +478,10 @@ function mergeRowIntent(
     } else {
       copy['reasoningEfforts'] = { ...efforts }
       // The compat belongs to the declaration: merge it over the stored block so
-      // hand-tuned keys (incl. newer-only fields the suggestion never names)
-      // survive a declaration edit. Only the keys THIS edit owns and left empty
-      // are deleted -- clearing the UI's own picker has to mean unset, while a
-      // field the editor never showed stays untouched.
+      // hand-tuned keys (incl. fields the plugin never offers) survive a
+      // declaration edit. A key this write omits is left exactly as stored.
       const stored = isRecord(model['compat']) ? (model['compat'] as Record<string, unknown>) : {}
       const merged: Record<string, unknown> = { ...stored, ...(compat ?? {}) }
-      for (const key of row.clearCompatKeys ?? []) delete merged[key]
       if (Object.keys(stored).length > 0 || Object.keys(merged).length > 0) {
         if (Object.keys(merged).length === 0) delete copy['compat']
         else copy['compat'] = merged

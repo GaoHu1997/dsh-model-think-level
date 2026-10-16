@@ -278,6 +278,32 @@ describe('ComposerSlider model picker', () => {
     root.unmount()
   })
 
+  it('re-evaluates vision when a relay model keeps its id but changes its name', async () => {
+    const modelId = 'relay-shared-vision-alias'
+    const { directory, update } = fixture({
+      current: { provider: 'aliyun', model: modelId },
+      groups: onlyModel({ id: modelId, name: 'DeepSeek V4 Flash' }),
+    })
+    const { root, container } = await mount(directory)
+    try {
+      click(rows(container)[0])
+      await vi.waitFor(() => expect(modelOptions(container)).toHaveLength(1))
+      expect(modelOptions(container)[0]?.querySelector('[title="tagVision"]')).toBeNull()
+      update({
+        ...directory.store.getSnapshot(),
+        groups: onlyModel({ id: modelId, name: 'GPT-4o' }),
+      })
+      await vi.waitFor(() => expect(modelOptions(container)[0]?.querySelector('[title="tagVision"]')).not.toBeNull())
+      update({
+        ...directory.store.getSnapshot(),
+        groups: onlyModel({ id: modelId, name: 'DeepSeek V4 Flash' }),
+      })
+      await vi.waitFor(() => expect(modelOptions(container)[0]?.querySelector('[title="tagVision"]')).toBeNull())
+    } finally {
+      root.unmount()
+    }
+  })
+
   it('badges a vision model the catalog row does not describe from the knowledge base', async () => {
     // The Host's catalog rows carry no `input` (id/name/reasoning only), so for
     // a relay's spelling the eye badge rests on the knowledge base alone. The

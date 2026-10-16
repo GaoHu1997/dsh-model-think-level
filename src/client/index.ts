@@ -66,6 +66,7 @@ import {
 } from './model-order.js'
 import { STYLES } from './styles.ts'
 import { createComposerMenu } from './injection/composer-menu.js'
+import { createConfiguredInputs } from './configured-inputs.js'
 import { createConfiguredEfforts } from './injection/configured-efforts.js'
 import { createIdleAutofill } from './injection/autofill-run.js'
 import { createModelsPage } from './injection/models-page.js'
@@ -170,6 +171,7 @@ export function apply(ctx: ClientContext): void {
   // ---- The five injection seams ----
   // Each owns its own state now; see the module list in this file's header.
   const configuredEfforts = createConfiguredEfforts({ api: settingsApi })
+  const configuredInputs = createConfiguredInputs(settingsApi)
   const sessionDirectory = createSessionDirectoryTracker({
     ctx,
     configuredEffort: configuredEfforts.of,
@@ -181,6 +183,7 @@ export function apply(ctx: ClientContext): void {
     refreshed,
     sliderEnabled,
     directory: sessionDirectory.ensure,
+    configuredInputs,
   })
   // The running auto-fill complement (issue #7): the host fills once at boot,
   // everything a session adds afterwards is filled on the idle pass.
@@ -237,6 +240,7 @@ export function apply(ctx: ClientContext): void {
       // The configured-pick cache rides the same invalidations: a document
       // update (or a fresh connection) must not leave stale picks behind.
       configuredEfforts.invalidate()
+      configuredInputs.invalidate()
       modelsPage.schedule()
     }
     const disposers = [

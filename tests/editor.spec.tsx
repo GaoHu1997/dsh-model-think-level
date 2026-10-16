@@ -11,7 +11,7 @@ import { act } from 'react'
 import { createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { EffortEditor, clearedCompatKeys, compatClearIntent, type EffortEditorProps } from '../src/client/EffortEditor.js'
+import { EffortEditor, type EffortEditorProps } from '../src/client/EffortEditor.js'
 import type { SuggestReply, WriteEffortsReply, EffortEditorApi } from '../src/client/types.js'
 import { requestAutoEffort } from '../src/client/auto-effort.js'
 import { en } from '../src/client/locales.js'
@@ -101,29 +101,6 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
   return hit
 }
 
-/** Type into a text input the way a keyboard would: the native value setter
- *  bypasses React's value tracker, so the input event is not folded as a no-op. */
-async function typeText(input: HTMLInputElement, value: string): Promise<void> {
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-  })
-}
-
-/** Pick an option the way a pointer would: a real change event on a select. */
-async function pickOption(select: HTMLSelectElement, value: string): Promise<void> {
-  await act(async () => {
-    select.value = value
-    select.dispatchEvent(new Event('change', { bubbles: true }))
-  })
-}
-
-/** The single compat control with this aria-label stem (the index suffix is 1). */
-function compatControl<T extends Element>(container: HTMLElement, selector: string, label: string): T {
-  const hit = container.querySelector<T>(`${selector}[aria-label="${label} 1"]`)
-  if (hit === null) throw new Error(`no compat control "${label}"`)
-  return hit
-}
 
 /** Whether a button with exactly this text exists (absence is expected sometimes). */
 function hasButton(container: HTMLElement, text: string): boolean {
@@ -317,7 +294,6 @@ describe('EffortEditor', () => {
     expect(api.commit).toHaveBeenCalledWith('acme-gateway', 'qwen-max', {
       efforts: { off: null, low: 'low', high: 'high', max: 'max' },
       compat,
-      clearCompatKeys: ['thinkingTokenBudgetField', 'supportsThinkingTokenBudget', 'vllmPriority'],
     })
   })
 
@@ -350,7 +326,6 @@ describe('EffortEditor', () => {
     expect(api.commit).toHaveBeenLastCalledWith('acme-gateway', 'qwen-max', {
       efforts: { off: null, low: 'low', high: 'high', max: 'max' },
       compat,
-      clearCompatKeys: [],
       input: ['text', 'image'],
     })
   })
@@ -377,7 +352,6 @@ describe('EffortEditor', () => {
     expect(api.commit).toHaveBeenLastCalledWith('acme-gateway', 'qwen-max', {
       efforts: { off: null, low: 'low', max: 'max' },
       compat,
-      clearCompatKeys: [],
     })
   })
 
@@ -554,125 +528,17 @@ describe('EffortEditor modality', () => {
 })
 
 describe('EffortEditor compat controls', () => {
-  it('shows budget + priority controls on openai-completions only', async () => {
-    const { container } = await renderEditor(baseProps({ routeApi: 'openai-completions' }))
-    expect(container.textContent).toContain(t('budgetFieldLabel'))
-    expect(container.textContent).toContain(t('priorityLabel'))
-    expect(container.textContent).not.toContain(t('maxOutputLabel'))
-  })
-  it('shows the max_output control on openai-responses only', async () => {
-    const { container } = await renderEditor(baseProps({ routeApi: 'openai-responses' }))
-    expect(container.textContent).toContain(t('maxOutputLabel'))
-    expect(container.textContent).not.toContain(t('budgetFieldLabel'))
-  })
-  it('renders the responses control as an official-shaped field with a hint', async () => {
-    const { container } = await renderEditor(baseProps({ routeApi: 'openai-responses' }))
-    const select = container.querySelector<HTMLSelectElement>('select.bre-select')
-    expect(select).not.toBeNull()
-    // The same control shape the official capacity/enum fields use: a caption
-    // above, the picker capped at the official enum width, a hint below.
-    expect(select!.getAttribute('aria-label')).toBe(t('maxOutputLabel') + ' 1')
-    expect(container.querySelector('.bre-compat-label')?.textContent).toBe(t('maxOutputLabel'))
-    expect(container.querySelector('.bre-compat-hint')?.textContent).toBe(t('maxOutputHint'))
-    // The three intents, spelled so that "no value" is not the odd one out.
-    expect(Array.from(select!.options).map(option => option.textContent)).toEqual([
-      t('maxOutputUnset'), t('maxOutputOn'), t('maxOutputOff'),
-    ])
-    // The old inline-row shape is gone: the label no longer shares the control's line.
-    expect(container.querySelector('.bre-compat-row .bre-effort-level')).toBeNull()
-  })
-  it('shows no compat controls without a protocol', async () => {
-    const { container } = await renderEditor(baseProps({}))
-    expect(container.textContent).not.toContain(t('budgetFieldLabel'))
-    expect(container.textContent).not.toContain(t('maxOutputLabel'))
-  })
-  it('flags the legacy alias for migration', async () => {
-    const { container } = await renderEditor(baseProps({
-      routeApi: 'openai-completions',
-      compat: { supportsThinkingTokenBudget: true },
-    }))
-    expect(container.textContent).toContain(t('aliasMigrated'))
-  })
-  it('clearing the responses picker asks the seam to clear the key it owns', async () => {
-    // A controlled <select> whose value React tracks does not dispatch onChange
-    // for a synthetic change in this environment (the tracker is updated by the
-    // native change, and the event is then folded as a no-op). The key-clearing
-    // rule this case exists for is asserted over the pure seam instead, where
-    // it is the same call the commit path makes.
-    expect(clearedCompatKeys('openai-responses', undefined)).toEqual(['supportsMaxOutputTokens'])
-    expect(clearedCompatKeys('openai-responses', { supportsMaxOutputTokens: false })).toEqual([])
-    // The protocol owns no key elsewhere, so an unsupported route clears nothing.
-    expect(clearedCompatKeys(undefined, { supportsMaxOutputTokens: false })).toEqual([])
-  })
-  it('clears the owned keys even when the whole draft is empty', () => {
-    // Regression (C2): the commit path only attached `clearCompatKeys` when the
-    // DRAFT had bytes, so dropping the last owned field (e.g. the responses
-    // max-output pick back to "unset") sent no clear at all and the stored key
-    // survived. The owned-key clear must ride an empty draft too.
-    expect(compatClearIntent('openai-responses', undefined))
-      .toEqual({ clearCompatKeys: ['supportsMaxOutputTokens'] })
-    // A defined draft still reports every owned field it left empty...
-    expect(compatClearIntent('openai-responses', { supportsMaxOutputTokens: false }))
-      .toEqual({ clearCompatKeys: [] })
-    // ...while a route owning no key (or none at all) attaches nothing.
-    expect(compatClearIntent(undefined, undefined)).toEqual({})
-  })
-
-  it('writes the compat draft alongside the ladder', async () => {
-    const api = baseApi()
-    const { container } = await renderEditor(baseProps({
-      api,
-      routeApi: 'openai-completions',
-      efforts: { high: 'high' },
-      compat: { thinkingTokenBudgetField: 'thinking_budget' },
-    }))
-    await act(async () => { checkboxes(container)[2]!.click() })
-    expect(api.commit).toHaveBeenCalled()
-    const write = (api.commit.mock.calls[0] as unknown[])[2] as Record<string, unknown>
-    expect(write['compat']).toMatchObject({ thinkingTokenBudgetField: 'thinking_budget' })
-  })
-
-  it('queues the budget field the user just picked, not the one it replaced', async () => {
-    // Regression: the three compat handlers committed BEFORE React re-rendered,
-    // so the queued write carried the field the picker had already left behind —
-    // the UI showed the new spelling while the ledger held the old one.
-    const api = baseApi()
-    const { container } = await renderEditor(baseProps({
-      api,
-      routeApi: 'openai-completions',
-      compat: { thinkingTokenBudgetField: 'thinking_token_budget' },
-    }))
-    const picker = compatControl<HTMLSelectElement>(container, 'select.bre-select', t('budgetFieldLabel'))
-    await pickOption(picker, 'thinking_budget')
-    expect(picker.value).toBe('thinking_budget')
-    const write = (api.commit.mock.calls.at(-1) as unknown[])[2] as Record<string, unknown>
-    expect(write['compat']).toMatchObject({ thinkingTokenBudgetField: 'thinking_budget' })
-  })
-
-  it('queues the priority the user just typed, not the one it replaced', async () => {
-    const api = baseApi()
-    const { container } = await renderEditor(baseProps({
-      api,
-      routeApi: 'openai-completions',
-      compat: { vllmPriority: 8 },
-    }))
-    const field = compatControl<HTMLInputElement>(container, 'input.bre-text-input', t('priorityLabel'))
-    await typeText(field, '12')
-    const write = (api.commit.mock.calls.at(-1) as unknown[])[2] as Record<string, unknown>
-    expect(write['compat']).toMatchObject({ vllmPriority: 12 })
-  })
-
-  it('queues the max-output pick the user just made, not the one it replaced', async () => {
-    const api = baseApi()
-    const { container } = await renderEditor(baseProps({
-      api,
-      routeApi: 'openai-responses',
-      compat: { supportsMaxOutputTokens: true },
-    }))
-    const picker = compatControl<HTMLSelectElement>(container, 'select.bre-select', t('maxOutputLabel'))
-    await pickOption(picker, 'false')
-    const write = (api.commit.mock.calls.at(-1) as unknown[])[2] as Record<string, unknown>
-    expect(write['compat']).toMatchObject({ supportsMaxOutputTokens: false })
+  it('draws no compat card on any protocol now that every compat control is retired', async () => {
+    // The card is gone from the component, not merely unpopulated: nothing
+    // renders on the protocol that used to own the budget field and the
+    // priority, on the one whose picker was retired first, or without a
+    // protocol at all.
+    for (const routeApi of ['openai-completions', 'openai-responses', undefined]) {
+      const { container } = await renderEditor(baseProps({ routeApi }))
+      expect(container.querySelector('.bre-compat')).toBeNull()
+      expect(container.querySelector('select.bre-select')).toBeNull()
+      expect(container.textContent).not.toContain('thinking_token_budget')
+    }
   })
 })
 

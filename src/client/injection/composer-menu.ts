@@ -26,6 +26,7 @@ import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { PLUGIN_ID } from '../../constants.js'
 import { ComposerSlider, providerLabelOf } from '../ComposerSlider.js'
 import { ModelSearch, isModelPane } from '../ModelSearch.js'
+import type { ConfiguredInputs } from '../configured-inputs.js'
 import type { ModelDirectoryLike } from '../types.js'
 import { EffortBoundary, mountReact, unmountReact, type ForeignMount } from './mount.js'
 
@@ -43,6 +44,8 @@ export interface ComposerMenuDeps {
   sliderEnabled: () => boolean
   /** The current session's model directory, or undefined in the boot window. */
   directory: () => ModelDirectoryLike | undefined
+  /** Saved input declarations, independent of the host catalog projection. */
+  configuredInputs?: ConfiguredInputs
 }
 
 /** The composer injection's face: one reconcile per scan, one dispose per fiber. */
@@ -231,6 +234,7 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
           fallbackText: t('renderFailed'),
           children: refreshed(() => createElement(ComposerSlider, {
             directory: resolved,
+            configuredInputs: deps.configuredInputs,
             t,
             // The replicated body renders its OWN model and level lists, so it
             // never has to hand control back to the official drill-in pane —

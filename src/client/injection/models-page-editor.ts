@@ -33,7 +33,6 @@ import { modelsOf, routeFactsOf, isRecord } from '../../shared.js'
 import { buildIntent, draftFrom, sameEfforts } from '../effort.js'
 import {
   buildModalityIntent,
-  compatDraftOf,
   ladderIntent,
   modalityFrom,
   pendingWriteOf,
@@ -724,19 +723,6 @@ export interface EffectiveStagedIntents {
   input?: InputModalities
   /** The staged default-effort pick, when the staging carried one. */
   defaultEffort?: string | null
-  /**
-   * Compat fields the edit OWNS and left empty, so "unset" can mean unset
-   * instead of keeping the last choice forever. Computed by the editor's own
-   * `clearedCompatKeys` against the route's protocol, never against the whole
-   * stored block: a hand-tuned field the editor never showed survives.
-   *
-   * A STAGED flush never sets this. Staging carries a ladder and a modality,
-   * not a compat decision, and the host autofill writes the knowledge base's
-   * compat block into the very row it fills -- so clearing here would delete
-   * the suggestion the row is supposed to start from (the same "the plugin's
-   * own proposal is not a user decision" rule the ladder follows).
-   */
-  clearCompatKeys?: readonly string[]
 }
 
 export function effectiveStagedIntents(
@@ -831,9 +817,7 @@ function sameInputList(a: unknown, b: InputModalities): boolean {
 function isHeldWrite(value: unknown): value is HeldWrite {
   if (!isRecord(value)) return false
   const efforts = value['efforts']
-  if (efforts !== false && efforts !== 'keep' && !isRecord(efforts)) return false
-  const clear = value['clearCompatKeys']
-  return clear === undefined || (Array.isArray(clear) && clear.every(key => typeof key === 'string'))
+  return efforts === false || efforts === 'keep' || isRecord(efforts)
 }
 
 /**
@@ -986,7 +970,6 @@ async function flushQueued(deps: InjectorDeps, state: ScanState, ignoreFence = f
       efforts: write.efforts,
       ...(write.compat === undefined ? {} : { compat: write.compat }),
       ...(write.input === undefined ? {} : { input: write.input }),
-      ...(write.clearCompatKeys === undefined ? {} : { clearCompatKeys: write.clearCompatKeys }),
       ...(write.defaultEffort === undefined ? {} : { defaultEffort: write.defaultEffort }),
     }))
     const results = await writeModelRows(deps.api, route, intents, undefined, ignoreFence ? undefined : officialCardOpen)
@@ -1384,7 +1367,7 @@ function screenModelsLive(
  * routine answers from the settings DOCUMENT instead of the DOM: every model
  * the provider declares goes through the same suggestion the row's own
  * auto-adapt would have asked for, is mapped by the same pure functions
- * ({@link ladderIntent}, {@link compatDraftOf}, {@link pendingWriteOf}) so both
+ * ({@link ladderIntent}, {@link pendingWriteOf}) so both
  * paths write identical bytes, and lands by the same rule — nothing is written
  * while an official card holds the document; the write is held on the route
  * and the card's own Save commits it (issue #7 / C2).
@@ -1665,7 +1648,6 @@ export async function adaptEveryModel(
         efforts: ladderIntent(nextThinking, buildIntent(draftFrom(parts.efforts)), initialEfforts),
         input: imprinted || sameModality(nextModality, initialInput) ? undefined : buildModalityIntent(nextModality),
         defaultEffort,
-        manualCompat: compatDraftOf(initialCompat),
         appliedCompat: parts.compat,
         routeApi,
         initialCompat,

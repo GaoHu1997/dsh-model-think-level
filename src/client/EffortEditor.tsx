@@ -123,51 +123,6 @@ export function buildModalityIntent(draft: DraftModality): InputModalities | nul
   return draft.image ? ['text', 'image'] : ['text']
 }
 
-/**
- * The compat fields this editor can SET, per protocol — which is also the set
- * it may clear. A key from neither list survives an apply untouched: a
- * hand-tuned field the UI never showed is not this editor's to drop. Clearing
- * a picker means unset, not "keep whatever was chosen last".
- */
-export const OWNED_COMPAT_KEYS: Readonly<Record<string, readonly string[]>> = {
-  'openai-completions': ['thinkingTokenBudgetField', 'supportsThinkingTokenBudget', 'vllmPriority'],
-  'openai-responses': ['supportsMaxOutputTokens'],
-}
-
-/** The compat fields clearable on one protocol (empty = this edit owns none). */
-export function ownedCompatKeys(routeApi: string | undefined): readonly string[] {
-  return OWNED_COMPAT_KEYS[(routeApi ?? '').toLowerCase()] ?? []
-}
-
-/** The owned compat fields the draft actually left EMPTY. */
-export function clearedCompatKeys(routeApi: string | undefined, draft: CompatSuggestion | undefined): readonly string[] {
-  const owned = ownedCompatKeys(routeApi)
-  if (owned.length === 0) return []
-  const set = new Set<string>(draft === undefined ? [] : Object.keys(draft))
-  return owned.filter(key => !set.has(key))
-}
-
-/**
- * The `clearCompatKeys` part of a commit, derived from the draft.
- *
- * A DEFINED draft always reports (an empty array is meaningful: every owned
- * field it shows is set). An EMPTY draft must still clear the fields the
- * protocol OWNS -- dropping the last owned pick is a user decision to unset --
- * but only when there is something to clear: an unrelated route keeps the
- * shape it always had (no `clearCompatKeys` at all).
- * @param routeApi - the route's wire protocol.
- * @param writeCompat - the compat bytes this commit writes, if any.
- * @returns the clear part to spread into the commit payload.
- */
-export function compatClearIntent(
-  routeApi: string | undefined,
-  writeCompat: CompatSuggestion | undefined,
-): { clearCompatKeys?: readonly string[] } {
-  if (writeCompat !== undefined) return { clearCompatKeys: clearedCompatKeys(routeApi, writeCompat) }
-  const owned = clearedCompatKeys(routeApi, undefined)
-  return owned.length === 0 ? {} : { clearCompatKeys: owned }
-}
-
 /** Semantic equality between a modality draft and a stored declaration. */
 export function sameModality(draft: DraftModality, stored: InputModalities | undefined): boolean {
   if (!draft.declared) return stored === undefined
@@ -197,62 +152,9 @@ export function ladderIntent(
 }
 
 /**
- * The compat draft a FRESH editor on this row would hold.
- *
- * The editor's three compat inputs are seeded from the stored block, so an
- * untouched editor's draft is exactly the stored block restricted to the three
- * fields it shows. The injector's provider-wide adapt has no editor to ask for
- * a draft, so it derives the same value here: a hand-tuned field the UI does
- * not show stays untouchable, and one it does show survives the write.
- * @param compat - the row's stored compat block.
- * @returns the draft, or undefined when it holds no field at all.
- */
-export function compatDraftOf(compat: CompatSuggestion | undefined): CompatSuggestion | undefined {
-  const out: CompatSuggestion = {}
-  const budgetField = compat?.thinkingTokenBudgetField ?? ''
-  // The cast is the same one the editor's own compatDraft applies to its state
-  // string: the stored block is already typed, and a hand-tuned spelling the
-  // plugin's union does not name must survive the round trip unchanged.
-  if (budgetField !== '') out.thinkingTokenBudgetField = budgetField as CompatSuggestion['thinkingTokenBudgetField']
-  const priorityText = compat?.vllmPriority === undefined ? '' : String(compat.vllmPriority)
-  const pruned = priorityText.trim()
-  if (pruned !== '' && /^-?\d+$/.test(pruned)) out.vllmPriority = Number.parseInt(pruned, 10)
-  const maxOutput = compat?.supportsMaxOutputTokens === undefined ? '' : String(compat.supportsMaxOutputTokens)
-  if (maxOutput === 'true') out.supportsMaxOutputTokens = true
-  else if (maxOutput === 'false') out.supportsMaxOutputTokens = false
-  return Object.keys(out).length === 0 ? undefined : out
-}
-
-/**
- * The compat advice three MANUAL field values spell, from the values handed in.
- *
- * The editor's three compat controls are its own edit surface, so the handler
- * that just changed one must report the value it computed: re-reading the
- * component state there reports the PRE-update field, because React commits
- * that state after the event — the queued write then carries the previous
- * advice while the control already shows the new one.
- * @param parts - the three field values as they will read after the event.
- * @returns the draft, or undefined when all three are empty.
- */
-export function manualCompatOf(
-  parts: { budgetField: string; priorityText: string; maxOutput: string },
-): CompatSuggestion | undefined {
-  const out: CompatSuggestion = {}
-  // The cast is the same one the stored block round trip uses: a hand-tuned
-  // spelling the plugin's union does not name must survive unchanged.
-  if (parts.budgetField !== '') out.thinkingTokenBudgetField = parts.budgetField as CompatSuggestion['thinkingTokenBudgetField']
-  const pruned = parts.priorityText.trim()
-  if (pruned !== '' && /^-?\d+$/.test(pruned)) out.vllmPriority = Number.parseInt(pruned, 10)
-  if (parts.maxOutput === 'true') out.supportsMaxOutputTokens = true
-  else if (parts.maxOutput === 'false') out.supportsMaxOutputTokens = false
-  return Object.keys(out).length === 0 ? undefined : out
-}
-
-/**
  * Assemble one complete pending write from the parts a caller resolved: the
- * compat merge (the applied suggestion's block with the caller's own fields on
- * top), the thinking-budget default an openai-completions endpoint needs, and
- * the clear list for the fields this write OWNS and left empty.
+ * applied suggestion's compat block and the thinking-budget default an
+ * openai-completions endpoint needs.
  *
  * The single implementation of that assembly: the row's own editor reports the
  * user's edits through it, and the injector's provider-wide adapt reports
@@ -262,9 +164,10 @@ export function manualCompatOf(
  * @returns the write to hand the injector's ledger.
  */
 export function pendingWriteOf(parts: PendingWriteParts): PendingWrite {
-  const baseCompat = parts.appliedCompat
-  const manualCompat = parts.manualCompat
-  let writeCompat = baseCompat !== undefined ? { ...baseCompat, ...(manualCompat ?? {}) } : manualCompat
+  // Only the applied suggestion writes compat bytes. A stored block the UI no
+  // longer shows is not this write's to restate -- or to drop: the ledger
+  // merges these bytes OVER the stored block, so an omitted key survives.
+  let writeCompat = parts.appliedCompat
   if (
     parts.initialCompat?.supportsThinkingTokenBudget === true
     && parts.initialCompat?.thinkingTokenBudgetField === undefined
@@ -277,7 +180,6 @@ export function pendingWriteOf(parts: PendingWriteParts): PendingWrite {
     efforts: parts.efforts,
     ...(writeCompat === undefined ? {} : { compat: writeCompat }),
     ...(parts.input === undefined ? {} : { input: parts.input }),
-    ...compatClearIntent(parts.routeApi, writeCompat),
     ...(parts.defaultEffort === undefined ? {} : { defaultEffort: parts.defaultEffort }),
   }
 }
@@ -315,10 +217,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   // Modality + capacity parts of the applied suggestion. Capacities are
   // DISPLAY-ONLY: they render in the reference block and never touch the
   // official capacity inputs.
-  const [budgetField, setBudgetField] = useState<string>(() => initialCompat?.thinkingTokenBudgetField ?? '')
-  const [priorityText, setPriorityText] = useState<string>(() => initialCompat?.vllmPriority === undefined ? '' : String(initialCompat.vllmPriority))
-  const [maxOutput, setMaxOutput] = useState<string>(() => initialCompat?.supportsMaxOutputTokens === undefined ? '' : String(initialCompat.supportsMaxOutputTokens))
-  const previousCompat = useRef<CompatSuggestion | undefined>(initialCompat)
   const [suggestedInputSource, setSuggestedInputSource] = useState<InputSource | undefined>(undefined)
   const [referenceContext, setReferenceContext] = useState<number | undefined>(undefined)
   const [referenceMaxTokens, setReferenceMaxTokens] = useState<number | undefined>(undefined)
@@ -374,32 +272,8 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
       previousDefaultEffort.current = initialDefaultEffort
       if (!dirtyRef.current) setDefaultEffort(initialDefaultEffort ?? '')
     }
-    if (JSON.stringify(previousCompat.current ?? null) !== JSON.stringify(initialCompat ?? null)) {
-      previousCompat.current = initialCompat
-      if (!dirtyRef.current) {
-        setBudgetField(initialCompat?.thinkingTokenBudgetField ?? '')
-        setPriorityText(initialCompat?.vllmPriority === undefined ? '' : String(initialCompat.vllmPriority))
-        setMaxOutput(initialCompat?.supportsMaxOutputTokens === undefined ? '' : String(initialCompat.supportsMaxOutputTokens))
-      }
-    }
-    // The pick participates in the same sync discipline as the other three
-    // parts — its token MUST ride the dependency array, or a pick-only push
-    // (another tab, a hand-edited document) never reaches this draft, and a
-    // later unrelated Apply writes the stale pick back over the document.
-  }, [initialEfforts, initialInput, initialCompat, initialDefaultEffort])
+  }, [initialEfforts, initialInput, initialDefaultEffort])
 
-  // The three fields as the STATE holds them — correct for every caller that did
-  // not just change one; the three compat handlers pass their own next triple
-  // through commitPending instead (see {@link manualCompatOf}).
-  const compatDraft = (): CompatSuggestion | undefined => manualCompatOf({ budgetField, priorityText, maxOutput })
-  const compatChanged = (): boolean => {
-    const draftOut = compatDraft()
-    return JSON.stringify(draftOut ?? null) !== JSON.stringify({
-      ...(initialCompat?.thinkingTokenBudgetField === undefined ? {} : { thinkingTokenBudgetField: initialCompat.thinkingTokenBudgetField }),
-      ...(initialCompat?.vllmPriority === undefined ? {} : { vllmPriority: initialCompat.vllmPriority }),
-      ...(initialCompat?.supportsMaxOutputTokens === undefined ? {} : { supportsMaxOutputTokens: initialCompat.supportsMaxOutputTokens }),
-    })
-  }
   // The declared levels of this draft: the pick's value domain.
   const armedLevels = LEVEL_ORDER.filter(level => draft[level].on)
   const defaultEffortIntent = defaultEffort === (initialDefaultEffort ?? '')
@@ -411,7 +285,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   const effectiveEfforts: false | ReasoningEfforts | undefined = thinking ? buildIntent(draft) : false
   const changed = !sameEfforts(effectiveEfforts, initialEfforts)
     || !sameModality(modality, initialInput)
-    || compatChanged()
     || defaultEffortIntent !== undefined
 
   /**
@@ -459,11 +332,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     // The switch's pre-update value: a toggle computes its own next value and
     // hands it in, exactly like the three parts above.
     nextThinking: boolean = thinking,
-    // The three compat fields as they will read AFTER this event. Undefined
-    // means "this edit did not change one", i.e. the state's own values — the
-    // handlers that DO change one pass their next triple, because reading the
-    // state here would queue the previous advice.
-    nextCompatFields?: { budgetField: string; priorityText: string; maxOutput: string },
   ): void => {
     // OFF is the explicit `false` declaration, whatever the draft still holds
     // (the draft is deliberately left alone, so flipping back loses no edits).
@@ -475,15 +343,13 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     const defaultEffortOut = nextDefaultEffort === (initialDefaultEffort ?? '')
       ? undefined
       : nextDefaultEffort === '' ? null : nextDefaultEffort
-    // The compat merge, the owned-key clear list and the thinking-budget
-    // default live in ONE place ({@link pendingWriteOf}), shared with the
-    // injector's provider-wide adapt: a suggestion must write the same bytes
-    // whichever path applied it.
+    // The compat bytes and the thinking-budget default live in ONE place
+    // ({@link pendingWriteOf}), shared with the injector's provider-wide
+    // adapt: a suggestion must write the same bytes whichever path applied it.
     const write = pendingWriteOf({
       efforts: effortsIntent,
       input: nextInput,
       defaultEffort: defaultEffortOut,
-      manualCompat: nextCompatFields === undefined ? compatDraft() : manualCompatOf(nextCompatFields),
       appliedCompat: appliedCompatRef.current,
       routeApi,
       initialCompat,
@@ -556,31 +422,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     const nextModality = { declared: false, image: false }
     setModality(nextModality)
     commitPending(draft, nextModality, defaultEffort)
-    setMessage(undefined)
-  }
-
-  // Each text field reports on its own change: a controlled input fires per
-  // keystroke, and commitPending collapses the ones that do not move the value.
-  // Each one hands over its OWN next triple for the same reason it hands over
-  // its next draft: the state it just set is not readable yet on this turn.
-  const patchBudgetField = (value: string): void => {
-    markDirty()
-    setBudgetField(value)
-    commitPending(draft, modality, defaultEffort, thinking, { budgetField: value, priorityText, maxOutput })
-    setMessage(undefined)
-  }
-
-  const patchPriority = (value: string): void => {
-    markDirty()
-    setPriorityText(value)
-    commitPending(draft, modality, defaultEffort, thinking, { budgetField, priorityText: value, maxOutput })
-    setMessage(undefined)
-  }
-
-  const patchMaxOutput = (value: string): void => {
-    markDirty()
-    setMaxOutput(value)
-    commitPending(draft, modality, defaultEffort, thinking, { budgetField, priorityText, maxOutput: value })
     setMessage(undefined)
   }
 
@@ -680,9 +521,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     setThinking(initialEfforts !== false)
     setModality(modalityFrom(initialInput))
     setDefaultEffort(initialDefaultEffort ?? '')
-    setBudgetField(initialCompat?.thinkingTokenBudgetField ?? '')
-    setPriorityText(initialCompat?.vllmPriority === undefined ? '' : String(initialCompat.vllmPriority))
-    setMaxOutput(initialCompat?.supportsMaxOutputTokens === undefined ? '' : String(initialCompat.supportsMaxOutputTokens))
     setSuggested(undefined)
     setSuggestedSource('')
     setSuggestedConfidence('low')
@@ -840,65 +678,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
           {!modality.declared ? <p className="bre-modality-note">{t('modalityInherit')}</p> : null}
         </div>
       )}
-      {(routeApi ?? '').toLowerCase() === 'openai-completions' ? (
-        <div className="bre-compat">
-          <span className="bre-effort-title">{t('compatTitle')}</span>
-          <label className="bre-compat-row">
-            <span className="bre-compat-label">{t('budgetFieldLabel')}</span>
-            <select
-              className="bre-select"
-              disabled={disabled}
-              aria-label={t('budgetFieldLabel') + ' ' + String(index + 1)}
-              value={budgetField}
-              onChange={(event) => { patchBudgetField(event.target.value) }}
-            >
-              <option value="">{t('budgetUnset')}</option>
-              <option value="thinking_token_budget">thinking_token_budget</option>
-              <option value="thinking_budget">thinking_budget</option>
-              <option value="thinking_budget_tokens">thinking_budget_tokens</option>
-            </select>
-            <span className="bre-compat-hint">{t('budgetFieldHint')}</span>
-          </label>
-          <div className="bre-compat-row">
-            <label className="bre-compat-field">
-              <span className="bre-compat-label">{t('priorityLabel')}</span>
-              <input
-                type="text"
-                inputMode="numeric"
-                className="bre-text-input"
-                value={priorityText}
-                disabled={disabled}
-                placeholder={t('priorityPlaceholder')}
-                aria-label={t('priorityLabel') + ' ' + String(index + 1)}
-                onChange={(event) => { patchPriority(event.target.value) }}
-              />
-            </label>
-            <span className="bre-compat-hint">{t('priorityHint')}</span>
-            {priorityText.trim() !== '' && !/^-?\d+$/.test(priorityText.trim()) ? <p className="bre-effort-note bre-error">{t('priorityInvalid')}</p> : null}
-          </div>
-          {initialCompat?.supportsThinkingTokenBudget === true && initialCompat?.thinkingTokenBudgetField === undefined ? <p className="bre-effort-note">{t('aliasMigrated')}</p> : null}
-        </div>
-      ) : null}
-      {(routeApi ?? '').toLowerCase() === 'openai-responses' ? (
-        <div className="bre-compat">
-          <span className="bre-effort-title">{t('compatTitle')}</span>
-          <label className="bre-compat-row">
-            <span className="bre-compat-label">{t('maxOutputLabel')}</span>
-            <select
-              className="bre-select"
-              disabled={disabled}
-              aria-label={t('maxOutputLabel') + ' ' + String(index + 1)}
-              value={maxOutput}
-              onChange={(event) => { patchMaxOutput(event.target.value) }}
-            >
-              <option value="">{t('maxOutputUnset')}</option>
-              <option value="true">{t('maxOutputOn')}</option>
-              <option value="false">{t('maxOutputOff')}</option>
-            </select>
-            <span className="bre-compat-hint">{t('maxOutputHint')}</span>
-          </label>
-        </div>
-      ) : null}
       {staged ? <p className="bre-effort-note">{t('stagedHint')}</p> : null}
       {initialEfforts === false ? <p className="bre-effort-note">{t('reasoningDisabled')}</p> : null}
       {wireRisk === undefined
