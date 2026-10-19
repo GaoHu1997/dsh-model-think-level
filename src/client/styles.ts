@@ -797,17 +797,23 @@ body:not([data-ds-dark-theme]) .bre-tip {
   gap: 8px;
 }
 /* The titled-section rows the pane is built from: the title row names its
-   section (headers first; future advanced sections each carry one), sitting
-   under a hairline the way the official page's group titles do.
-   The head strip above it is where the headers section draws its title now —
-   it is the one title the pane needs, and it is the line the hint reads under
-   — so this rule is the hairline's home alone, for the sections that follow. */
+   section, and its hairline sits ABOVE the title so it divides this section
+   from the one before it rather than underlining this title (an underline
+   belongs to the title it would be read against, and this title has a whole
+   section under it). Only a section that FOLLOWS another wears one; the
+   headers section draws its title in the head strip above and needs none. */
 .bre-headers-title-row {
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--dsw-alias-border-l2, #0000001a);
-  margin-bottom: 2px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border-l2, #0000001a);
 }
+/* A section title, so it wears the same colour as the head strip's title above
+   it (--dsw-alias-label-primary). The base .bre-effort-title is the muted
+   secondary the field labels use, and a section heading dimmer than the 请求头
+   heading above it reads as a sub-label OF it instead of a section beside it.
+   The weight already matches: the base rule sets 600. */
 .bre-headers-title-row .bre-effort-title {
+  color: var(--dsw-alias-label-primary, #0f1115);
   font-size: 13px;
   line-height: 20px;
 }
@@ -860,8 +866,12 @@ body:not([data-ds-dark-theme]) .bre-tip {
 }
 
 /* The section's commit/dismiss pair, matching the official editor's own
-   actions: a filled commit and a bordered dismiss, 36px tall at 14px. */
-.bre-headers-edit .bre-primary-button {
+   actions: a filled commit and a bordered dismiss, 36px tall at 14px.
+   .bre-headers-actions is the same pair pulled OUT of the header editor: in
+   the 高级配置 pane the row closes the whole pane, so it sits after every
+   section and must not inherit the rows' size rules from a parent that is no */
+.bre-headers-edit .bre-primary-button,
+.bre-headers-actions .bre-primary-button {
   height: 36px;
   padding: 0 14px;
   border: none;
@@ -873,11 +883,14 @@ body:not([data-ds-dark-theme]) .bre-tip {
   line-height: 1;
   cursor: pointer;
 }
-.bre-headers-edit .bre-primary-button:hover:not(:disabled) {
+.bre-headers-edit .bre-primary-button:hover:not(:disabled),
+.bre-headers-actions .bre-primary-button:hover:not(:disabled) {
   background: var(--dsw-alias-button-primary-hover, #43454a);
 }
-.bre-headers-edit .bre-primary-button:disabled { opacity: 0.5; cursor: default; }
-.bre-headers-edit .bre-secondary-button {
+.bre-headers-edit .bre-primary-button:disabled,
+.bre-headers-actions .bre-primary-button:disabled { opacity: 0.5; cursor: default; }
+.bre-headers-edit .bre-secondary-button,
+.bre-headers-actions .bre-secondary-button {
   height: 36px;
   padding: 0 14px;
   border: 1px solid var(--dsw-alias-border-l3, #0000001f);
@@ -886,8 +899,15 @@ body:not([data-ds-dark-theme]) .bre-tip {
   color: var(--dsw-alias-label-primary, #0f1115);
   font-size: 14px;
 }
-.bre-headers-edit .bre-secondary-button:hover:not(:disabled) {
+.bre-headers-edit .bre-secondary-button:hover:not(:disabled),
+.bre-headers-actions .bre-secondary-button:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover, #2631480f);
+}
+/* The row that closes the pane. It gets room, not a rule: the last section
+   already carries the pane's divider on its title row, so a line here would
+   draw a second one with nothing between them to divide. */
+.bre-headers-actions {
+  padding-top: 12px;
 }
 
 /* The row actions and the section's Edit affordance: the official 28px
@@ -944,6 +964,34 @@ body:not([data-ds-dark-theme]) .bre-tip {
 .bre-headers .bre-effort-note.bre-warn { color: var(--dsw-alias-state-warn-label, #dd8629); }
 .bre-headers .bre-effort-message.bre-success { color: var(--dsw-alias-state-success-primary, #22c55e); }
 .bre-headers .bre-effort-message.bre-error { color: var(--dsw-alias-state-error-primary, #ec1313); }
+
+/* The pane's second section (long-cache retention). It is inside the advanced
+   region — that is what makes the tab takeover hide it with the rest — but it is
+   NOT part of the header editor: it draws its own title row and its own switch
+   row, so the 请求头 heading above it is visibly a sibling rather than a parent. */
+.bre-cache {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* The hairline belongs to the section above it: this one starts a new group in
+     the same card, and the official page's group titles do not get both a rule
+     above and the title row's rule below. */
+  margin-top: 4px;
+}
+.bre-cache-row {
+  display: flex;
+  align-items: center;
+  /* The label names the setting, the switch states it, and the two ends of the
+     row hold them apart: nothing sits between them. */
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+}
+.bre-cache-label {
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font-size: 13px;
+  line-height: 20px;
+}
 
 @media (max-width: 520px) {
   .bre-headers-columns { display: none; }

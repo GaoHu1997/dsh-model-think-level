@@ -12,7 +12,11 @@
  * `modelAdvanced` dictionary value: "Capacities"/容量 through 0.1.6-alpha.1,
  * "Model options"/模型选项 from 0.1.6-alpha.2); the editor is inserted into the
  * same disclosure container that holds the official context-window / max
- * tokens fields.
+ * tokens fields. A kernel that ships its OWN reasoning-levels group in that
+ * same disclosure (0.2.1-rc.2's `ModelReasoningEfforts`) would leave the row
+ * showing two controls for one declaration, so the official group is stood down
+ * on exactly the rows this editor owns — and handed back when the editor goes
+ * away. See {@link hideOfficialReasoning}.
  *
  * Because this walks the official page's rendered DOM (class names and
  * structure that the harness can change), the injector is defensive by
@@ -1110,6 +1114,78 @@ function nextFrame(): Promise<void> {
  */
 function officialInputTypesOf(container: HTMLElement): boolean {
   return container.querySelector('[class*="modelInputTypes"]') !== null
+}
+
+/** The official reasoning group's class-name stem (see {@link officialReasoningOf}). */
+const OFFICIAL_REASONING_STEM = 'modelReasoning'
+
+/**
+ * Marks the official reasoning group THIS plugin stood down, so a later scan
+ * lifts that plugin's hide and nothing else's (see {@link showOfficialReasoning}).
+ */
+const REASONING_HIDDEN_ATTR = 'data-bre-reasoning-hidden'
+
+/**
+ * The official page's own per-model reasoning-levels group inside this row's
+ * disclosure (0.2.1-rc.2's `ModelReasoningEfforts`), or undefined on a kernel
+ * that ships none.
+ *
+ * Matched the way every other anchor here is — by the official class-name stem,
+ * never by a kernel version. Every class in that subtree is a LONGER stem
+ * (`modelReasoningHead`, `modelReasoningLabel`, `modelReasoningRow`, …) and the
+ * group is the row's only such subtree, so the container's first match in
+ * document order is the group root: standing it down takes the official head,
+ * its switch and all of its level rows with it in one write.
+ */
+export function officialReasoningOf(container: HTMLElement): HTMLElement | undefined {
+  return container.querySelector<HTMLElement>(`[class*="${OFFICIAL_REASONING_STEM}"]`) ?? undefined
+}
+
+/**
+ * Stand the official reasoning-levels group down for a row whose levels this
+ * plugin's own editor now owns.
+ *
+ * The host renders BOTH controls for one field — its own 推理等级 group beside
+ * this plugin's 思考等级 editor — which is two editors for the same declaration,
+ * and the plugin's is the one that stays: it is the surface that also carries
+ * the modality echo, the remembered level and the compat fields, none of which
+ * the official group knows about. A row whose document is not writable is
+ * covered too: the official group is disabled by that same state, so hiding it
+ * costs no editing path the plugin's read-only editor does not already stand in
+ * for.
+ *
+ * The hide is the element's OWN inline `display`, written only when it differs
+ * (compare-before-write, like every other DOM write here): the host renders this
+ * element from props that carry no `display`, so React never writes the property
+ * back, and no stylesheet of ours has to know the official class hash. The
+ * marker attribute is what later lets {@link showOfficialReasoning} tell a hide
+ * of ours from one the host wrote itself.
+ */
+export function hideOfficialReasoning(container: HTMLElement): void {
+  const group = officialReasoningOf(container)
+  if (group === undefined) return
+  // Already off screen — the host's own doing, e.g. a card that renders this
+  // group hidden. There is nothing to stand down, and nothing to MARK: claiming
+  // it here is what would let a later show lift a hide this plugin never made.
+  if (group.style.display === 'none') return
+  group.setAttribute(REASONING_HIDDEN_ATTR, '1')
+  group.style.display = 'none'
+}
+
+/**
+ * Hand the official reasoning group back: the row's editor is going away, so the
+ * plugin no longer stands in for that control and must not leave the field
+ * hidden on the page the user still has open.
+ *
+ * Only a group THIS plugin stood down is restored — the marker attribute is what
+ * proves it — so an inline `display` the host wrote itself is left as it is.
+ */
+export function showOfficialReasoning(container: HTMLElement): void {
+  const group = officialReasoningOf(container)
+  if (group === undefined) return
+  if (group.getAttribute(REASONING_HIDDEN_ATTR) !== '1') return
+  group.removeAttribute(REASONING_HIDDEN_ATTR)
+  if (group.style.display === 'none') group.style.display = ''
 }
 
 /**
@@ -2618,7 +2694,13 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     // out, so every path that skips the row scan also has to clear the seats.
     reconcileAutoEffortSeats(root, [], { t: deps.t })
     if (state.mounted.size > 0) {
-      for (const [, entry] of state.mounted) entry.editor.unmount()
+      for (const [container, entry] of state.mounted) {
+        // The card (and with it every expanded row) is gone, but the official
+        // group was hidden by a DOM write of ours and must not outlive the
+        // editor that stood in for it.
+        showOfficialReasoning(container)
+        entry.editor.unmount()
+      }
       state.mounted.clear()
     }
     // No editing card is on the page, so no on-screen revision baseline can be
@@ -2643,7 +2725,10 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // auto-adapt seat stays beside it. Taking the seat out is what made that
   // link jump the moment the last model was deleted.
   if (!hasCapacityRows) {
-    for (const [, entry] of state.mounted) entry.editor.unmount()
+    for (const [container, entry] of state.mounted) {
+      showOfficialReasoning(container)
+      entry.editor.unmount()
+    }
     state.mounted.clear()
     state.describePromise ??= deps.describeNamespace()
     const seatLabels = labels
@@ -2725,6 +2810,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     // Unmount editors whose rows are gone (the page re-rendered).
     for (const [key, entry] of state.mounted) {
       if (!found.some(candidate => candidate.container === key)) {
+        showOfficialReasoning(key)
         entry.editor.unmount()
         state.mounted.delete(key)
       }
@@ -2895,6 +2981,13 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         readOnly: join.writable !== true,
         t: deps.t,
       }
+      // This container is getting (or already has) the plugin's own level
+      // editor, so the official page's copy of the same control is stood down
+      // here. Asserted on every scan rather than once per row: the official page
+      // re-creates that group whenever the row's saved levels change (a save
+      // that finally gives the model a ladder), under a container whose editor
+      // has long been mounted.
+      hideOfficialReasoning(container)
       const existing = state.mounted.get(container)
       if (existing !== undefined) {
         // The official page kept the container but moved the document under

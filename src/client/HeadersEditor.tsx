@@ -26,6 +26,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { HEADERS_CONFIG_PATH, PLUGIN_ID } from '../constants.js'
+import { LongCacheSection } from './LongCacheSection.js'
 import { describeNamespace, providerHeadersOf, writeProviderHeaders, type ProviderHeadersReply } from './ops.js'
 import type { RemoteApi } from './types.js'
 
@@ -492,36 +493,6 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
                         </>
                       )
                       : null}
-                    <div className="bre-effort-actions">
-                      {/* Dismiss first, commit last — the official footer's own
-                          order (`editorActions` renders the cancel button before
-                          the submit button), which the two sibling panes wear
-                          and the fold view of this one did not. Under the tabs
-                          this row REPLACES that footer (the takeover hides the
-                          official body), so matching the order is the point.
-                          Cancel stays live while the namespace is read-only:
-                          the pane could otherwise not be left at all. */}
-                      <button type="button" className="bre-secondary-button" disabled={busy} onClick={cancel}>
-                        {t('headersCancel')}
-                      </button>
-                      {/* Deferred mode has no Save to offer: the route this write
-                          is addressed to does not exist yet, so a button here
-                          could only ever report `headersNoRoute`. Dropping it is
-                          the honest shape of the pane, and the notes above say
-                          what took its place. */}
-                      {isDeferred
-                        ? null
-                        : (
-                          <button
-                            type="button"
-                            className="bre-primary-button"
-                            disabled={disabled}
-                            onClick={() => { void save(headersFromDraft(draft)) }}
-                          >
-                            {t('headersSave')}
-                          </button>
-                        )}
-                    </div>
                   </div>
                 )
                 : (
@@ -553,8 +524,59 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
                       )}
                   </div>
                 )}
+            {/* A SECOND titled section, not part of the header editor: what it
+                edits is the route profile's long-cache compat, which the adapter
+                reads from the request BODY — no header can carry it. It sits here
+                because this pane is the route's advanced configuration, and it
+                carries its own heading at the 请求头 heading's level so it never
+                reads as one more header. Deferred mode (the create card) has no
+                route to write to yet, so it stays out of that draft pane. */}
+            {isDeferred ? null : <LongCacheSection route={route} api={api} t={t} />}
           </>
         )}
+
+      {/*
+        The pane's commit row, LAST — under every section, not inside the header
+        editor. The pane is the route's whole advanced configuration (headers,
+        then how it caches), and a Save that sat between them would read as a Save
+        for the headers alone and leave the section below it outside the form.
+
+        In the FOLD this row is not rendered: the card's own footer is on screen
+        there and stays the only commit row, which is why the branch also keeps
+        `editing` honest.
+      */}
+      {!loading && (inline || editing)
+        ? (
+          <div className="bre-effort-actions bre-headers-actions">
+            {/* Dismiss first, commit last — the official footer's own order
+                (`editorActions` renders the cancel button before the submit
+                button), which the two sibling panes wear and the fold view of
+                this one did not. Under the tabs this row REPLACES that footer
+                (the takeover hides the official body), so matching the order is
+                the point. Cancel stays live while the namespace is read-only:
+                the pane could otherwise not be left at all. */}
+            <button type="button" className="bre-secondary-button" disabled={busy} onClick={cancel}>
+              {t('headersCancel')}
+            </button>
+            {/* Deferred mode has no Save to offer: the route this write is
+                addressed to does not exist yet, so a button here could only ever
+                report `headersNoRoute`. Dropping it is the honest shape of the
+                pane, and the notes above say what took its place. */}
+            {isDeferred
+              ? null
+              : (
+                <button
+                  type="button"
+                  className="bre-primary-button"
+                  disabled={disabled}
+                  onClick={() => { void save(headersFromDraft(draft)) }}
+                >
+                  {t('headersSave')}
+                </button>
+              )}
+          </div>
+        )
+        : null}
 
       {message === undefined
         ? null

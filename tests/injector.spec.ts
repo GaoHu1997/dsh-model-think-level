@@ -7,7 +7,7 @@
 
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { absorbDelta, adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, pinModelListCards, releaseModelListRepins, queueWriteInto, reconcile, stageEffortsInto, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
+import { absorbDelta, adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, hideOfficialReasoning, officialReasoningOf, pinModelListCards, releaseModelListRepins, queueWriteInto, reconcile, showOfficialReasoning, stageEffortsInto, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
 import { suggestEfforts, type ReasoningEfforts } from '../src/knowledge.js'
 import type { RemoteApi } from '../src/client/types.js'
 
@@ -324,6 +324,109 @@ describe('reconcile', () => {
     root.querySelectorAll('.modelEntry')[1]?.remove()
     await settle(() => reconcile(root, deps, state), state)
     expect(state.mounted.size).toBe(1)
+  })
+
+  /** The official 0.2.1-rc.2 per-model reasoning-levels group, as React renders it. */
+  const officialReasoningMarkup = `
+    <div class="ModelsSection_modelReasoning__hash" role="group" aria-label="推理等级 1">
+      <div class="ModelsSection_modelReasoningHead__hash">
+        <span class="ModelsSection_modelFieldLabel__hash ModelsSection_modelReasoningLabel__hash">推理等级</span>
+      </div>
+      <div class="ModelsSection_modelReasoningRow__hash"><select aria-label="档位 1"></select></div>
+    </div>`
+
+  it('stands the official reasoning-levels group down on the rows it equips', async () => {
+    // 0.2.1-rc.2 renders its OWN reasoning-levels group (推理等级) inside the
+    // same disclosure the plugin mounts its 思考等级 editor into: two editors
+    // for one declaration. The plugin's is the one that stays, so the official
+    // group is hidden on exactly the rows it equips -- and only those.
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    const advanced = root.querySelectorAll<HTMLElement>('.modelAdvanced')[0]!
+    advanced.insertAdjacentHTML('beforeend', officialReasoningMarkup)
+    await settle(() => reconcile(root, deps, state), state)
+
+    expect(deps.mount).toHaveBeenCalledTimes(2)
+    const group = officialReasoningOf(advanced)!
+    expect(group.style.display).toBe('none')
+    expect(group.getAttribute('data-bre-reasoning-hidden')).toBe('1')
+    // The row keeps its own editor (the control that now owns the levels)...
+    expect(advanced.querySelector('[data-plugin="dsh-model-think-level"]')).not.toBeNull()
+    // ...and the row WITHOUT one is left exactly as the host rendered it.
+    expect(officialReasoningOf(root.querySelectorAll<HTMLElement>('.modelAdvanced')[1]!)).toBeUndefined()
+  })
+
+  it('re-asserts the hide when the official page re-creates that group', async () => {
+    // The group's presence follows the SAVED ladder, so a save that finally
+    // gives the model levels renders a FRESH node (no inline style) into a
+    // container whose editor has long been mounted: the mount pass is not
+    // re-entered, and the scan's own re-assert is what keeps the page from
+    // showing two controls again.
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    const advanced = root.querySelectorAll<HTMLElement>('.modelAdvanced')[0]!
+    advanced.insertAdjacentHTML('beforeend', officialReasoningMarkup)
+    await settle(() => reconcile(root, deps, state), state)
+    expect(officialReasoningOf(advanced)!.style.display).toBe('none')
+
+    officialReasoningOf(advanced)!.remove()
+    advanced.insertAdjacentHTML('beforeend', officialReasoningMarkup)
+    await settle(() => reconcile(root, deps, state), state)
+
+    const fresh = officialReasoningOf(advanced)!
+    expect(fresh.style.display).toBe('none')
+    expect(fresh.getAttribute('data-bre-reasoning-hidden')).toBe('1')
+    // Still one editor for the row, never a second mount.
+    expect(deps.mount).toHaveBeenCalledTimes(2)
+  })
+
+  it('hands the official group back when its editor goes away', async () => {
+    // Hiding the host's control is a DOM write of the plugin's, so it must not
+    // outlive the editor that stood in for it: here the card loses its capacity
+    // rows (the scan stands every editor down), and the official group the
+    // plugin had hidden is visible again rather than leaving a blank field.
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    const advanced = root.querySelectorAll<HTMLElement>('.modelAdvanced')[0]!
+    advanced.insertAdjacentHTML('beforeend', officialReasoningMarkup)
+    await settle(() => reconcile(root, deps, state), state)
+    const group = officialReasoningOf(advanced)!
+    expect(group.style.display).toBe('none')
+
+    for (const button of Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label^="Capacities"]'))) button.remove()
+    await settle(() => reconcile(root, deps, state), state)
+
+    expect(state.mounted.size).toBe(0)
+    for (const editor of deps.editors) expect(editor.unmount).toHaveBeenCalledTimes(1)
+    expect(group.style.display).toBe('')
+    expect(group.hasAttribute('data-bre-reasoning-hidden')).toBe(false)
+  })
+
+  it('lifts only a hide of its own', () => {
+    // A group the HOST renders hidden is not the plugin's to stand down or to
+    // show: the marker attribute is what tells the two apart, so a host hide
+    // survives both calls.
+    const container = document.createElement('div')
+    container.innerHTML = `<div class="ModelsSection_modelReasoning__hash" role="group" style="display:none"></div>`
+    const group = officialReasoningOf(container)!
+    hideOfficialReasoning(container)
+    expect(group.hasAttribute('data-bre-reasoning-hidden')).toBe(false)
+    showOfficialReasoning(container)
+    expect(group.style.display).toBe('none')
+
+    // The plugin's own hide is idempotent, and the way back restores exactly it.
+    container.innerHTML = officialReasoningMarkup
+    const fresh = officialReasoningOf(container)!
+    hideOfficialReasoning(container)
+    hideOfficialReasoning(container)
+    expect(fresh.getAttribute('data-bre-reasoning-hidden')).toBe('1')
+    expect(fresh.style.display).toBe('none')
+    showOfficialReasoning(container)
+    expect(fresh.style.display).toBe('')
+    expect(fresh.hasAttribute('data-bre-reasoning-hidden')).toBe(false)
   })
 
   it('does not mount when the model id is still empty (mid-edit)', async () => {

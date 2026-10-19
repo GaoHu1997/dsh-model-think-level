@@ -81,6 +81,71 @@ describe('findModelMenu', () => {
     expect(findModelMenu()).toBeUndefined()
   })
 
+  it('finds the seat popover while upstream shows its model list (role=group)', () => {
+    // 0.2.1+ derives the surface role from the pane it shows
+    // (`role: pane === "model" ? "group" : "menu"`) and opens STRAIGHT into the
+    // model list for a session it cannot name — the HISTORICAL-session shape,
+    // where the restored selection no longer resolves in today's catalog.
+    // Requiring role="menu" lost exactly those sessions: the plugin mounted
+    // nothing and the user kept the bare official list.
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const seat = trigger('tid-menu')
+    card.appendChild(seat)
+    document.body.appendChild(card)
+    const portaled = menu('tid-menu')
+    portaled.setAttribute('role', 'group')
+    document.body.appendChild(portaled)
+
+    expect(findModelMenu()).toBe(portaled)
+    expect(findModelTrigger()).toBe(seat)
+  })
+
+  it('finds an inline model-list pane next to its trigger', () => {
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const seat = trigger('tid-menu')
+    card.appendChild(seat)
+    const inline = menu('tid-menu')
+    inline.setAttribute('role', 'group')
+    card.appendChild(inline)
+    document.body.appendChild(card)
+
+    expect(findModelMenu()).toBe(inline)
+  })
+
+  it('ignores a linked element that is a popover of some other kind', () => {
+    // The role tolerance above is limited to the two roles upstream puts on
+    // THIS surface. Any other popover role is still not the model menu.
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    card.appendChild(trigger('other-popover'))
+    document.body.appendChild(card)
+    const other = document.createElement('div')
+    other.id = 'other-popover'
+    other.setAttribute('role', 'listbox')
+    document.body.appendChild(other)
+
+    expect(findModelMenu()).toBeUndefined()
+  })
+
+  it('ignores an inline role=group block that carries no model list', () => {
+    // The inline fallback has no aria-controls link to lean on, so structure is
+    // all it has: a role="group" wrapper that holds no rows is not the model
+    // list pane, it is some other grouped block that happens to follow a
+    // trigger.
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    card.appendChild(trigger(null))
+    const decoy = document.createElement('div')
+    decoy.setAttribute('role', 'group')
+    decoy.appendChild(document.createElement('span'))
+    card.appendChild(decoy)
+    document.body.appendChild(card)
+
+    expect(findModelMenu()).toBeUndefined()
+  })
+
   it('returns undefined when no menu is open', () => {
     const card = document.createElement('div')
     card.setAttribute('data-composer-card', '')
@@ -134,6 +199,23 @@ describe('findModelTrigger', () => {
     const seat = trigger('tid-menu')
     card.appendChild(seat)
     card.appendChild(menu('tid-menu'))
+    document.body.appendChild(card)
+
+    expect(findModelTrigger()).toBe(seat)
+  })
+
+  it('returns the trigger beside an inline model-list pane', () => {
+    // Pre-portal shape on a surface upstream opened in its model-list pane: the
+    // sibling check must accept the same two roles the linked check does, or a
+    // historical session's trigger goes undecorated.
+    const card = document.createElement('div')
+    card.setAttribute('data-composer-card', '')
+    const seat = trigger(null)
+    card.appendChild(seat)
+    const pane = menu('')
+    pane.removeAttribute('id')
+    pane.setAttribute('role', 'group')
+    card.appendChild(pane)
     document.body.appendChild(card)
 
     expect(findModelTrigger()).toBe(seat)

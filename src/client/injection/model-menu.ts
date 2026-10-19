@@ -67,11 +67,62 @@ function seatTriggerCandidates(card: HTMLElement): HTMLButtonElement[] {
 }
 
 /**
+ * Whether an element is the seat's popover surface.
+ *
+ * The SAME portalled card carries two roles, because upstream derives it from
+ * the pane it is showing (`role: pane === "model" ? "group" : "menu"`):
+ *
+ *   - `menu` — the root pane (the "Model" / "Effort" cells, or this plugin's
+ *     replica once it is mounted);
+ *   - `group` — upstream opened STRAIGHT into the model list. That is what a
+ *     session whose saved selection does not resolve in the current catalog
+ *     gets (a HISTORICAL session whose provider or model id was renamed or
+ *     removed since it was saved, or one whose projection had not landed yet
+ *     when the menu was first opened), because upstream only shows the root
+ *     pane when it can name the session's current model.
+ *
+ * Only the seat's own `aria-controls` target is ever tested with this, so the
+ * role is a pane marker rather than a guess: an element with no role at all is
+ * still not a popover, and never becomes one here.
+ *
+ * @param el - the candidate element (an `aria-controls` target or a sibling).
+ * @returns whether the element is the seat's popover surface.
+ */
+function isMenuSurface(el: Element | null | undefined): el is HTMLElement {
+  if (el === null || el === undefined) return false
+  const role = el.getAttribute('role')
+  return role === 'menu' || role === 'group'
+}
+
+/**
+ * Whether the seat's popover is showing upstream's DRILLED-IN model list.
+ *
+ * Upstream derives the surface role from the pane (`role: pane === "model" ?
+ * "group" : "menu"`), so this single attribute answers "which pane did the
+ * popover open in?". It opens in the list pane whenever it cannot name the
+ * session's current model (`currentChoice === void 0`) — the HISTORICAL-session
+ * shape, where the saved selection no longer resolves in today's catalog (a
+ * provider or model id that was renamed or removed) or the session's projection
+ * had not landed when the popover was first opened.
+ *
+ * The distinction matters to injection, not just to discovery: in that pane the
+ * official list IS the switcher, so the plugin has to replace it to give the
+ * session the same two-row body a new session gets.
+ *
+ * @param surface - the element {@link findModelMenu} returned.
+ * @returns whether upstream is showing its model list rather than the root pane.
+ */
+export function isDrilledModelPane(surface: HTMLElement): boolean {
+  return surface.getAttribute('role') === 'group'
+}
+
+/**
  * The menu a trigger points at through `aria-controls`, when it is one.
  *
  * This is the primary route because a portaled popover leaves the card while
  * the control keeps naming it, so the link is what survives the move. A
- * controls id that names nothing, or names a non-menu element, is not a menu.
+ * controls id that names nothing, or names an element that is not a popover, is
+ * not a menu.
  *
  * @param trigger - the candidate button.
  * @param doc - the document the linked element lives in.
@@ -81,8 +132,7 @@ function linkedMenuOf(trigger: HTMLButtonElement, doc: Document): HTMLElement | 
   const id = trigger.getAttribute('aria-controls')
   if (id === null || id.length === 0) return undefined
   const menu = doc.getElementById(id)
-  if (menu === null) return undefined
-  return menu.getAttribute('role') === 'menu' ? menu : undefined
+  return isMenuSurface(menu) ? menu : undefined
 }
 
 /**
@@ -91,8 +141,17 @@ function linkedMenuOf(trigger: HTMLButtonElement, doc: Document): HTMLElement | 
  * Shape-tolerant across kernels: newer kernels portal the menu to
  * document.body and link it from the seat trigger via aria-controls, while
  * older kernels render it inline right after the trigger. Both shapes keep
- * aria-haspopup="menu" on the trigger and role="menu" on the menu, so the
- * controls link is the primary route and the sibling check stays the fallback.
+ * aria-haspopup="menu" on the trigger, so the controls link is the primary
+ * route and the sibling check stays the fallback.
+ *
+ * The SURFACE role is NOT stable: upstream sets `role="menu"` on the root pane
+ * and `role="group"` while it shows the model list (see {@link isMenuSurface}).
+ * Requiring `role="menu"` therefore lost the seat exactly for the sessions that
+ * open straight into the model list — most visibly a HISTORICAL session, whose
+ * saved selection no longer resolves in the current catalog. Both roles are
+ * accepted here; what still has to hold is that the element IS the seat's
+ * `aria-controls` target (or its inline sibling), so no other surface's popover
+ * is ever mistaken for the model menu.
  *
  * The search NEVER leaves the composer card. When no card is mounted there is
  * no model seat, and answering with some other surface's menu is exactly the
@@ -112,10 +171,17 @@ export function findModelMenu(doc: Document = document): HTMLElement | undefined
 
   // Pre-portal inline shape: the menu sits right after its trigger button.
   // Scoped like the candidates, so another seat's inline menu is not mistaken
-  // for the model seat's.
+  // for the model seat's. A `role="group"` candidate must ALSO carry the model
+  // list's own content: the inline fallback has no `aria-controls` link to lean
+  // on, so structure is the only thing standing between it and an unrelated
+  // `role="group"` block that happens to sit after a menu trigger.
   const scope = seatAnchorOf(card) ?? card
-  for (const menu of Array.from(scope.querySelectorAll<HTMLElement>('[role="menu"]'))) {
-    if (menu.previousElementSibling?.matches('button[aria-haspopup="menu"]')) return menu
+  for (const menu of Array.from(scope.querySelectorAll<HTMLElement>('[role="menu"], [role="group"]'))) {
+    if (!menu.previousElementSibling?.matches('button[aria-haspopup="menu"]')) continue
+    if (!isMenuSurface(menu)) continue
+    if (menu.getAttribute('role') === 'group'
+      && menu.querySelector('[role="menuitemradio"], section[role="group"]') === null) continue
+    return menu
   }
   return undefined
 }
@@ -150,9 +216,11 @@ export function findModelTrigger(doc: Document = document): HTMLButtonElement | 
     if (linkedMenuOf(trigger, doc) !== undefined) return trigger
   }
 
-  // Pre-portal inline shape: the menu follows its trigger in the card.
+  // Pre-portal inline shape: the menu follows its trigger in the card. The
+  // surface role follows the pane (see {@link isMenuSurface}), so both shapes
+  // count here as well.
   for (const trigger of candidates) {
-    if (trigger.nextElementSibling?.matches('[role="menu"]')) return trigger
+    if (isMenuSurface(trigger.nextElementSibling)) return trigger
   }
 
   return anchor === undefined ? candidates.at(-1) : seat

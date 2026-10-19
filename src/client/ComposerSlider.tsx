@@ -464,7 +464,11 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
    * flash-out every commit shipped with (issue #13).
    */
   const focusMenu = useCallback((): void => {
-    const menu = bodyRef.current?.closest<HTMLElement>('[role="menu"]')
+    // The popover's role follows the pane upstream shows (`group` while the
+    // model list is open, `menu` everywhere else) — see model-menu.ts. Match
+    // both, or a HISTORICAL session (which opens straight into the list pane)
+    // would drop focus onto <body> and get its menu closed mid-commit.
+    const menu = bodyRef.current?.closest<HTMLElement>('[role="menu"], [role="group"]')
     if (menu === null || menu === undefined) return
     menu.tabIndex = -1
     menu.focus({ preventScroll: true })

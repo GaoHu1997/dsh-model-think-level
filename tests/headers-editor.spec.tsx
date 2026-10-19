@@ -610,6 +610,50 @@ describe('HeadersEditor', () => {
     }
   })
 
+  it('puts the pane commit row under every section, not between them', async () => {
+    // The pane's Save closes the pane, so it belongs after the LAST section: a
+    // row that sat between the header table and 长缓存保留 read as a Save for the
+    // headers alone and left the switch below it outside what it commits.
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const editor = await renderEditor({ route: 'aliyun', api, t }, { tabbed: 'after-mount' })
+    try {
+      const cache = editor.container.querySelector('.bre-cache')
+      const actions = editor.container.querySelector('.bre-headers-actions')
+      expect(cache).not.toBeNull()
+      expect(actions).not.toBeNull()
+      // Document order: header editor → long cache → actions.
+      expect(cache!.compareDocumentPosition(actions!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      // And no longer inside the header editor, where it would have been styled
+      // by the rows' own size rules and read as that section's commit.
+      expect(editor.container.querySelector('.bre-headers-edit .bre-effort-actions')).toBeNull()
+      // It is the pane's last visible block, above only the status line.
+      const last = editor.container.querySelector('.bre-headers')!.lastElementChild
+      expect(last === actions || last!.classList.contains('bre-effort-message')).toBe(true)
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('still offers the commit row in the fold once its editor is open', async () => {
+    // The fold collapses to a disclosure pill; opening THIS section's editor is
+    // what puts the row on screen there, and it stays the section's own commit
+    // (not the card's): that is why 取消 just resets the draft in this shape.
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const editor = await renderEditor({ route: 'aliyun', api, t })
+    try {
+      // Closed fold: no row, since there is nothing it could commit.
+      expect(editor.container.querySelector('.bre-headers-actions')).toBeNull()
+      await expand(editor.container)
+      // Read view: only 编辑, no commit pair yet.
+      expect(editor.container.querySelector('.bre-headers-actions')).toBeNull()
+      await act(async () => { buttonByText(editor.container, en.headersEdit).click() })
+      expect(buttonByText(editor.container, en.headersSave)).toBeDefined()
+      expect(editor.container.querySelector('.bre-headers-actions')).not.toBeNull()
+    } finally {
+      await editor.unmount()
+    }
+  })
+
   it('keeps the fold cancel a draft reset that never reaches for the card', async () => {
     // Only the pane's cancel speaks for the whole editor: in the fold, the
     // official footer is still on screen and stays the one that closes it.
@@ -628,6 +672,46 @@ describe('HeadersEditor', () => {
       expect(buttonByText(editor.container, en.headersEdit)).toBeDefined()
       await act(async () => { buttonByText(editor.container, en.headersEdit).click() })
       expect(inputsByLabel(editor.container, en.headersValue)[0]!.value).toBe('acme')
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('follows the header editor with the other-settings section under its own heading', async () => {
+    // The pane is the route's advanced configuration, and the long-cache switch
+    // is a second SECTION of it — never a row of the header table. Two title
+    // rows is what says so; a single one would read as "another header".
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const editor = await renderEditor({ route: 'aliyun', api, t }, { tabbed: 'after-mount' })
+    try {
+      const titles = Array.from(editor.container.querySelectorAll('.bre-headers-title-row .bre-effort-title'))
+        .map(node => node.textContent)
+      expect(titles).toEqual([en.cacheTitle])
+      // It sits after the header table, inside the same advanced region.
+      const cache = editor.container.querySelector('.bre-cache')
+      expect(cache).not.toBeNull()
+      expect(cache!.previousElementSibling).not.toBeNull()
+      expect(editor.container.querySelector('.bre-headers')!.contains(cache)).toBe(true)
+      // The switch wears the setting's name, not the section title.
+      expect(cache!.querySelector('.bre-cache-label')?.textContent).toBe(en.cacheRowLabel)
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('leaves the long-cache section out of the create card, which has no route yet', async () => {
+    // Deferred mode drafts headers for a provider that does not exist yet; the
+    // switch writes the route profile, so there is nothing it could write to.
+    const api = fakeApi({})
+    const editor = await renderEditor({
+      route: 'aliyun',
+      api,
+      t,
+      deferred: { onDraft: () => {}, onCancel: () => {} },
+    })
+    try {
+      expect(editor.container.querySelector('.bre-cache')).toBeNull()
+      expect(editor.container.textContent).not.toContain(en.cacheTitle)
     } finally {
       await editor.unmount()
     }

@@ -19,14 +19,14 @@ import { directoryFixture, fakeApi, JOIN_FIXTURE, makeCtx, makeJoin, waitFor } f
 type Ctx = Parameters<typeof import('../src/client/index.js').apply>[0]
 
 /** Build the composer card + the given official pane, and return the menu. */
-function buildMenu(pane: 'root' | 'model' | 'effort'): HTMLElement {
+function buildMenu(pane: 'root' | 'model' | 'effort', surfaceRole: 'menu' | 'group' = 'menu'): HTMLElement {
   document.body.insertAdjacentHTML('beforeend', `
     <div data-composer-card>
       <button aria-haspopup="menu" aria-controls="seat-menu">DeepSeek V4 · High</button>
     </div>
   `)
   const card = document.querySelector('[data-composer-card]')!
-  card.insertAdjacentHTML('beforeend', `<div id="seat-menu" role="menu"></div>`)
+  card.insertAdjacentHTML('beforeend', `<div id="seat-menu" role="${surfaceRole}"></div>`)
   const menu = card.querySelector<HTMLElement>('#seat-menu')!
   if (pane === 'root') {
     menu.insertAdjacentHTML('beforeend', `
@@ -62,6 +62,7 @@ function buildMenu(pane: 'root' | 'model' | 'effort'): HTMLElement {
 async function withAppliedMenu(
   pane: 'root' | 'model' | 'effort',
   body: (menu: HTMLElement, handlers: { calls: () => number; dispose: () => void }) => Promise<void>,
+  surfaceRole: 'menu' | 'group' = 'menu',
 ): Promise<void> {
   const { apply } = await import('../src/client/index.js')
   const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
@@ -77,7 +78,7 @@ async function withAppliedMenu(
   let calls = 0
   const probe = (): void => { calls += 1 }
   try {
-    const menu = buildMenu(pane)
+    const menu = buildMenu(pane, surfaceRole)
     menu.addEventListener('keydown', probe)
     document.body.addEventListener('keydown', probe)
     apply(h.ctx as unknown as Ctx)
@@ -285,6 +286,94 @@ describe('arrow keys under an active filter', () => {
       expect(document.activeElement).toBe(first)
       expect(handlers.calls()).toBe(before)
     })
+  })
+})
+
+describe('a popover upstream opened in its model-list pane (historical sessions)', () => {
+  // 0.2.1+ opens STRAIGHT into the model list when it cannot name the
+  // session's current model (`currentChoice === void 0`) — the shape a restored
+  // session gets when its saved selection no longer resolves in today's catalog.
+  // The same portalled surface then carries role="group" instead of role="menu".
+  // Such a session must get the SAME replica body a new session gets, and the
+  // official list must not show through behind it.
+
+  it('mounts the replica rows and hides the official list behind them', async () => {
+    await withAppliedMenu('model', async (menu) => {
+      await waitFor(() => menu.querySelector('[data-bre-slider="1"]') !== null)
+
+      const slider = menu.querySelector<HTMLElement>('[data-bre-slider="1"]')!
+      expect(slider.parentElement).toBe(menu)
+      expect(menu.firstElementChild).toBe(slider)
+      expect(slider.style.display).toBe('')
+
+      // Both replica rows are there, and the official rows they replace are not
+      // displayed — the popover must not read as "list AND switcher".
+      const rows = Array.from(slider.querySelectorAll<HTMLElement>('button[role="menuitem"]'))
+      expect(rows.map(row => row.querySelector('.bre-row-label')?.textContent)).toEqual(['Model', 'Reasoning level'])
+      for (const child of Array.from(menu.children)) {
+        if (child === slider) continue
+        expect((child as HTMLElement).style.display).toBe('none')
+      }
+    }, 'group')
+  })
+
+  it('does not mount the official-list search box on a surface it owns', async () => {
+    await withAppliedMenu('model', async (menu) => {
+      await waitFor(() => menu.querySelector('[data-bre-slider="1"]') !== null)
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(menu.querySelector('[data-bre-search="1"]')).toBeNull()
+    }, 'group')
+  })
+
+  it('restores every official child when the plugin is disposed', async () => {
+    await withAppliedMenu('model', async (menu, handlers) => {
+      await waitFor(() => menu.querySelector('[data-bre-slider="1"]') !== null)
+      const hidden = Array.from(menu.children).filter(child => (child as HTMLElement).style.display === 'none')
+      expect(hidden.length).toBeGreaterThan(0)
+
+      handlers.dispose()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      for (const child of Array.from(menu.children)) {
+        expect((child as HTMLElement).style.display).toBe('')
+      }
+      expect(menu.getAttribute('style')).toBeNull()
+    }, 'group')
+  })
+
+  it('keeps focus inside the seat when it hides a focused official child', async () => {
+    // Upstream focuses its own search input (or a row) as soon as it opens in
+    // this pane. Hiding that node while it is focused would drop focus to
+    // <body>, which the shell reads as "focus left the seat" and closes the
+    // popover.
+    await withAppliedMenu('model', async (menu) => {
+      await waitFor(() => menu.querySelector('[data-bre-slider="1"]') !== null)
+      const container = menu.querySelector<HTMLElement>('section[role="group"]')!.parentElement!
+      const row = menu.querySelector<HTMLButtonElement>('section[role="group"] button[role="menuitemradio"]')!
+
+      // Reproduce upstream's live pane: visible, with its row focused.
+      container.style.display = ''
+      row.focus()
+      expect(document.activeElement).toBe(row)
+
+      // Any mutation re-enters the plugin, which hides the container again.
+      menu.appendChild(document.createElement('span'))
+      await waitFor(() => container.style.display === 'none')
+      expect(document.activeElement).not.toBe(document.body)
+      expect(menu.contains(document.activeElement)).toBe(true)
+    }, 'group')
+  })
+
+  it('keeps the replica rows usable instead of handing control to the official list', async () => {
+    await withAppliedMenu('model', async (menu) => {
+      await waitFor(() => menu.querySelector('[data-bre-slider="1"]') !== null)
+      const modelRow = menu.querySelector<HTMLElement>('[data-bre-slider="1"] button[role="menuitem"]')!
+      modelRow.click()
+      // The replica opens its OWN provider/model lists: that is what makes the
+      // pane's switcher identical to the root pane's, and it also proves the
+      // replica was not retired the moment an official radio appeared.
+      await waitFor(() => menu.querySelector('.bre-panel-models') !== null)
+      expect(menu.querySelector('[data-bre-slider="1"]')!.getAttribute('style')).toBeNull()
+    }, 'group')
   })
 })
 
