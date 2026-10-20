@@ -4,7 +4,9 @@ name: Sync to Gitee
 # 同步内容：tag、标题、说明正文、预发布标记、附件（与 GitHub 同名同大小的文件跳过不重传）。
 # 需要在 GitHub 仓库 Settings > Secrets and variables > Actions 中添加：
 #   GITEE_PRIVATE_TOKEN = Gitee 私人令牌（需 projects 权限）
-# 令牌未配置时本工作流只警告并整体跳过（不再因 401 把 CI 刷红）。
+# 令牌未配置时各步骤跳过并告警（任务保持绿色，不再因 401 把 CI 刷红）。
+# 注意：secrets 上下文不能直接用于 if 条件（GitHub 限制），因此先注入 job 级
+# 环境变量，再在步骤级 if 里判断 env.GITEE_PRIVATE_TOKEN。
 
 on:
   push:
@@ -15,36 +17,46 @@ on:
 
 jobs:
   mirror-code:
-    # 令牌未配置时整个任务直接 skipped（不红）。
-    if: ${{ github.event_name != 'release' && vars.GITEE_ENABLED != 'false' && secrets.GITEE_PRIVATE_TOKEN != '' }}
+    if: github.event_name != 'release' && vars.GITEE_ENABLED != 'false'
     runs-on: ubuntu-latest
+    env:
+      GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
     steps:
+      - name: Warn when the token secret is not configured
+        if: env.GITEE_PRIVATE_TOKEN == ''
+        run: echo "::warning::secret GITEE_PRIVATE_TOKEN is not set — set it in Settings > Secrets and variables > Actions to enable the Gitee mirror"
       - uses: actions/checkout@v4
+        if: env.GITEE_PRIVATE_TOKEN != ''
         with:
           fetch-depth: 0
       - name: Push branches and tags to Gitee
+        if: env.GITEE_PRIVATE_TOKEN != ''
         run: |
           git remote add gitee "https://oauth2:${GITEE_PRIVATE_TOKEN}@gitee.com/${{ github.repository }}.git"
           git push gitee --all
           git push gitee --tags
-        env:
-          GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
 
   sync-release:
-    if: ${{ github.event_name == 'release' && vars.GITEE_ENABLED != 'false' && secrets.GITEE_PRIVATE_TOKEN != '' }}
+    if: github.event_name == 'release' && vars.GITEE_ENABLED != 'false'
     runs-on: ubuntu-latest
+    env:
+      GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
     steps:
+      - name: Warn when the token secret is not configured
+        if: env.GITEE_PRIVATE_TOKEN == ''
+        run: echo "::warning::secret GITEE_PRIVATE_TOKEN is not set — set it in Settings > Secrets and variables > Actions to enable the Gitee release sync"
       - uses: actions/checkout@v4
+        if: env.GITEE_PRIVATE_TOKEN != ''
         with:
           fetch-depth: 0
       - name: Push tags to Gitee first
+        if: env.GITEE_PRIVATE_TOKEN != ''
         run: |
           git remote add gitee "https://oauth2:${GITEE_PRIVATE_TOKEN}@gitee.com/${{ github.repository }}.git"
           git push gitee --all
           git push gitee --tags
-        env:
-          GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
       - name: Sync release to Gitee (create or update)
+        if: env.GITEE_PRIVATE_TOKEN != ''
         run: |
           API="https://gitee.com/api/v5/repos/${OWNER_REPO}"
           [ -z "$REL_NAME" ] && REL_NAME="$REL_TAG"
@@ -87,7 +99,6 @@ jobs:
             echo
           done
         env:
-          GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           OWNER_REPO: ${{ github.repository }}
           REL_TAG: ${{ github.event.release.tag_name }}
