@@ -4,6 +4,7 @@ name: Sync to Gitee
 # 同步内容：tag、标题、说明正文、预发布标记、附件（与 GitHub 同名同大小的文件跳过不重传）。
 # 需要在 GitHub 仓库 Settings > Secrets and variables > Actions 中添加：
 #   GITEE_PRIVATE_TOKEN = Gitee 私人令牌（需 projects 权限）
+# 令牌未配置时本工作流只警告并整体跳过（不再因 401 把 CI 刷红）。
 
 on:
   push:
@@ -14,7 +15,8 @@ on:
 
 jobs:
   mirror-code:
-    if: github.event_name != 'release'
+    # 令牌未配置时整个任务直接 skipped（不红）。
+    if: ${{ github.event_name != 'release' && vars.GITEE_ENABLED != 'false' && secrets.GITEE_PRIVATE_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +31,7 @@ jobs:
           GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
 
   sync-release:
-    if: github.event_name == 'release'
+    if: ${{ github.event_name == 'release' && vars.GITEE_ENABLED != 'false' && secrets.GITEE_PRIVATE_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

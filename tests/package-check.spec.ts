@@ -27,7 +27,7 @@ function fixture() {
     ['README.md', '![example](./docs/image.png)'],
     ['docs/image.png', 'fixture'],
   ])
-  const run = (omitted: string[] = []) => {
+  const run = (omitted: string[] = [], manifestPrefix = '') => {
     writeFileSync(join(directory, 'package.json'), JSON.stringify(pkg))
     writeFileSync(join(directory, 'screenshots.json'), JSON.stringify(['docs/image.png']))
     for (const [name, content] of files) {
@@ -36,7 +36,7 @@ function fixture() {
     }
     const manifest = [{ name: pkg.name, version: pkg.version,
       files: [...files.keys()].filter(name => !omitted.includes(name)).map(path => ({ path })) }]
-    writeFileSync(join(directory, 'manifest.json'), JSON.stringify(manifest))
+    writeFileSync(join(directory, 'manifest.json'), manifestPrefix + JSON.stringify(manifest))
     const result = spawnSync(process.execPath, [checker, 'manifest.json'], { cwd: directory, stdio: 'ignore' })
     if (result.error) throw result.error
     return result.status
@@ -65,6 +65,12 @@ describe('published package validation', () => {
     const { files, run } = fixture()
     files.set('lib/index.d.ts', "export type Entry = import('missing-host-plugin/client').Entry")
     expect(run()).toBe(1)
+  })
+
+  it('recovers the manifest when lifecycle output precedes the JSON', () => {
+    // npm >= 10.9 writes prepare-script stdout into the redirected manifest.
+    const { run } = fixture()
+    expect(run([], 'built lib/index.js\n\n> package-check-fixture@1.0.0 prepare\n> tsc -p tsconfig.build.json\n\n')).toBe(0)
   })
 
   it('rejects stale allowlist entries and leaked scratch files', () => {

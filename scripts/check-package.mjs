@@ -5,7 +5,17 @@ import ts from 'typescript'
 const manifestPath = process.argv[2]
 if (!manifestPath) throw new Error('Usage: npm run check:package (build first)')
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
-const packs = JSON.parse(readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, ''))
+// npm >= 10.9 runs the `prepare` script even under `--ignore-scripts` (npm/cli
+// regression), and the redirect in the check:package script captures that
+// stdout ahead of the pack manifest. Recover the JSON: npm prints the manifest
+// last, so try every line that opens an array, starting from the bottom.
+const raw = readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, '')
+const starts = [...raw.matchAll(/^\[/gm)].map(match => match.index)
+let packs
+for (let index = starts.length - 1; index >= 0 && packs === undefined; index--) {
+  try { packs = JSON.parse(raw.slice(starts[index])) } catch { /* not the manifest; try an earlier start */ }
+}
+if (packs === undefined) throw new Error(`No pack manifest JSON found in ${manifestPath} (did npm pack run?)`)
 if (packs.length !== 1 || packs[0].name !== pkg.name || packs[0].version !== pkg.version) {
   throw new Error('Package manifest does not match the current package name/version')
 }
