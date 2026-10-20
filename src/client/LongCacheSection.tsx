@@ -20,6 +20,7 @@
 
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
+import { armSettleGuard } from './injection/settle-guard.js'
 import { describeNamespace, providerLongCacheOf, writeProviderLongCache, type ProviderLongCache } from './ops.js'
 import type { RemoteApi } from './types.js'
 
@@ -84,6 +85,9 @@ export function LongCacheSection({ route, api, t }: LongCacheSectionProps): Reac
       : (state.inherited === false ? true : undefined)
     setBusy(true)
     setMessage(undefined)
+    // Same write, same post-apply reload: hold the list's row actions still
+    // while the section re-describes the namespace (see settle-guard.ts).
+    armSettleGuard()
     let reply
     try {
       reply = await writeProviderLongCache(api, route, next)

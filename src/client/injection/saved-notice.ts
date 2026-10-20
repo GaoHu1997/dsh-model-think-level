@@ -112,6 +112,20 @@ function restore(notice: HTMLElement, display: string): void {
 }
 
 /**
+ * Raise the top bubble for a save this plugin made itself.
+ *
+ * The official line answers the host's own commits; a pane that writes through
+ * `settings.mutate` produces none, and the pane closes the card on success, so
+ * its inline message would go down with the card. The bubble is what carries
+ * the confirmation there — with the same words a host save would have used, so
+ * the two paths look like one.
+ * @param text - the confirmation sentence to show.
+ */
+export function announceSavedNotice(text: string): void {
+  raise(text)
+}
+
+/**
  * Raise (or replace) the bubble at the top of the window and arrange for it to
  * retire.
  *

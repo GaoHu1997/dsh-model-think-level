@@ -14,6 +14,8 @@ import type { ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
 import { HeadersEditor, headersFromDraft, type HeadersEditorProps } from '../src/client/HeadersEditor.js'
+import { teardownSavedNotice } from '../src/client/injection/saved-notice.js'
+import { teardownSettleGuard } from '../src/client/injection/settle-guard.js'
 import { en } from '../src/client/locales.js'
 import type { RemoteApi } from '../src/client/types.js'
 
@@ -233,6 +235,10 @@ describe('headersFromDraft', () => {
 describe('HeadersEditor', () => {
   beforeEach(() => { stubEnvironment(CLEAN_ENVIRONMENT) })
   afterEach(() => {
+    // The two module-level passes the editor drives hold state on the module:
+    // this file must start every case with neither of them watching or raised.
+    teardownSavedNotice()
+    teardownSettleGuard()
     document.body.innerHTML = ''
     vi.restoreAllMocks()
   })
@@ -605,6 +611,31 @@ describe('HeadersEditor', () => {
       await act(async () => { buttonByText(editor.container, en.headersCancel).click() })
       expect(onDismiss).toHaveBeenCalledTimes(1)
       expect(api.mutate).not.toHaveBeenCalled()
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('closes the card on save in the pane, and confirms at the top instead', async () => {
+    // The other two panes commit by closing the card. This one used to land the
+    // write and stay open with its own inline message, so 保存 meant a different
+    // thing here than in its neighbours. The inline message cannot survive the
+    // close, so the confirmation moves to the bubble the host's own saves raise
+    // — one wording, one shape, whichever pane did the saving.
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const onDismiss = vi.fn()
+    const editor = await renderEditor({ route: 'aliyun', api, t, onDismiss }, { tabbed: 'after-mount' })
+    try {
+      await act(async () => { buttonByText(editor.container, en.headersSave).click() })
+
+      expect(api.mutate).toHaveBeenCalledTimes(1)
+      // Closed exactly the way the pane's 取消 closes it: through the official
+      // footer's own dismissal, so the host's close path is the only one used.
+      expect(onDismiss).toHaveBeenCalledTimes(1)
+      // Nothing of the confirmation is left behind in the card the close takes
+      // down; the bubble carries it.
+      expect(editor.container.textContent).not.toContain(en.headersSaved)
+      expect(document.querySelector('.bre-auto-effort-note')?.textContent).toBe(en.headersSaved)
     } finally {
       await editor.unmount()
     }

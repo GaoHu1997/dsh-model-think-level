@@ -28,6 +28,10 @@ function buildMenu(pane: 'root' | 'model' | 'effort', surfaceRole: 'menu' | 'gro
   const card = document.querySelector('[data-composer-card]')!
   card.insertAdjacentHTML('beforeend', `<div id="seat-menu" role="${surfaceRole}"></div>`)
   const menu = card.querySelector<HTMLElement>('#seat-menu')!
+  // The shell's MenuSurface paints the panel's fill and backdrop blur into an
+  // empty, aria-hidden FIRST child (its .material layer). It is chrome, not
+  // pane content, and the plugin must never take it down.
+  menu.insertAdjacentHTML('beforeend', '<div aria-hidden="true" class="mc_material"></div>')
   if (pane === 'root') {
     menu.insertAdjacentHTML('beforeend', `
       <button role="menuitem">Model<span>DeepSeek V4</span></button>
@@ -312,6 +316,13 @@ describe('a popover upstream opened in its model-list pane (historical sessions)
       expect(rows.map(row => row.querySelector('.bre-row-label')?.textContent)).toEqual(['Model', 'Reasoning level'])
       for (const child of Array.from(menu.children)) {
         if (child === slider) continue
+        // The shell's material layer is NEVER hidden: it is the panel's own
+        // fill and backdrop blur, not a duplicate of the list. Hiding it turns
+        // the whole popover transparent (the fill is only ~58% opaque).
+        if (child.getAttribute('aria-hidden') === 'true') {
+          expect((child as HTMLElement).style.display).toBe('')
+          continue
+        }
         expect((child as HTMLElement).style.display).toBe('none')
       }
     }, 'group')

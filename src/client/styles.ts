@@ -1289,6 +1289,15 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    rely on. */
 .bre-row-hidden { display: none !important; }
 
+/* A row action held by the settle guard (settle-guard.ts): the host has disabled
+   the button for the post-apply reload, but the save already answered the click
+   and the list is not what changed. The attribute stays on the element only
+   while that reload runs — it is the painted opacity that is restored here, not
+   the disabled state, so the button stays inert exactly as long as the host
+   means it to. !important, because the official :disabled rule is what sets
+   the .4. */
+[data-bre-settle] { opacity: 1 !important; }
+
 /* -----------------------------------------------------------------------
    The provider editor's three tabs.
 

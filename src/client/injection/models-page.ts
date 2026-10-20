@@ -67,6 +67,7 @@ import {
 } from './provider-disabled-group.js'
 import { teardownAutoEffortSeats } from './auto-effort-seat.js'
 import { reconcileSavedNotice, teardownSavedNotice } from './saved-notice.js'
+import { reconcileSettleGuard, teardownSettleGuard } from './settle-guard.js'
 import {
   createModelOrderState,
   modelListMutation,
@@ -331,6 +332,10 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     reconcileProviderDeleteSeat(root, providerDeleteDeps)
     reconcileProviderDisabledGroup(root, providerDisabledDeps, providerDisabledState)
     reconcileModelOrder(root, modelOrderDeps, modelOrderState)
+    // The row actions a plugin write's post-apply reload disables: held at full
+    // opacity so the list does not blink under the save. It runs in this pass
+    // because the disable lands in the same mutation burst the pass answers.
+    reconcileSettleGuard()
     // Last: the official save line, which this pass takes out of the flow and
     // answers with a bubble. It runs last because it watches the panel for text
     // the save has just produced, and every pass above may still move a node
@@ -490,6 +495,10 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // And for the official save line: it is the HOST's own node, and a dead
     // fiber must not leave a provider saved with the page saying nothing.
     teardownSavedNotice()
+    // And for the row actions a write's reload was holding: the attribute is raw
+    // DOM on the host's own buttons, and a dead fiber must not leave one looking
+    // usable for ever.
+    teardownSettleGuard()
     // And for the model grips inside an open editor, whose own lists live
     // outside the provider rows' seat.
     teardownModelOrder(modelOrderState)

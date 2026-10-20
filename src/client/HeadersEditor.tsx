@@ -27,6 +27,8 @@ import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { HEADERS_CONFIG_PATH, PLUGIN_ID } from '../constants.js'
 import { LongCacheSection } from './LongCacheSection.js'
+import { announceSavedNotice } from './injection/saved-notice.js'
+import { armSettleGuard } from './injection/settle-guard.js'
 import { describeNamespace, providerHeadersOf, writeProviderHeaders, type ProviderHeadersReply } from './ops.js'
 import type { RemoteApi } from './types.js'
 
@@ -301,6 +303,12 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
   const save = async (next: Record<string, string>): Promise<void> => {
     setBusy(true)
     setMessage(undefined)
+    // Armed before the wire: this write is what invalidates the settings
+    // document, and the section's post-apply reload (which disables every closed
+    // row's actions for a beat) can begin before the mutate reply lands. The
+    // guard holds those buttons' painted opacity at full until the reload
+    // re-enables them, so the list does not blink under the confirmation.
+    armSettleGuard()
     let reply: ProviderHeadersReply
     try {
       reply = await writeProviderHeaders(api, route, next)
@@ -319,13 +327,19 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
     }
     setStored(next)
     setEditing(false)
-    // Saving opened the section (edit mode is always disclosed); landing the
-    // write keeps it open so the user sees the new value rather than watching
-    // the card snap shut under them.
-    setMessage({
-      kind: 'success',
-      text: Object.keys(next).length === 0 ? t('headersCleared') : t('headersSaved'),
-    })
+    const confirmation = Object.keys(next).length === 0 ? t('headersCleared') : t('headersSaved')
+    if (tabbed) {
+      // The pane commits the way the other two tabs do: the card closes. Its
+      // inline message would go down with the card, so the confirmation rides
+      // the same top bubble a host save raises — the pane's 保存 then means one
+      // thing everywhere, down to what is left on screen afterwards.
+      announceSavedNotice(confirmation)
+      onDismiss?.()
+      return
+    }
+    // In the fold the section stays on screen (the official footer is still the
+    // one that closes the card), so the message has somewhere to live.
+    setMessage({ kind: 'success', text: confirmation })
   }
 
   const rows = Object.entries(stored ?? {})

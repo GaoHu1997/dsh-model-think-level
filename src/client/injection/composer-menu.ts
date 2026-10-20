@@ -174,6 +174,26 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
   }
 
   /**
+   * Whether a child of the surface is the shell's MATERIAL layer rather than
+   * pane content.
+   *
+   * `MenuSurface` renders the popover's fill and backdrop blur into an
+   * `aria-hidden="true"`, empty FIRST child (its `--dsw-menu-surface-fill`
+   * background plus `backdrop-filter: var(--dsw-menu-backdrop-filter)`, both
+   * behind `z-index: -1`). It is chrome, not body: taking it down with the
+   * official list leaves a popover with NO background at all — the chat behind
+   * it reads straight through the panel, because the fill itself is only ~58%
+   * opaque and the blur is what makes it look solid. Structure is the identity
+   * here (the class name is a CSS-module hash), and an empty `aria-hidden`
+   * element is exactly what the shell paints into.
+   */
+  const isSurfaceMaterial = (el: HTMLElement): boolean => {
+    if (el.getAttribute('aria-hidden') !== 'true') return false
+    if (el.childElementCount > 0) return false
+    return (el.textContent ?? '').trim() === ''
+  }
+
+  /**
    * Hide the official pane body a surface this plugin took over would duplicate.
    *
    * Upstream renders the whole model list — its own search row, load notices
@@ -194,6 +214,9 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
     const targets: HTMLElement[] = []
     for (const el of Array.from(menu.children)) {
       if (el === wrapper) continue
+      // Never the menu's own material layer: see {@link isSurfaceMaterial}.
+      // Hiding it blanks the panel instead of removing a duplicate list.
+      if (isSurfaceMaterial(el as HTMLElement)) continue
       targets.push(el as HTMLElement)
     }
     // Upstream focuses its own search input (or a row) when it opens in this
