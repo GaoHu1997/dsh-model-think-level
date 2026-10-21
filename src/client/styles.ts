@@ -796,27 +796,6 @@ body:not([data-ds-dark-theme]) .bre-tip {
   flex-direction: column;
   gap: 8px;
 }
-/* The titled-section rows the pane is built from: the title row names its
-   section, and its hairline sits ABOVE the title so it divides this section
-   from the one before it rather than underlining this title (an underline
-   belongs to the title it would be read against, and this title has a whole
-   section under it). Only a section that FOLLOWS another wears one; the
-   headers section draws its title in the head strip above and needs none. */
-.bre-headers-title-row {
-  margin-top: 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--dsw-alias-border-l2, #0000001a);
-}
-/* A section title, so it wears the same colour as the head strip's title above
-   it (--dsw-alias-label-primary). The base .bre-effort-title is the muted
-   secondary the field labels use, and a section heading dimmer than the 请求头
-   heading above it reads as a sub-label OF it instead of a section beside it.
-   The weight already matches: the base rule sets 600. */
-.bre-headers-title-row .bre-effort-title {
-  color: var(--dsw-alias-label-primary, #0f1115);
-  font-size: 13px;
-  line-height: 20px;
-}
 
 .bre-headers-columns,
 .bre-headers-row {
@@ -964,34 +943,6 @@ body:not([data-ds-dark-theme]) .bre-tip {
 .bre-headers .bre-effort-note.bre-warn { color: var(--dsw-alias-state-warn-label, #dd8629); }
 .bre-headers .bre-effort-message.bre-success { color: var(--dsw-alias-state-success-primary, #22c55e); }
 .bre-headers .bre-effort-message.bre-error { color: var(--dsw-alias-state-error-primary, #ec1313); }
-
-/* The pane's second section (long-cache retention). It is inside the advanced
-   region — that is what makes the tab takeover hide it with the rest — but it is
-   NOT part of the header editor: it draws its own title row and its own switch
-   row, so the 请求头 heading above it is visibly a sibling rather than a parent. */
-.bre-cache {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  /* The hairline belongs to the section above it: this one starts a new group in
-     the same card, and the official page's group titles do not get both a rule
-     above and the title row's rule below. */
-  margin-top: 4px;
-}
-.bre-cache-row {
-  display: flex;
-  align-items: center;
-  /* The label names the setting, the switch states it, and the two ends of the
-     row hold them apart: nothing sits between them. */
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 32px;
-}
-.bre-cache-label {
-  color: var(--dsw-alias-label-primary, #0f1115);
-  font-size: 13px;
-  line-height: 20px;
-}
 
 @media (max-width: 520px) {
   .bre-headers-columns { display: none; }

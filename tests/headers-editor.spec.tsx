@@ -641,21 +641,16 @@ describe('HeadersEditor', () => {
     }
   })
 
-  it('puts the pane commit row under every section, not between them', async () => {
-    // The pane's Save closes the pane, so it belongs after the LAST section: a
-    // row that sat between the header table and 长缓存保留 read as a Save for the
-    // headers alone and left the switch below it outside what it commits.
+  it('keeps the pane commit row at the end of the pane', async () => {
+    // The pane's Save closes the pane, so it belongs after everything it commits:
+    // a row that sat inside the header table read as that table's own commit.
     const api = fakeApi({ headers: { 'x-company': 'acme' } })
     const editor = await renderEditor({ route: 'aliyun', api, t }, { tabbed: 'after-mount' })
     try {
-      const cache = editor.container.querySelector('.bre-cache')
       const actions = editor.container.querySelector('.bre-headers-actions')
-      expect(cache).not.toBeNull()
       expect(actions).not.toBeNull()
-      // Document order: header editor → long cache → actions.
-      expect(cache!.compareDocumentPosition(actions!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-      // And no longer inside the header editor, where it would have been styled
-      // by the rows' own size rules and read as that section's commit.
+      // Not inside the header editor, where it would have been styled by the
+      // rows' own size rules and read as that section's commit.
       expect(editor.container.querySelector('.bre-headers-edit .bre-effort-actions')).toBeNull()
       // It is the pane's last visible block, above only the status line.
       const last = editor.container.querySelector('.bre-headers')!.lastElementChild
@@ -708,43 +703,4 @@ describe('HeadersEditor', () => {
     }
   })
 
-  it('follows the header editor with the other-settings section under its own heading', async () => {
-    // The pane is the route's advanced configuration, and the long-cache switch
-    // is a second SECTION of it — never a row of the header table. Two title
-    // rows is what says so; a single one would read as "another header".
-    const api = fakeApi({ headers: { 'x-company': 'acme' } })
-    const editor = await renderEditor({ route: 'aliyun', api, t }, { tabbed: 'after-mount' })
-    try {
-      const titles = Array.from(editor.container.querySelectorAll('.bre-headers-title-row .bre-effort-title'))
-        .map(node => node.textContent)
-      expect(titles).toEqual([en.cacheTitle])
-      // It sits after the header table, inside the same advanced region.
-      const cache = editor.container.querySelector('.bre-cache')
-      expect(cache).not.toBeNull()
-      expect(cache!.previousElementSibling).not.toBeNull()
-      expect(editor.container.querySelector('.bre-headers')!.contains(cache)).toBe(true)
-      // The switch wears the setting's name, not the section title.
-      expect(cache!.querySelector('.bre-cache-label')?.textContent).toBe(en.cacheRowLabel)
-    } finally {
-      await editor.unmount()
-    }
-  })
-
-  it('leaves the long-cache section out of the create card, which has no route yet', async () => {
-    // Deferred mode drafts headers for a provider that does not exist yet; the
-    // switch writes the route profile, so there is nothing it could write to.
-    const api = fakeApi({})
-    const editor = await renderEditor({
-      route: 'aliyun',
-      api,
-      t,
-      deferred: { onDraft: () => {}, onCancel: () => {} },
-    })
-    try {
-      expect(editor.container.querySelector('.bre-cache')).toBeNull()
-      expect(editor.container.textContent).not.toContain(en.cacheTitle)
-    } finally {
-      await editor.unmount()
-    }
-  })
 })

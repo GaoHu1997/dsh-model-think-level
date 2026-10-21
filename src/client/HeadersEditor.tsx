@@ -26,7 +26,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { HEADERS_CONFIG_PATH, PLUGIN_ID } from '../constants.js'
-import { LongCacheSection } from './LongCacheSection.js'
 import { announceSavedNotice } from './injection/saved-notice.js'
 import { armSettleGuard } from './injection/settle-guard.js'
 import { describeNamespace, providerHeadersOf, writeProviderHeaders, type ProviderHeadersReply } from './ops.js'
@@ -538,14 +537,6 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
                       )}
                   </div>
                 )}
-            {/* A SECOND titled section, not part of the header editor: what it
-                edits is the route profile's long-cache compat, which the adapter
-                reads from the request BODY — no header can carry it. It sits here
-                because this pane is the route's advanced configuration, and it
-                carries its own heading at the 请求头 heading's level so it never
-                reads as one more header. Deferred mode (the create card) has no
-                route to write to yet, so it stays out of that draft pane. */}
-            {isDeferred ? null : <LongCacheSection route={route} api={api} t={t} />}
           </>
         )}
 

@@ -13,21 +13,6 @@ DSH 的第三方模型补齐思考等级：在官方 Models 页每个模型行�
 ![模型能力配置](./docs/image4.png)
 ![供应商高级配置](./docs/image5.png)
 
-## 其他配置（高级配置）
-
-供应商卡片的「高级配置」里，请求头下面还有一节独立的「其他配置」，带自己的标题，不是请求头的一项；长缓存保留就是这一节里的一行开关，说明用小字写在该行下面。整块面板的「取消 / 保存」压在这一节之后，所以在高级配置里它是整个面板的提交行，而不是请求头那一节的。
-
-开关写的是该路由 profile 的 `compat.supportsLongCacheRetention`。有些中转站会拒绝 OpenAI 的缓存字段（典型报错 `未知请求字段：prompt_cache_key`）；这两个字段由适配器写进**请求体**，任何请求头都加不进去也删不掉，能关掉它们的只有这个 `compat` 开关：
-
-- 关掉「长缓存保留」→ 写入 `compat.supportsLongCacheRetention: false`，`prompt_cache_key` 与 `prompt_cache_retention` 都不再发送，短时缓存不受影响。
-- 再打开 → 删除该键（`unset`），路由重新跟随适配器默认值。若下层配置（如 `cordis.patch.yml` 里手写的那份）同样固定了该键，删掉用户层的值只会把它暴露出来，此时改为显式写入 `true`，开关才不会看起来关不掉。
-
-开关跟着它标注的设置走：打开就是保留。没有显式配置时也是打开（跟随适配器默认的长缓存判定）；一个开关表示不了「跟随默认」和「显式开启」的差别，所以该路由显式写入了值时，说明下面会再补一行小字。
-
-写入是立即生效的一步操作，没有单独的保存按钮；该路由后续请求按新值走，无需重启 DSH。只写这一个叶子键，`compat` 里其他开关（如 `supportsDeveloperRole`）不会被覆盖。
-
-仅在协议提供该开关时显示：`openai-completions`、`openai-responses`、`azure-openai-responses`、`openai-codex-responses`、`anthropic-messages`。其他协议（如 `mistral-conversations`）会直接说明该协议没有这个开关，而不是给一个写了也不生效的控件。新建供应商卡片时还没有真实路由可写，所以那里不显示这一节。
-
 ## 兼容字段与已有配置
 
 1.1.4 起不再提供 `thinkingTokenBudgetField`、`vllmPriority`、`supportsMaxOutputTokens` 的专用编辑控件。已有值仍由 DSH 的 pi-ai 适配器使用；修改模型的思考档位或输入模态时，插件会保留这些值和其他手动兼容配置，避免覆盖供应商的定制行为。
