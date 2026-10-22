@@ -36,17 +36,20 @@ const t = (key: string, params?: Record<string, string | number>): string => {
   return Object.entries(params).reduce((carried, [name, value]) => carried.replace(`{${name}}`, String(value)), text)
 }
 
-const EMPTY: KeyState = { ok: true, route: 'ofox', enabledRef: null, entries: [] }
+const EMPTY: KeyState = { ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null } }
 
 /** A transport that answers instantly with an empty list. */
 function stubClient(): KeyManagerClient {
   return {
     list: async () => EMPTY,
     add: async () => EMPTY,
-    enable: async () => EMPTY,
     rename: async () => EMPTY,
     replace: async () => EMPTY,
     remove: async () => EMPTY,
+    setScope: async () => EMPTY,
+    discover: async () => EMPTY,
+    setProtocol: async () => EMPTY,
+    setEndpoints: async () => EMPTY,
     reveal: async () => undefined,
   }
 }
@@ -289,11 +292,16 @@ describe('the key list contract with the stylesheet', () => {
     expect(STYLES).toContain('border: 0.5px solid var(--dsw-alias-border-l2, #d5d7dd);')
   })
 
-  it('makes the enable control a real radio behind the check circle', () => {
-    expect(STYLES).toContain('.bre-keys-enable {')
-    expect(STYLES).toContain('.bre-keys-enabled {')
-    expect(STYLES).toContain('.bre-keys-enabled:checked + .bre-keys-mark {')
-    expect(STYLES).toContain('.bre-keys-enabled:focus-visible + .bre-keys-mark {')
+  it('marks the default key with a filled badge instead of a per-row enable radio', () => {
+    expect(STYLES).toContain('.bre-keys-default {')
+    expect(STYLES).toContain('.bre-keys-scope-label {')
+    expect(STYLES).not.toContain('.bre-keys-enable {')
+    expect(STYLES).not.toContain('.bre-keys-enabled {')
+  })
+
+  it('offers a discover control for automatic model binding', () => {
+    expect(STYLES).toContain('.bre-keys-footer {')
+    expect(STYLES).toContain('.bre-keys-discover {')
   })
 
   it('hands the field’s input to the list while the list manages the field', () => {

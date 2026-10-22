@@ -35,7 +35,17 @@ import {
   PROBE_PATH,
   PROVIDER_KEY_PATH,
 } from './constants.js'
-import { isLegalKeyValue, maskKeyValue, nextKeyRef, normalizeKeyAlias } from './key-refs.js'
+import {
+  endpointFamilyOf,
+  isLegalKeyValue,
+  maskKeyValue,
+  nextKeyRef,
+  normalizeKeyAlias,
+  normalizeKeyModels,
+  normalizeKeyProtocol,
+  normalizeRouteEndpoints,
+  type RouteProtocol,
+} from './key-refs.js'
 import {
   hasKeyEntry,
   keyEntriesOf,
@@ -44,14 +54,18 @@ import {
   updateKeyIndex,
   withKeyAlias,
   withKeyEntry,
+  withKeyModels,
+  withKeyProtocol,
+  withRouteEndpoints,
   withoutKeyEntry,
 } from './key-index.js'
+import { keysForModel, type KeyCandidate } from './key-route-core.js'
 import { suggestEfforts } from './knowledge.js'
 import type { ReasoningEfforts } from './knowledge.js'
 import { resolveGuardEffort } from './guard.js'
 import { isRecord, looksLikeCompatRefusal, routeFactsOf } from './shared.js'
 import { buildHeaderIndex, emptyIndex, type UserAgentIndex } from './headers-core.js'
-import { headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from './headers-fetch.js'
+import { headerOverlayBypass, headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from './headers-fetch.js'
 import { describePiAiHeaderState, installPiAiHeaderTransforms } from './headers-pi-ai.js'
 import { detectHeaderConflicts, type HeaderConflictReport } from './headers-conflict.js'
 // The knowledge-base patch builder lives in its own module: the browser half
@@ -145,12 +159,31 @@ interface KeyEntryView {
   ref: string
   /** Stored label, when the user gave one. */
   alias?: string
-  /** Whether this is the reference the adapter resolves. */
-  enabled: boolean
+  /** Whether this is the DEFAULT key (first in preference order). */
+  primary: boolean
   /** Whether the store holds a value; null when the store cannot say. */
   configured: boolean | null
   /** The value in its display form, when the store let it be read. */
   masked?: string
+  /** Model ids this key was discovered to serve; absent means "unscoped". */
+  models?: readonly string[]
+  /** The protocol this key pins, when it pins one (else the route's own). */
+  protocol?: RouteProtocol
+}
+
+/**
+ * One key's routing scope as the fetch seam needs it: the reference and the
+ * models it may serve, WITHOUT the secret (the seam resolves a value only for
+ * the keys a request can actually reach). Kept in a small in-memory snapshot so
+ * the per-request path pays no disk read.
+ */
+interface RouteKeyScope {
+  readonly ref: string
+  readonly models?: readonly string[]
+  /** The protocol this key pins, when it pins one (else the route's own). */
+  readonly protocol?: RouteProtocol
+  /** Base URL this key must use, resolved for its protocol family. */
+  readonly endpoint?: string
 }
 
 /** One route's profile inside a pi-ai section value, or undefined. */
@@ -166,6 +199,56 @@ function providerProfileOf(section: unknown, route: string): Record<string, unkn
 function enabledRefOf(profile: Record<string, unknown> | undefined): string | undefined {
   const ref = profile?.['apiKeyEnv']
   return typeof ref === 'string' && ref.length > 0 ? ref : undefined
+}
+
+/**
+ * Read the key index into the per-route scope snapshot the fetch seam reads.
+ * This is metadata only — references and their discovered model lists, never a
+ * secret — so it is safe to hold in memory across requests. A malformed or
+ * missing index degrades to "no scopes", which leaves every request on the
+ * adapter's own single-key path (exactly today's behaviour).
+ *
+ * Preference order IS the list order, so the FIRST key is the default: a model
+ * every key can serve signs with it and fails over to the next (user rule A).
+ * The profile's `apiKeyEnv` (the key the official page configured) is appended
+ * last, unscoped, when the index has never listed it — it is a real key the
+ * store holds, so it must stay reachable, but as a catch-all fallback.
+ * @param providers - the live pi-ai providers map (per route's `apiKeyEnv`).
+ */
+function readRouteKeyScopes(
+  providers: Record<string, Record<string, unknown>>,
+): Record<string, readonly RouteKeyScope[]> {
+  let document: ReturnType<typeof readKeyIndex>
+  try {
+    document = readKeyIndex(keyIndexFilePath())
+  } catch {
+    return {}
+  }
+  const scopes: Record<string, readonly RouteKeyScope[]> = {}
+  const routes = new Set<string>(Object.keys(document.providers))
+  for (const route of Object.keys(providers)) routes.add(route)
+  for (const route of routes) {
+    const endpoints = document.endpoints?.[route]
+    const listed = keyEntriesOf(document, route)
+    const ordered: RouteKeyScope[] = listed.map(entry => {
+      const scope: RouteKeyScope = { ref: entry.ref }
+      if (entry.models !== undefined) (scope as { models?: readonly string[] }).models = entry.models
+      if (entry.protocol !== undefined) {
+        ;(scope as { protocol?: RouteProtocol }).protocol = entry.protocol
+        // A key that pins a protocol also pins the endpoint of that family: the
+        // provider keeps ONE OpenAI URL and ONE Anthropic URL, and the key states
+        // which wire it speaks, so the matching URL must ride along.
+        const family = endpointFamilyOf(entry.protocol)
+        const endpoint = endpoints?.[family]
+        if (endpoint !== undefined) (scope as { endpoint?: string }).endpoint = endpoint
+      }
+      return scope
+    })
+    const seat = enabledRefOf(isRecord(providers[route]) ? providers[route] : undefined)
+    if (seat !== undefined && !ordered.some(scope => scope.ref === seat)) ordered.push({ ref: seat })
+    if (ordered.length > 0) scopes[route] = ordered
+  }
+  return scopes
 }
 
 /** Whether a host-service answer is the refusal envelope (`{ok: false}`). */
@@ -793,6 +876,17 @@ export function apply(ctx: Context, config: Config = {}): void {
   // simply stop matching anything.
   /** Live index the overlay reads; never undefined once apply has run. */
   const overlaySource: OverlaySource = { current: emptyIndex() }
+  // Per-route key scopes (references + discovered model lists, never secrets)
+  // the fetch seam uses to choose and fail over across keys. Kept as a live
+  // snapshot so the hot request path reads memory, not disk.
+  const keyScopes: { current: Record<string, readonly RouteKeyScope[]> } = { current: {} }
+  const providersOf = (): Record<string, Record<string, unknown>> => {
+    const section = piSection()
+    return isRecord(section) && isRecord(section['providers'])
+      ? (section['providers'] as Record<string, Record<string, unknown>>)
+      : {}
+  }
+  const refreshKeyScopes = (): void => { keyScopes.current = readRouteKeyScopes(providersOf()) }
   const headerRetryTimers = new Set<ReturnType<typeof setTimeout>>()
   let headerRetryAttempt = 0
   const stopHeaderRetries = (): void => {
@@ -835,10 +929,49 @@ export function apply(ctx: Context, config: Config = {}): void {
     overlaySource.current = buildHeaderIndex(providers)
   }
   refreshHeaders()
+  refreshKeyScopes()
   ctx.effect(() => () => stopHeaderRetries(), 'dsh-model-think-level: header retries')
   ctx.on('settings/document-updated', (ns) => {
-    if (ns === PI_NS) refreshHeaders()
+    if (ns === PI_NS) {
+      refreshHeaders()
+      refreshKeyScopes()
+    }
   })
+  /**
+   * Resolve the ordered keys that may sign one matched request. The preference
+   * order is the key index's list order; `keysForModel` narrows to the keys
+   * whose scope can serve this model, falling back to the full list so a stale
+   * or over-eager scope can never strand a model that some key can reach. Each
+   * candidate's value is resolved fresh (a rotated/replaced key is honoured on
+   * the next request); a reference whose value the store cannot confirm is
+   * skipped, leaving the remaining keys — and, if none resolve, the adapter's
+   * own single-key path — to serve.
+   */
+  overlaySource.keys = async ({ route, model }) => {
+    const scopes = keyScopes.current[route] ?? []
+    if (scopes.length === 0) return []
+    const candidates: KeyCandidate[] = []
+    const ordered = keysForModel(
+      scopes.map(scope => ({ ref: scope.ref, value: '', models: scope.models })),
+      model,
+    )
+    for (const candidate of ordered) {
+      try {
+        const value = await resolveCredential(ctx.get('credentials') as CredentialsService | undefined, candidate.ref)
+        if (value === undefined) continue
+        const scope = scopes.find(entry => entry.ref === candidate.ref)
+        const resolved: KeyCandidate = { ref: candidate.ref, value, models: candidate.models }
+        if (scope?.protocol !== undefined) (resolved as { protocol?: RouteProtocol }).protocol = scope.protocol
+        if (scope?.endpoint !== undefined) (resolved as { endpoint?: string }).endpoint = scope.endpoint
+        candidates.push(resolved)
+      } catch {
+        // A reference the store cannot read is simply not a usable key here;
+        // failover continues to the next one, and an all-failed resolution
+        // returns an empty list so the request falls back to the adapter.
+      }
+    }
+    return candidates
+  }
   const overlay = installHeaderOverlay(overlaySource)
   ctx.effect(() => () => { overlay.dispose() }, 'dsh-model-think-level: fetch header overlay')
 
@@ -953,7 +1086,10 @@ export function apply(ctx: Context, config: Config = {}): void {
               }
             }
             try {
-              const upstream = await fetch(listingURL, {
+              // This probe composes its own auth from the profile's reference, so
+              // it must bypass the key-routing wrapper: that wrapper would re-sign
+              // the request with the route's first key, probing the wrong credential.
+              const upstream = await headerOverlayBypass()(listingURL, {
                 method: 'GET',
                 // Header composition mirrors the harness's own model discovery:
                 // the profile's configured request headers ride
@@ -1215,27 +1351,41 @@ export function apply(ctx: Context, config: Config = {}): void {
 
               /** The whole list, as the browser half renders it. */
               const payload = async (): Promise<unknown> => {
-                const enabledRef = enabledNow()
+                // Preference order is list order, so the FIRST listed key is the
+                // default that signs a model every key can serve and fails over
+                // to the next (user rule A).
+                const seat = enabledNow()
                 const listed = keyEntriesOf(readKeyIndex(indexFile), route)
                 const refs = listed.map(entry => entry.ref)
-                // The key in use is always on the list, even when it was written
-                // by the official page or by hand and this plugin has never seen
-                // it: the panel must be able to show and act on what is active.
-                if (enabledRef !== undefined && !refs.includes(enabledRef)) refs.push(enabledRef)
+                // The seat (the reference the adapter itself resolves) is always
+                // on the list, even when the official page wrote it and this
+                // plugin has never listed it — the adapter still needs it.
+                if (seat !== undefined && !refs.includes(seat)) refs.push(seat)
                 const facts = await credentialFacts(credentials, refs)
-                const entries: KeyEntryView[] = refs.map(ref => {
+                const entries: KeyEntryView[] = refs.map((ref, index) => {
                   const fact = facts[ref]
                   const view: KeyEntryView = {
                     ref,
-                    enabled: ref === enabledRef,
+                    primary: index === 0,
                     configured: fact?.configured ?? null,
                   }
                   if (fact?.masked !== undefined) view.masked = fact.masked
                   const stored = listed.find(candidate => candidate.ref === ref)
                   if (stored?.alias !== undefined) view.alias = stored.alias
+                  if (stored?.models !== undefined) (view as { models?: readonly string[] }).models = stored.models
+                  if (stored?.protocol !== undefined) (view as { protocol?: RouteProtocol }).protocol = stored.protocol
                   return view
                 })
-                return { ok: true, route, enabledRef: enabledRef ?? null, entries }
+                const endpoints = readKeyIndex(indexFile).endpoints?.[route]
+                return {
+                  ok: true,
+                  route,
+                  entries,
+                  endpoints: {
+                    openai: endpoints?.openai ?? null,
+                    anthropic: endpoints?.anthropic ?? null,
+                  },
+                }
               }
 
               if (req.method === 'GET') {
@@ -1304,31 +1454,129 @@ export function apply(ctx: Context, config: Config = {}): void {
                   }
                   throw error
                 }
-              } else if (op === 'enable') {
-                const listed = readKeyIndex(indexFile)
-                if (ref === undefined || !hasKeyEntry(listed, route, ref)) {
+              } else if (op === 'scope') {
+                // Record which models one key serves (the manual override; the
+                // `discover` op fills it automatically). Absent/empty models
+                // clears the scope, making the key an unscoped catch-all again.
+                const document = readKeyIndex(indexFile)
+                const known = ref !== undefined && (hasKeyEntry(document, route, ref) || ref === enabledNow())
+                if (ref === undefined || !known) {
                   refuse('that key is not listed for this provider')
                   return
                 }
-                // Moving the seat must not take the key it leaves off the list:
-                // that key was a row a moment ago, and unlisted it would fall out
-                // of reach — and let a later add mint its name again, over the
-                // value still sitting in the store.
-                const previous = enabledNow()
-                if (previous !== undefined && previous !== ref && !hasKeyEntry(listed, route, previous)) {
-                  const leaving: string = previous
-                  updateKeyIndex(
-                    document =>
-                      hasKeyEntry(document, route, leaving)
-                        ? document
-                        : withKeyEntry(document, route, leaving, undefined),
-                    indexFile,
-                  )
-                }
-                const failed = await setEnabledKey(ref)
-                if (failed !== undefined) {
-                  refuse(failed)
+                const scope = isRecord(body) ? normalizeKeyModels(body['models']) : undefined
+                const target = ref
+                updateKeyIndex(
+                  document2 =>
+                    hasKeyEntry(document2, route, target)
+                      ? withKeyModels(document2, route, target, scope)
+                      : withKeyEntry(document2, route, target, undefined),
+                  indexFile,
+                )
+              } else if (op === 'protocol') {
+                // Pin which wire protocol one key speaks (the per-key protocol
+                // picker). Absent/blank clears the pin, letting the key follow
+                // the route's own protocol again.
+                const document = readKeyIndex(indexFile)
+                const known = ref !== undefined && (hasKeyEntry(document, route, ref) || ref === enabledNow())
+                if (ref === undefined || !known) {
+                  refuse('that key is not listed for this provider')
                   return
+                }
+                const protocol = isRecord(body) ? normalizeKeyProtocol(body['protocol']) : undefined
+                if (isRecord(body) && body['protocol'] !== undefined && body['protocol'] !== null && protocol === undefined) {
+                  refuse('that protocol is not supported')
+                  return
+                }
+                const target = ref
+                updateKeyIndex(
+                  document2 =>
+                    hasKeyEntry(document2, route, target)
+                      ? withKeyProtocol(document2, route, target, protocol)
+                      : withKeyEntry(document2, route, target, undefined),
+                  indexFile,
+                )
+              } else if (op === 'endpoints') {
+                // The provider's two base URLs: one ChatGPT/OpenAI wire, one
+                // Anthropic wire. A key that pins a protocol uses the matching
+                // URL; both are optional and an empty value clears that side.
+                const endpoints = isRecord(body)
+                  ? normalizeRouteEndpoints({ openai: body['openai'], anthropic: body['anthropic'] })
+                  : undefined
+                updateKeyIndex(document => withRouteEndpoints(document, route, endpoints), indexFile)
+              } else if (op === 'discover') {
+                // Probe EACH listed key's own /models listing and record what it
+                // returns as that key's scope — fully automatic binding, no
+                // manual entry required (user rule B). A key whose listing cannot
+                // be read keeps its previous scope rather than being wiped.
+                const document = readKeyIndex(indexFile)
+                const profile = providerProfileOf(entryOf()?.value, route)
+                const baseURL = typeof profile?.['baseURL'] === 'string' ? profile['baseURL'] : ''
+                const api = typeof profile?.['api'] === 'string' ? profile['api'] : ''
+                if (baseURL.length === 0 || !LISTABLE_PROTOCOLS.has(api)) {
+                  refuse('this provider cannot be interrogated; set each key\'s models by hand')
+                  return
+                }
+                const seat = enabledNow()
+                const listedEntries = keyEntriesOf(document, route)
+                const listedRefs = listedEntries.map(candidate => candidate.ref)
+                if (seat !== undefined && !listedRefs.includes(seat)) listedRefs.push(seat)
+                if (listedRefs.length === 0) {
+                  refuse('add a key before detecting its models')
+                  return
+                }
+                const endpoints = document.endpoints?.[route]
+                for (const listed of listedRefs) {
+                  let apiKey: string | undefined
+                  try {
+                    apiKey = await resolveCredential(credentials, listed)
+                  } catch {
+                    continue
+                  }
+                  if (apiKey === undefined) continue
+                  // A key that pins its own protocol probes THAT protocol's
+                  // endpoint, so a e.g. Anthropic-pinned key lists Anthropic
+                  // models even when the route's default wire is OpenAI.
+                  const pinned = listedEntries.find(candidate => candidate.ref === listed)?.protocol
+                  const family = pinned !== undefined ? endpointFamilyOf(pinned) : undefined
+                  const pinnedEndpoint = family !== undefined ? endpoints?.[family] : undefined
+                  const probeBase = pinnedEndpoint !== undefined ? pinnedEndpoint : baseURL
+                  const probeApi = pinned !== undefined && LISTABLE_PROTOCOLS.has(pinned) ? pinned : api
+                  if (!LISTABLE_PROTOCOLS.has(probeApi)) continue
+                  const listingURL = probeListingUrl(probeBase, probeApi)
+                  try {
+                    // Each key probes its OWN credential, so bypass the key-routing
+                    // wrapper (which would otherwise sign every probe with the first key).
+                    const upstream = await headerOverlayBypass()(listingURL, {
+                      method: 'GET',
+                      headers: composeProbeHeaders(profile?.['headers'], apiKey, probeApi),
+                      redirect: 'error',
+                      signal: AbortSignal.timeout(resolved.probeTimeoutMs),
+                    })
+                    if (!upstream.ok) {
+                      await upstream.body?.cancel().catch(() => { /* best-effort */ })
+                      continue
+                    }
+                    const text = await readBounded(upstream, listingURL)
+                    const entries = listingEntries(JSON.parse(text) as unknown)
+                    if (entries === undefined) continue
+                    const ids = normalizeKeyModels(
+                      entries
+                        .map(entry => (typeof entry['id'] === 'string' ? entry['id'] : undefined))
+                        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+                    ) ?? []
+                    updateKeyIndex(
+                      document2 =>
+                        hasKeyEntry(document2, route, listed)
+                          ? withKeyModels(document2, route, listed, ids)
+                          : withKeyEntry(document2, route, listed, undefined),
+                      indexFile,
+                    )
+                  } catch {
+                    // A probe that fails (network, bad JSON, timeout) leaves this
+                    // key's scope as it was; other keys still get detected.
+                    continue
+                  }
                 }
               } else if (op === 'rename') {
                 // The key the provider is RUNNING on takes a label too: that
@@ -1424,6 +1672,11 @@ export function apply(ctx: Context, config: Config = {}): void {
                 refuse(`unknown key operation "${op}"`)
                 return
               }
+              // The key index is this plugin's own file, so a write to it fires no
+              // settings event. Refresh the live routing snapshot here or a key
+              // added/scoped/detected just now would not sign a request until some
+              // unrelated settings change happened to refresh it.
+              refreshKeyScopes()
               sendJson(res, 200, await payload())
             } catch (error) {
               sendJson(res, error instanceof HostReadError ? 502 : 500, {

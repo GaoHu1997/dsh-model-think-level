@@ -1687,63 +1687,19 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   padding: 9px 10px;
 }
 
-/* The enable choice closes the row. The radio stays the real input — so the
-   keys of one provider are one group, choosing one clears the rest, and the
-   pick is keyboard-reachable — and the circle is its face; the word beside it
-   names the action instead of a state to hunt for. */
-.bre-keys-enable {
-  display: inline-flex;
+/* The default key is the first in preference order; it signs any model more than
+   one key can serve, so it opens the row as a small filled pill rather than a
+   radio. Every key is active — there is no single enabled seat any more. */
+.bre-keys-default {
   flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-}
-
-.bre-keys-enable-text {
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--dsw-alias-label-secondary, #6b7280);
-}
-
-.bre-keys-enable:has(.bre-keys-enabled:checked) .bre-keys-enable-text {
-  color: var(--dsw-alias-label-primary, #0f1115);
-}
-
-.bre-keys-enabled {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  border: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  clip-path: inset(50%);
-}
-
-.bre-keys-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  box-sizing: border-box;
-  border: 1px solid var(--dsw-alias-border-l3, #9aa0aa);
-  border-radius: 50%;
-  color: var(--dsw-alias-bg-layer-1, #ffffff);
-  transition: background 120ms ease, border-color 120ms ease;
-}
-
-.bre-keys-mark > svg { width: 12px; height: 12px; }
-
-.bre-keys-enabled:checked + .bre-keys-mark {
-  border-color: var(--dsw-alias-label-primary, #0f1115);
+  padding: 1px 6px;
+  border-radius: 999px;
   background: var(--dsw-alias-label-primary, #0f1115);
-}
-
-.bre-keys-enabled:focus-visible + .bre-keys-mark {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+  color: var(--dsw-alias-label-primary-foreground, #ffffff);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
 }
 
 /* With an alias the alias is the row's name and the masked key follows it as a
@@ -1781,6 +1737,19 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   color: var(--dsw-alias-label-primary, #0f1115);
   font-family: inherit;
   font-size: 12px;
+}
+
+/* The model-scope summary beside the key: how many models this key serves (or
+   "all models" before a probe, or "none found" after an empty one). Quiet, so
+   the alias and the mask stay the row's name. */
+.bre-keys-scope-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary, #6b7280);
 }
 
 /* The row's three actions, revealed on hover or keyboard focus rather than
@@ -1900,6 +1869,56 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 
 .bre-keys-add:disabled { opacity: 0.55; cursor: default; }
 
+/* The scope field spans the row like the secret field does. */
+.bre-keys-scope { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.bre-keys-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+}
+
+/* The discover action sits below the ruled list because it acts on every key at
+   once, not on the row it would otherwise live in. */
+.bre-keys-footer { display: flex; justify-content: flex-end; }
+
+.bre-keys-discover {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: color 120ms ease;
+}
+
+.bre-keys-discover:hover { color: var(--dsw-alias-label-primary, #0f1115); }
+
+.bre-keys-discover:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+  border-radius: 4px;
+}
+
+.bre-keys-discover:disabled { opacity: 0.55; cursor: default; }
+
+.bre-keys-discover-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+
+.bre-keys-discover-mark > svg { width: 13px; height: 13px; }
+
 .bre-keys-add-mark {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1911,9 +1930,121 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 
 .bre-keys .bre-effort-message { font-size: 11px; }
 
+/* The per-key protocol picker. A key that pins a protocol speaks that API shape;
+   "any protocol" (the empty value) keeps following the route's own. Sized to its
+   content so it reads as a small attribute of the row, not a field to fill in. */
+.bre-keys-protocol {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--dsw-alias-line-regular, #d8dbe2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-elevated, #fff);
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.bre-keys-protocol:hover { color: var(--dsw-alias-label-primary, #0f1115); }
+
+.bre-keys-protocol:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+}
+
+.bre-keys-protocol:disabled { opacity: 0.55; cursor: default; }
+
+/* The model-scope chips: the models the provider actually offers, each a toggle.
+   A selected chip takes the brand tint and a tick, so a quick glance tells which
+   models this key claims without reading a list of ids. */
+.bre-keys-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bre-keys-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-line-regular, #d8dbe2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.bre-keys-chip:hover { border-color: var(--dsw-alias-brand-primary, #3b82f6); }
+
+.bre-keys-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+}
+
+.bre-keys-chip:disabled { opacity: 0.55; cursor: default; }
+
+.bre-keys-chip.is-selected {
+  border-color: var(--dsw-alias-brand-primary, #3b82f6);
+  background: var(--dsw-alias-brand-primary-muted, #eef2ff);
+  color: var(--dsw-alias-brand-primary, #3b82f6);
+}
+
+.bre-keys-chip-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+}
+
+.bre-keys-chip-mark > svg { width: 12px; height: 12px; }
+
+/* "All models" is a quiet text action inside the scope form's action row. */
+.bre-keys-allmodels { margin-right: auto; }
+
+/* The provider's two base URLs: one OpenAI-style, one Anthropic. Kept together
+   below the key list because they belong to the route, not to any one key. */
+.bre-keys-endpoints {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-line-faint, #eceef2);
+}
+
+.bre-keys-endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bre-keys-endpoint-label {
+  flex: 0 0 auto;
+  width: 104px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+}
+
+.bre-keys-endpoint {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  font-size: 12px;
+}
+
+.bre-keys-endpoint-actions { display: flex; justify-content: flex-end; }
+
 @media (prefers-reduced-motion: reduce) {
   .bre-editor-tab { transition: none; }
   .bre-key-eye { transition: none; }
-  .bre-keys-mark, .bre-keys-actions, .bre-keys-add { transition: none; }
+  .bre-keys-actions, .bre-keys-add, .bre-keys-discover, .bre-keys-chip { transition: none; }
 }
 `

@@ -22,6 +22,9 @@ import {
   updateKeyIndex,
   withKeyAlias,
   withKeyEntry,
+  withKeyModels,
+  withKeyProtocol,
+  withRouteEndpoints,
   withoutKeyEntry,
   writeKeyIndex,
 } from '../src/key-index.js'
@@ -103,6 +106,68 @@ describe('parseKeyIndex', () => {
       providers: { ofox: [{ ref: 'A', alias: 'first' }, { ref: 'A', alias: 'second' }] },
     })
     expect(keyEntriesOf(parsed, 'ofox')).toEqual([{ ref: 'A', alias: 'first' }])
+  })
+
+  it('round-trips a per-key model scope, and keeps an empty one distinct from none', () => {
+    const parsed = parseKeyIndex({
+      version: 1,
+      providers: {
+        ofox: [
+          { ref: 'A', models: [' glm-4 ', 'glm-4', '', 'glm-4-air', 42] },
+          { ref: 'B', models: [] },
+          { ref: 'C' },
+          { ref: 'D', models: 'nonsense' },
+        ],
+      },
+    })
+    expect(keyEntriesOf(parsed, 'ofox')).toEqual([
+      // Trimmed and de-duplicated; non-strings dropped.
+      { ref: 'A', models: ['glm-4', 'glm-4-air'] },
+      // An empty array (probed, reached nothing) stays empty — not the same as
+      // an unscoped key, which has no models field at all.
+      { ref: 'B', models: [] },
+      { ref: 'C' },
+      { ref: 'D' },
+    ])
+    writeKeyIndex(parsed, fileOf())
+    expect(readKeyIndex(fileOf())).toEqual(parsed)
+  })
+
+  it('round-trips a per-key protocol and the two base URLs', () => {
+    const document = withRouteEndpoints(
+      withKeyProtocol(withKeyEntry(emptyKeyIndex(), 'ofox', 'A'), 'ofox', 'A', 'anthropic-messages'),
+      'ofox',
+      { openai: 'https://api.openai.example/v1', anthropic: 'https://api.anthropic.example' },
+    )
+    expect(keyEntriesOf(document, 'ofox')).toEqual([{ ref: 'A', protocol: 'anthropic-messages' }])
+    expect(document.endpoints?.['ofox']).toEqual({
+      openai: 'https://api.openai.example/v1',
+      anthropic: 'https://api.anthropic.example',
+    })
+    writeKeyIndex(document, fileOf())
+    expect(readKeyIndex(fileOf())).toEqual(document)
+  })
+
+  it('drops an unknown protocol and non-URL endpoints on parse, but keeps the rest', () => {
+    const parsed = parseKeyIndex({
+      version: 1,
+      providers: { ofox: [{ ref: 'A', protocol: 'carrier-pigeon' }, { ref: 'B', protocol: 'openai-completions' }] },
+      endpoints: { ofox: { openai: 'https://ok.example/v1', anthropic: 'ftp://nope' } },
+    })
+    expect(keyEntriesOf(parsed, 'ofox')).toEqual([{ ref: 'A' }, { ref: 'B', protocol: 'openai-completions' }])
+    expect(parsed.endpoints?.['ofox']).toEqual({ openai: 'https://ok.example/v1' })
+  })
+
+  it('preserves a protocol and the endpoints through every writer', () => {
+    let document = withRouteEndpoints(
+      withKeyProtocol(withKeyEntry(emptyKeyIndex(), 'ofox', 'A'), 'ofox', 'A', 'openai-responses'),
+      'ofox',
+      { anthropic: 'https://a.example' },
+    )
+    document = withKeyModels(document, 'ofox', 'A', ['glm-4'])
+    document = withKeyAlias(document, 'ofox', 'A', 'main')
+    expect(keyEntriesOf(document, 'ofox')).toEqual([{ ref: 'A', models: ['glm-4'], alias: 'main', protocol: 'openai-responses' }])
+    expect(document.endpoints?.['ofox']).toEqual({ anthropic: 'https://a.example' })
   })
 })
 

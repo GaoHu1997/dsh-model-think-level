@@ -2,14 +2,20 @@
  * The browser half's client for the host's API-key manager.
  *
  * Every key fact — which references a provider lists, which label each carries,
- * which one is in use, and whether the credential store actually holds a value
- * — is host state: the list is the plugin's own index file, the value lives in
- * the credential store, and the "in use" seat is the profile's `apiKeyEnv`
- * field. All six operations therefore ride ONE same-origin route
+ * which models each may serve, and whether the credential store actually holds a
+ * value — is host state: the list is the plugin's own index file, the values live
+ * in the credential store, and each key's model scope is the `models` field on
+ * its index entry. All operations therefore ride ONE same-origin route
  * ({@link KEY_INDEX_PATH}), and the browser half only ever handles references,
- * labels, booleans and masked previews. It never sees a secret it did not
- * explicitly ask for: a key value is fetched one reference at a time through the
- * existing reveal route, on a click, and is never cached.
+ * labels, model ids, booleans and masked previews. It never sees a secret it did
+ * not explicitly ask for: a key value is fetched one reference at a time through
+ * the existing reveal route, on a click, and is never cached.
+ *
+ * Keys are listed in preference order and are ALL active: index 0 is the default
+ * key for a model any key can serve, a model only one key lists sticks to that
+ * key, and a failed request fails over to the next capable key. There is no
+ * single "enabled" seat to point at any more — the old radio is gone — so a row's
+ * {@link KeyRow.primary} flag (its position) is what the panel marks as default.
  *
  * Fails closed. A refused fence, a route that is not in the settings document,
  * a store that cannot be written, a network error — each answers `{ ok: false }`
@@ -21,6 +27,7 @@
 
 import { KEY_INDEX_PATH, PROVIDER_KEY_PATH } from '../constants.js'
 import { isRecord } from '../shared.js'
+import { isRouteProtocol, type RouteProtocol } from '../key-refs.js'
 
 /** One key row as the host reports it. */
 export interface KeyRow {
@@ -28,8 +35,12 @@ export interface KeyRow {
   readonly ref: string
   /** Stored label; absent means "show the reference itself". */
   readonly alias?: string
-  /** Whether this is the reference the profile currently names. */
-  readonly enabled: boolean
+  /**
+   * Whether this is the first (default) key in preference order. The default key
+   * signs any model that more than one key can serve; every key is otherwise
+   * active and reachable by failover.
+   */
+  readonly primary: boolean
   /** Whether the credential store holds a value; null when it could not say. */
   readonly configured: boolean | null
   /**
@@ -38,15 +49,32 @@ export interface KeyRow {
    * nothing rather than a made-up preview.
    */
   readonly masked?: string
+  /**
+   * The model ids this key was discovered to serve. Absent means "unscoped": not
+   * probed yet, or deliberately left as a catch-all that serves whatever is left.
+   */
+  readonly models?: readonly string[]
+  /**
+   * The wire protocol this key pins. Absent means "follow the provider's own
+   * protocol". A pinned protocol makes this key speak a different API shape than
+   * the rest of the route (e.g. one Anthropic key on an OpenAI route).
+   */
+  readonly protocol?: RouteProtocol
+}
+
+/** A protocol family's base URL as the host stores it (empty means unset). */
+export interface KeyEndpoints {
+  readonly openai: string | null
+  readonly anthropic: string | null
 }
 
 /** A successful answer: the whole list, in the host's order. */
 export interface KeyState {
   readonly ok: true
   readonly route: string
-  /** The reference in use, or null when the provider names none. */
-  readonly enabledRef: string | null
   readonly entries: readonly KeyRow[]
+  /** The provider's two base URLs, keyed by protocol family. */
+  readonly endpoints: KeyEndpoints
 }
 
 /** A refused answer, carrying the host's own words when it sent any. */
@@ -64,14 +92,20 @@ export interface KeyManagerClient {
   list(route: string): Promise<KeyAnswer>
   /** Store a new key and list it, returning the list it produced. */
   add(route: string, value: string, alias: string | undefined): Promise<KeyAnswer>
-  /** Make one listed reference the key in use. */
-  enable(route: string, ref: string): Promise<KeyAnswer>
   /** Relabel one listed reference (undefined clears the label). */
   rename(route: string, ref: string, alias: string | undefined): Promise<KeyAnswer>
   /** Replace the stored secret of one listed reference, keeping its name. */
   replace(route: string, ref: string, value: string): Promise<KeyAnswer>
   /** Forget one listed reference and its value. */
   remove(route: string, ref: string): Promise<KeyAnswer>
+  /** Set one key's model scope (undefined clears it back to the catch-all). */
+  setScope(route: string, ref: string, models: readonly string[] | undefined): Promise<KeyAnswer>
+  /** Pin one key's wire protocol (undefined clears it back to the route's own). */
+  setProtocol(route: string, ref: string, protocol: RouteProtocol | undefined): Promise<KeyAnswer>
+  /** Set one protocol family's base URL (undefined/empty clears that side). */
+  setEndpoints(route: string, openai: string | undefined, anthropic: string | undefined): Promise<KeyAnswer>
+  /** Probe every listed key's model list and record the scopes it found. */
+  discover(route: string): Promise<KeyAnswer>
   /** The stored value of one listed reference, or undefined. */
   reveal(route: string, ref: string): Promise<string | undefined>
 }
@@ -85,6 +119,16 @@ function messageOf(body: Record<string, unknown>): string | undefined {
   return undefined
 }
 
+/** The model ids on one row, or undefined when the host reported none. */
+function modelsOf(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const models: string[] = []
+  for (const model of value) {
+    if (typeof model === 'string' && model.length > 0) models.push(model)
+  }
+  return models
+}
+
 /** One row, or undefined when the payload is not one. */
 function rowOf(value: unknown): KeyRow | undefined {
   if (!isRecord(value)) return undefined
@@ -93,12 +137,16 @@ function rowOf(value: unknown): KeyRow | undefined {
   const alias = value['alias']
   const configured = value['configured']
   const masked = value['masked']
+  const models = modelsOf(value['models'])
+  const protocol = value['protocol']
   return {
     ref,
     ...(typeof alias === 'string' && alias.length > 0 ? { alias } : {}),
-    enabled: value['enabled'] === true,
+    primary: value['primary'] === true,
     configured: typeof configured === 'boolean' ? configured : null,
     ...(typeof masked === 'string' && masked.length > 0 ? { masked } : {}),
+    ...(models === undefined ? {} : { models }),
+    ...(isRouteProtocol(protocol) ? { protocol } : {}),
   }
 }
 
@@ -111,13 +159,15 @@ function stateOf(body: Record<string, unknown>): KeyState | undefined {
     const row = rowOf(entry)
     if (row !== undefined) rows.push(row)
   }
-  const enabledRef = body['enabledRef']
   const route = body['route']
+  const endpoints = body['endpoints']
+  const openai = isRecord(endpoints) && typeof endpoints['openai'] === 'string' ? endpoints['openai'] : null
+  const anthropic = isRecord(endpoints) && typeof endpoints['anthropic'] === 'string' ? endpoints['anthropic'] : null
   return {
     ok: true,
     route: typeof route === 'string' ? route : '',
-    enabledRef: typeof enabledRef === 'string' && enabledRef.length > 0 ? enabledRef : null,
     entries: rows,
+    endpoints: { openai, anthropic },
   }
 }
 
@@ -169,10 +219,16 @@ async function request(route: string, payload?: Record<string, unknown>): Promis
 export const httpKeyManagerClient: KeyManagerClient = {
   list: route => request(route),
   add: (route, value, alias) => request(route, { op: 'add', value, ...(alias === undefined ? {} : { alias }) }),
-  enable: (route, ref) => request(route, { op: 'enable', ref }),
   rename: (route, ref, alias) => request(route, { op: 'rename', ref, ...(alias === undefined ? {} : { alias }) }),
   remove: (route, ref) => request(route, { op: 'remove', ref }),
   replace: (route, ref, value) => request(route, { op: 'value', ref, value }),
+  setScope: (route, ref, models) =>
+    request(route, { op: 'scope', ref, ...(models === undefined ? {} : { models }) }),
+  setProtocol: (route, ref, protocol) =>
+    request(route, { op: 'protocol', ref, ...(protocol === undefined ? {} : { protocol }) }),
+  setEndpoints: (route, openai, anthropic) =>
+    request(route, { op: 'endpoints', openai: openai ?? '', anthropic: anthropic ?? '' }),
+  discover: route => request(route, { op: 'discover' }),
   async reveal(route, ref) {
     try {
       const response = await fetch(

@@ -18,10 +18,27 @@
 
 import { isRecord } from './shared.js'
 import { selectOverride, type HeaderIndex, type HeaderOverride } from './headers-core.js'
+import type { KeyCandidate } from './key-route-core.js'
+import type { RouteProtocol } from './key-refs.js'
 
-/** A live route index shared with the fetch overlay. */
+/** What a key resolver is told about the request it must sign and dispatch. */
+export interface PiAiKeyContext {
+  /** The provider route whose profile claims this request. */
+  readonly route: string
+  /** The model id the request names, when it could be read. */
+  readonly model: string | undefined
+}
+
+/** A live route index shared with the fetch overlay, plus optional key routing. */
 export interface PiAiHeaderSource {
   current: HeaderIndex
+  /**
+   * Optional live key resolver. When present, the proxy picks the ordered keys
+   * that may sign this request and (a) signs with each in turn, (b) re-dispatches
+   * the request through a pinned key's own protocol, and (c) fails over to the
+   * next key when a stream errors before any content is emitted.
+   */
+  keys?: (context: PiAiKeyContext) => Promise<readonly KeyCandidate[]>
 }
 
 type ProviderHeaders = Record<string, string | null>
@@ -29,6 +46,42 @@ type HeaderTransformer = (headers: ProviderHeaders) => ProviderHeaders | Promise
 type UnknownFunction = (...args: unknown[]) => unknown
 
 type ObjectLike = Record<PropertyKey, unknown>
+
+/** One pi-ai protocol implementation, imported lazily so a route never pays for it. */
+interface ProtocolStreams {
+  readonly streamSimple: (model: Record<string, unknown>, context: unknown, options: Record<string, unknown>) => AsyncIterable<Record<string, unknown>>
+}
+
+const PROTOCOL_CACHE = new Map<RouteProtocol, Promise<ProtocolStreams>>()
+
+/**
+ * Load one pi-ai protocol implementation on demand.
+ *
+ * A route in the Harness binds exactly ONE protocol for every model, and the
+ * adapter's provider dispatches by that single implementation regardless of
+ * `model.api` — so a key that must speak a DIFFERENT protocol needs the proxy to
+ * reach that protocol's `streamSimple` directly. The modules are external to this
+ * bundle (they ship with the runtime) and are cached by the host's import cache;
+ * we additionally memoise the promise so a re-dispatch never re-awaits a cold
+ * import twice.
+ */
+function loadProtocol(protocol: RouteProtocol): Promise<ProtocolStreams> {
+  let pending = PROTOCOL_CACHE.get(protocol)
+  if (pending !== undefined) return pending
+  pending = (async (): Promise<ProtocolStreams> => {
+    switch (protocol) {
+      case 'anthropic-messages':
+        return await import('@earendil-works/pi-ai/api/anthropic-messages') as unknown as ProtocolStreams
+      case 'openai-responses':
+        return await import('@earendil-works/pi-ai/api/openai-responses') as unknown as ProtocolStreams
+      case 'openai-completions':
+      default:
+        return await import('@earendil-works/pi-ai/api/openai-completions') as unknown as ProtocolStreams
+    }
+  })()
+  PROTOCOL_CACHE.set(protocol, pending)
+  return pending
+}
 
 interface PiAiPatchState {
   originalCurrent: UnknownFunction
@@ -103,10 +156,117 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
           const override = routeOverrideOf(source, model)
           return override?.hasHeaders ? { ...merged, ...override.headers } : merged
         }
-        return (streamSimple as UnknownFunction).call(target, model, context, {
-          ...options,
-          transformHeaders,
-        })
+
+        const modelId = typeof modelObject['id'] === 'string' ? modelObject['id'] : undefined
+        const keyResolver = source.keys
+        // Without a key resolver we are a pure header overlay: keep the exact
+        // stream object the adapter expects (tests and the host rely on identity).
+        if (keyResolver === undefined) {
+          return (streamSimple as UnknownFunction).call(target, model, context, {
+            ...options,
+            transformHeaders,
+          })
+        }
+
+        const route = routeOverrideOf(source, model)?.route
+        const dispatch = (): Promise<readonly KeyCandidate[]> => {
+          if (route === undefined) return Promise.resolve([])
+          return Promise.resolve(keyResolver({ route, model: modelId })).catch(() => [])
+        }
+        // A key may force its own protocol / endpoint AND a per-request apiKey.
+        // When it does, re-dispatch straight to that protocol's streamSimple;
+        // otherwise delegate to the route provider (still honouring the key).
+        const startAttempt = async (candidate: KeyCandidate): Promise<AsyncIterable<Record<string, unknown>>> => {
+          const api = typeof modelObject['api'] === 'string' ? modelObject['api'] as RouteProtocol : 'openai-completions'
+          const protocol = candidate.protocol ?? api
+          const baseUrl = candidate.endpoint !== undefined ? candidate.endpoint : modelObject['baseUrl'] as string
+          const switched = protocol !== api || baseUrl !== modelObject['baseUrl']
+          if (!switched) {
+            return (streamSimple as UnknownFunction).call(target, model, context, {
+              ...options,
+              apiKey: candidate.value,
+              transformHeaders,
+            }) as unknown as AsyncIterable<Record<string, unknown>>
+          }
+          // True protocol switch: the request body shape must change, so call the
+          // target protocol directly. There is no ModelsImpl.applyAuth in this
+          // path — sign and transform headers ourselves before handing over.
+          const mergedHeaders = await transformHeaders(isRecord(options['headers'])
+            ? options['headers'] as ProviderHeaders
+            : {})
+          const implementation = await loadProtocol(protocol)
+          return implementation.streamSimple(
+            { ...modelObject, api: protocol, baseUrl },
+            context,
+            {
+              ...options,
+              apiKey: candidate.value,
+              headers: mergedHeaders,
+              transformHeaders: undefined,
+            },
+          )
+        }
+
+        const run = async function* (): AsyncGenerator<Record<string, unknown>> {
+          const candidates = await dispatch()
+          if (candidates.length === 0) {
+            // No key claims this route: fall back to the route's own credential.
+            const stream = (streamSimple as UnknownFunction).call(target, model, context, {
+              ...options,
+              transformHeaders,
+            }) as AsyncIterable<Record<string, unknown>>
+            for await (const event of stream) yield event
+            return
+          }
+          let lastErrorEvent: Record<string, unknown> | undefined
+          let lastError: unknown
+          for (const candidate of candidates) {
+            let stream: AsyncIterable<Record<string, unknown>>
+            try {
+              stream = await startAttempt(candidate)
+            } catch (error) {
+              // A synchronous setup failure (e.g. a missing client key) is a
+              // pre-content failure: try the next key.
+              lastError = error
+              continue
+            }
+            let committed = false
+            let failed = false
+            for await (const event of stream) {
+              const type = isRecord(event) ? event['type'] : undefined
+              if (!committed) {
+                if (type === 'error') {
+                  // The key was rejected before any content streamed: fail over.
+                  lastErrorEvent = event as Record<string, unknown>
+                  failed = true
+                  break
+                }
+                committed = true
+              }
+              yield event
+            }
+            if (failed) continue
+            return
+          }
+          if (lastErrorEvent !== undefined) {
+            yield lastErrorEvent
+            return
+          }
+          // Every key failed synchronously, before producing any event.
+          yield {
+            type: 'error',
+            reason: 'error',
+            error: {
+              role: 'assistant',
+              content: [],
+              stopReason: 'error',
+              errorMessage: lastError instanceof Error ? lastError.message : 'No API key could serve this model.',
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+            },
+          }
+        }
+
+        return run()
       }
     },
   })

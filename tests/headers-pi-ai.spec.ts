@@ -343,7 +343,10 @@ describe('pi-ai request-level header bridge', () => {
       providerRetryPolicy: () => undefined,
     })
     const disposeRegistration = llm.registerAdapter(['alpha'], registeredAdapter)
-    callStream(adapter, { id: 'alpha-model', baseUrl: 'https://relay.example.com/v1' })
+    // With key routing active the proxy resolves the key asynchronously and hands
+    // back an async iterable, so the underlying dispatch happens as it is drained.
+    const streamed = callStream(adapter, { id: 'alpha-model', baseUrl: 'https://relay.example.com/v1' })
+    for await (const _event of streamed as unknown as AsyncIterable<unknown>) void _event
     expect(calls[0]?.['transformHeaders']).toBeTypeOf('function')
 
     disposeRegistration()
@@ -412,5 +415,118 @@ describe('pi-ai request-level header bridge', () => {
     const disposed = describePiAiHeaderState(llm, source)
     expect(disposed.adaptersPatched).toBe(0)
     expect(disposed.registerPatched).toBe(false)
+  })
+})
+
+/** Build an adapter whose streamSimple returns a controllable async iterable. */
+function keyedSetup(plan: (apiKey: string | undefined) => AsyncIterable<Record<string, unknown>>) {
+  const seen: (string | undefined)[] = []
+  const models: CapturedModels = {
+    streamSimple(_model, _context, options) {
+      seen.push(typeof options['apiKey'] === 'string' ? options['apiKey'] : undefined)
+      return plan(options['apiKey'] as string | undefined)
+    },
+  }
+  const adapter: PiAiAdapter = { current: () => ({ models }) }
+  return { adapter, seen }
+}
+
+async function drain(stream: unknown): Promise<Record<string, unknown>[]> {
+  const events: Record<string, unknown>[] = []
+  for await (const event of stream as AsyncIterable<Record<string, unknown>>) events.push(event)
+  return events
+}
+
+async function* emit(...events: Record<string, unknown>[]): AsyncGenerator<Record<string, unknown>> {
+  for (const event of events) yield event
+}
+
+describe('pi-ai key routing and failover', () => {
+  const MODEL = { id: 'alpha-model', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }
+
+  it('signs a request with the first capable key when the delegate path is used', async () => {
+    const { adapter, seen } = keyedSetup(() => emit({ type: 'start' }, { type: 'done' }))
+    const source = {
+      current: buildHeaderIndex({ alpha: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'alpha-model' }] } }),
+      keys: async () => [{ ref: 'A', value: 'sk-a' }],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    const events = await drain(callStream(adapter, MODEL))
+    expect(seen).toEqual(['sk-a'])
+    expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
+    handle.dispose()
+  })
+
+  it('fails over to the next key when the first errors before any content', async () => {
+    const { adapter, seen } = keyedSetup((apiKey) =>
+      apiKey === 'sk-a'
+        ? emit({ type: 'error', reason: 'error', error: { message: 'bad key' } })
+        : emit({ type: 'start' }, { type: 'text_delta', delta: 'hi' }, { type: 'done' }),
+    )
+    const source = {
+      current: buildHeaderIndex({ alpha: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'alpha-model' }] } }),
+      keys: async () => [
+        { ref: 'A', value: 'sk-a' },
+        { ref: 'B', value: 'sk-b' },
+      ],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    const events = await drain(callStream(adapter, MODEL))
+    // Tried A, then B; the answer that streamed is B's.
+    expect(seen).toEqual(['sk-a', 'sk-b'])
+    expect(events.map((event) => event['type'])).toEqual(['start', 'text_delta', 'done'])
+    handle.dispose()
+  })
+
+  it('does not fail over once content has committed, even if a later event errors', async () => {
+    const { adapter, seen } = keyedSetup(() =>
+      emit({ type: 'start' }, { type: 'text_delta', delta: 'partial' }, { type: 'error', reason: 'error' }),
+    )
+    const source = {
+      current: buildHeaderIndex({ alpha: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'alpha-model' }] } }),
+      keys: async () => [
+        { ref: 'A', value: 'sk-a' },
+        { ref: 'B', value: 'sk-b' },
+      ],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    const events = await drain(callStream(adapter, MODEL))
+    // Only one key was ever tried: the second was not consulted after commit.
+    expect(seen).toEqual(['sk-a'])
+    expect(events.map((event) => event['type'])).toEqual(['start', 'text_delta', 'error'])
+    handle.dispose()
+  })
+
+  it('yields the last error when every key fails before content', async () => {
+    const { adapter, seen } = keyedSetup((apiKey) =>
+      emit({ type: 'error', reason: 'error', error: { message: `rejected ${apiKey}` } }),
+    )
+    const source = {
+      current: buildHeaderIndex({ alpha: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'alpha-model' }] } }),
+      keys: async () => [
+        { ref: 'A', value: 'sk-a' },
+        { ref: 'B', value: 'sk-b' },
+      ],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    const events = await drain(callStream(adapter, MODEL))
+    expect(seen).toEqual(['sk-a', 'sk-b'])
+    expect(events).toHaveLength(1)
+    expect(events[0]?.['type']).toBe('error')
+    handle.dispose()
+  })
+
+  it('leaves the request to the route credential when no key claims it', async () => {
+    const { adapter, seen } = keyedSetup(() => emit({ type: 'start' }, { type: 'done' }))
+    const source = {
+      current: buildHeaderIndex({ alpha: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'alpha-model' }] } }),
+      keys: async () => [],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    const events = await drain(callStream(adapter, MODEL))
+    // The delegate was reached without an explicit apiKey injected by us.
+    expect(seen).toEqual([undefined])
+    expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
+    handle.dispose()
   })
 })

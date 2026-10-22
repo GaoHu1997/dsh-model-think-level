@@ -14,12 +14,17 @@ import {
   KEY_ALIAS_MAX_LENGTH,
   KEY_REF_MAX_LENGTH,
   KEY_REF_PATTERN,
+  ROUTE_PROTOCOLS,
   deriveKeyRef,
+  endpointFamilyOf,
   isKeyRefName,
   isLegalKeyValue,
+  isRouteProtocol,
   maskKeyValue,
   nextKeyRef,
   normalizeKeyAlias,
+  normalizeKeyProtocol,
+  normalizeRouteEndpoints,
 } from '../src/key-refs.js'
 
 describe('deriveKeyRef', () => {
@@ -121,5 +126,43 @@ describe('maskKeyValue', () => {
   it('keeps four characters at each end of a value long enough to trim', () => {
     expect(maskKeyValue('sk-abcdefghi')).toBe('sk-a...fghi')
     expect(maskKeyValue('sk-live-secret-value')).toBe('sk-l...alue')
+  })
+})
+
+describe('protocols and endpoints', () => {
+  it('recognises exactly the three wire protocols the host can dispatch', () => {
+    expect(ROUTE_PROTOCOLS).toEqual(['anthropic-messages', 'openai-completions', 'openai-responses'])
+    for (const protocol of ROUTE_PROTOCOLS) expect(isRouteProtocol(protocol)).toBe(true)
+    expect(isRouteProtocol('google')).toBe(false)
+    expect(isRouteProtocol(undefined)).toBe(false)
+    expect(isRouteProtocol(42)).toBe(false)
+  })
+
+  it('maps each protocol to the endpoint family it signs against', () => {
+    expect(endpointFamilyOf('anthropic-messages')).toBe('anthropic')
+    expect(endpointFamilyOf('openai-completions')).toBe('openai')
+    expect(endpointFamilyOf('openai-responses')).toBe('openai')
+  })
+
+  it('normalises a pinned protocol, treating anything unknown as "any"', () => {
+    expect(normalizeKeyProtocol('openai-responses')).toBe('openai-responses')
+    expect(normalizeKeyProtocol('carrier-pigeon')).toBeUndefined()
+    expect(normalizeKeyProtocol('')).toBeUndefined()
+    expect(normalizeKeyProtocol(undefined)).toBeUndefined()
+  })
+
+  it('keeps only http(s) endpoints, trims them, and drops an empty side', () => {
+    expect(normalizeRouteEndpoints({ openai: ' https://a.example/v1 ', anthropic: 'https://b.example' })).toEqual({
+      openai: 'https://a.example/v1',
+      anthropic: 'https://b.example',
+    })
+    // A non-URL side is dropped, not stored; the good side survives.
+    expect(normalizeRouteEndpoints({ openai: 'ftp://nope', anthropic: 'https://b.example' })).toEqual({
+      anthropic: 'https://b.example',
+    })
+    // Nothing usable collapses to undefined (no extra endpoints configured).
+    expect(normalizeRouteEndpoints({ openai: '', anthropic: '   ' })).toBeUndefined()
+    expect(normalizeRouteEndpoints(undefined)).toBeUndefined()
+    expect(normalizeRouteEndpoints('nonsense')).toBeUndefined()
   })
 })

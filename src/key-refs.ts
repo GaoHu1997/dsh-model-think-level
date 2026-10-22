@@ -23,6 +23,124 @@ export interface KeyEntry {
   readonly ref: string
   /** User-facing label; absent means "show the reference itself". */
   readonly alias?: string
+  /**
+   * The model ids this key is known to serve, discovered from the provider's
+   * model listing. Absent means "unscoped": the key has not been probed yet, so
+   * it acts as a catch-all and serves any model no other key claims. An empty
+   * array means the key was probed and reached no models at all.
+   *
+   * Presence, not order, is what matters here: a model reachable through
+   * several keys is served by the first key (in list order) that lists it, so
+   * list order doubles as the preference order the user asked for.
+   */
+  readonly models?: readonly string[]
+  /**
+   * The wire protocol this key must speak, when it is not the route's own.
+   * Absent means "any protocol" — the request keeps the route's default
+   * protocol (`providers.<route>.api`). A concrete value re-dispatches the
+   * request through that protocol's API implementation AND that key's endpoint,
+   * so one provider route can hold a Chat-Completions key and an Anthropic key
+   * side by side (a true protocol switch, not just an endpoint swap).
+   */
+  readonly protocol?: RouteProtocol
+}
+
+/**
+ * The pi-ai API ids the manager can pin a key to. These are the exact ids
+ * `providers.<route>.api` carries, so a key pinned to one speaks the same wire
+ * format the official card would have produced for that protocol.
+ */
+export type RouteProtocol = 'openai-completions' | 'anthropic-messages' | 'openai-responses'
+
+/** Every protocol a key can be pinned to, in the order the picker shows them. */
+export const ROUTE_PROTOCOLS: readonly RouteProtocol[] = [
+  'anthropic-messages',
+  'openai-completions',
+  'openai-responses',
+]
+
+/** Which endpoint family a protocol draws its base URL from. */
+export function endpointFamilyOf(protocol: RouteProtocol): 'openai' | 'anthropic' {
+  return protocol === 'anthropic-messages' ? 'anthropic' : 'openai'
+}
+
+/** Whether a value is one of the protocol ids this manager understands. */
+export function isRouteProtocol(value: unknown): value is RouteProtocol {
+  return value === 'openai-completions' || value === 'anthropic-messages' || value === 'openai-responses'
+}
+
+/**
+ * A stored per-key protocol, or undefined when the value means "any protocol".
+ *
+ * `any`/`''`/unknown values collapse to undefined so a hand-edited index file
+ * cannot pin a key to a protocol the runtime has no implementation for; the
+ * request then keeps the route's own protocol, which is always valid.
+ * @param value - whatever arrived (a picker choice, or a hand-edited index file).
+ * @returns the protocol id, or undefined for "any".
+ */
+export function normalizeKeyProtocol(value: unknown): RouteProtocol | undefined {
+  return isRouteProtocol(value) ? value : undefined
+}
+
+/**
+ * The two base URLs one provider route can hold: an OpenAI-family endpoint and
+ * an Anthropic-family endpoint. A key pinned to a protocol uses the matching
+ * one; an "any protocol" key keeps the route's own `providers.<route>.baseURL`.
+ */
+export interface RouteEndpoints {
+  /** Base URL for openai-completions / openai-responses keys. */
+  readonly openai?: string
+  /** Base URL for anthropic-messages keys. */
+  readonly anthropic?: string
+}
+
+/** Whether a value looks like an http(s) URL worth storing as an endpoint. */
+function isEndpointUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return false
+  return /^https?:\/\/\S+$/i.test(trimmed)
+}
+
+/**
+ * A stored pair of endpoints, or undefined when neither carries a usable URL.
+ *
+ * Each URL is trimmed and must look like http(s); a blank or unusable side is
+ * dropped rather than stored, so "no Anthropic endpoint configured" stays
+ * distinguishable from "an empty string was saved here".
+ * @param value - whatever arrived (the endpoints editor, or a hand-edited file).
+ * @returns the cleaned pair, or undefined when it holds no endpoint.
+ */
+export function normalizeRouteEndpoints(value: unknown): RouteEndpoints | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const out: { openai?: string; anthropic?: string } = {}
+  if (isEndpointUrl(record['openai'])) out.openai = (record['openai'] as string).trim()
+  if (isEndpointUrl(record['anthropic'])) out.anthropic = (record['anthropic'] as string).trim()
+  return out.openai === undefined && out.anthropic === undefined ? undefined : out
+}
+
+/**
+ * A stored model-scope list, or undefined when the value carries nothing usable.
+ *
+ * Model ids are opaque tokens (they may contain `/`, `.`, `:` — `deepseek-ai/DeepSeek-V3`),
+ * so they are trimmed but not otherwise rewritten; blank and duplicate ids are
+ * dropped, and a value that is not an array collapses to undefined (unscoped).
+ * @param value - whatever arrived (a probe result, or a hand-edited index file).
+ * @returns the deduplicated id list, or undefined.
+ */
+export function normalizeKeyModels(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const id = item.trim()
+    if (id.length === 0 || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
 }
 
 /** Longest reference the manager will mint or accept. */

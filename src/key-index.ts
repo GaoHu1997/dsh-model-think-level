@@ -28,10 +28,37 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { normalizeKeyAlias, type KeyEntry } from './key-refs.js'
+import {
+  normalizeKeyAlias,
+  normalizeKeyModels,
+  normalizeKeyProtocol,
+  normalizeRouteEndpoints,
+  type KeyEntry,
+  type RouteEndpoints,
+  type RouteProtocol,
+} from './key-refs.js'
 
 /** One route's entry, re-exported so the host half has a single import site. */
 export type KeyIndexEntry = KeyEntry
+
+/**
+ * Build one entry, writing only the fields that carry a value. Keeping absent
+ * fields absent (rather than `undefined`) keeps hand-edited index files diff-
+ * clean and lets `parseKeyIndex`/`writeKeyIndex` round-trip an unscoped key
+ * without inventing an empty `models` list that would read as "reached nothing".
+ */
+function makeEntry(
+  ref: string,
+  alias: string | undefined,
+  models: readonly string[] | undefined,
+  protocol: RouteProtocol | undefined,
+): KeyIndexEntry {
+  const entry: { ref: string; alias?: string; models?: readonly string[]; protocol?: RouteProtocol } = { ref }
+  if (alias !== undefined) entry.alias = alias
+  if (models !== undefined) entry.models = models
+  if (protocol !== undefined) entry.protocol = protocol
+  return entry
+}
 
 /** The whole index document, exactly as it sits on disk. */
 export interface KeyIndexDocument {
@@ -39,6 +66,13 @@ export interface KeyIndexDocument {
   readonly version: 1
   /** Route → keys, in the order the manager lists them. */
   readonly providers: Record<string, readonly KeyIndexEntry[]>
+  /**
+   * Route → the extra base URLs that provider holds beyond its own `baseURL`.
+   * A key pinned to a concrete protocol draws its endpoint from here, which is
+   * how one route serves both an OpenAI and an Anthropic endpoint. Absent means
+   * "no extra endpoints" (every key falls back to the route's own `baseURL`).
+   */
+  readonly endpoints?: Record<string, RouteEndpoints>
 }
 
 /** A fresh, empty index. */
@@ -74,7 +108,8 @@ export function keyIndexFilePath(home: string = harnessHome()): string {
  */
 export function parseKeyIndex(raw: unknown): KeyIndexDocument {
   if (typeof raw !== 'object' || raw === null) return emptyKeyIndex()
-  const providers = (raw as Record<string, unknown>)['providers']
+  const root = raw as Record<string, unknown>
+  const providers = root['providers']
   if (typeof providers !== 'object' || providers === null) return emptyKeyIndex()
   const out: Record<string, KeyIndexEntry[]> = {}
   for (const [route, entries] of Object.entries(providers as Record<string, unknown>)) {
@@ -87,11 +122,32 @@ export function parseKeyIndex(raw: unknown): KeyIndexDocument {
       if (typeof ref !== 'string' || ref.length === 0) continue
       if (list.some(existing => existing.ref === ref)) continue
       const alias = normalizeKeyAlias(record['alias'])
-      list.push(alias === undefined ? { ref } : { ref, alias })
+      const models = normalizeKeyModels(record['models'])
+      const protocol = normalizeKeyProtocol(record['protocol'])
+      list.push(makeEntry(ref, alias, models, protocol))
     }
     if (list.length > 0) out[route] = list
   }
-  return { version: 1, providers: out }
+  const endpoints = parseEndpoints(root['endpoints'])
+  const document: KeyIndexDocument = { version: 1, providers: out }
+  return endpoints === undefined ? document : { ...document, endpoints }
+}
+
+/**
+ * Read the provider-level endpoint map, dropping unusable entries. Kept separate
+ * so a hand-edited or older file that never carried endpoints still parses.
+ * @param raw - the decoded `endpoints` member (or anything else).
+ * @returns the cleaned map, or undefined when it holds nothing usable.
+ */
+function parseEndpoints(raw: unknown): Record<string, RouteEndpoints> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const out: Record<string, RouteEndpoints> = {}
+  for (const [route, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (route.length === 0) continue
+    const pair = normalizeRouteEndpoints(value)
+    if (pair !== undefined) out[route] = pair
+  }
+  return Object.keys(out).length === 0 ? undefined : out
 }
 
 /** Read the index; only an absent file means a fresh, empty document. */
@@ -186,10 +242,17 @@ export function withKeyEntry(
   const list = [...keyEntriesOf(document, route)]
   const index = list.findIndex(entry => entry.ref === ref)
   const label = normalizeKeyAlias(alias)
-  const next: KeyIndexEntry = label === undefined ? { ref } : { ref, alias: label }
-  if (index === -1) list.push(next)
-  else list[index] = label === undefined && list[index]?.alias !== undefined ? { ref, alias: list[index]?.alias } : next
-  return { version: 1, providers: { ...document.providers, [route]: list } }
+  if (index === -1) {
+    list.push(makeEntry(ref, label, undefined, undefined))
+  } else {
+    const existing = list[index]
+    // A relabel with no alias keeps the stored one; the model scope and the
+    // pinned protocol always ride along untouched — adding or renaming a key
+    // never re-probes it, nor silently re-pins its protocol.
+    const keptLabel = label === undefined ? existing?.alias : label
+    list[index] = makeEntry(ref, keptLabel, existing?.models, existing?.protocol)
+  }
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
 }
 
 /**
@@ -209,8 +272,92 @@ export function withKeyAlias(
   const index = list.findIndex(entry => entry.ref === ref)
   if (index === -1) return document
   const label = normalizeKeyAlias(alias)
-  list[index] = label === undefined ? { ref } : { ref, alias: label }
-  return { version: 1, providers: { ...document.providers, [route]: list } }
+  list[index] = makeEntry(ref, label, list[index]?.models, list[index]?.protocol)
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
+}
+
+/**
+ * Set (or clear) one key's discovered model scope.
+ *
+ * This is the automatic-binding side of Scheme A: the host probes each key's
+ * model listing and records what it reached here, so a later request for model
+ * M can be routed to the first key that lists M. Passing `undefined` clears the
+ * scope back to "unscoped catch-all"; an empty array records "probed, reached
+ * no models". A no-op when the reference is not listed.
+ * @param document - the current document.
+ * @param route - the provider route key.
+ * @param ref - the credential reference.
+ * @param models - the ids this key serves, or undefined to unscope it.
+ */
+export function withKeyModels(
+  document: KeyIndexDocument,
+  route: string,
+  ref: string,
+  models: readonly string[] | undefined,
+): KeyIndexDocument {
+  const list = [...keyEntriesOf(document, route)]
+  const index = list.findIndex(entry => entry.ref === ref)
+  if (index === -1) return document
+  const scope = models === undefined ? undefined : normalizeKeyModels(models)
+  list[index] = makeEntry(ref, list[index]?.alias, scope, list[index]?.protocol)
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
+}
+
+/**
+ * Set (or clear) one key's pinned wire protocol.
+ *
+ * This is the per-key protocol switch: a key pinned to `anthropic-messages`
+ * signs requests routed through the Anthropic API and that key's endpoint, even
+ * when the route's own `api` is an OpenAI one. Passing `undefined` restores
+ * "any protocol" (the key keeps the route's default). A no-op when unlisted.
+ * @param document - the current document.
+ * @param route - the provider route key.
+ * @param ref - the credential reference.
+ * @param protocol - the protocol to pin, or undefined for "any".
+ */
+export function withKeyProtocol(
+  document: KeyIndexDocument,
+  route: string,
+  ref: string,
+  protocol: RouteProtocol | undefined,
+): KeyIndexDocument {
+  const list = [...keyEntriesOf(document, route)]
+  const index = list.findIndex(entry => entry.ref === ref)
+  if (index === -1) return document
+  const pinned = normalizeKeyProtocol(protocol)
+  list[index] = makeEntry(ref, list[index]?.alias, list[index]?.models, pinned)
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
+}
+
+/**
+ * Set (or clear) one route's pair of extra base URLs.
+ *
+ * @param document - the current document.
+ * @param route - the provider route key.
+ * @param endpoints - the OpenAI/Anthropic base URLs, or undefined to clear both.
+ */
+export function withRouteEndpoints(
+  document: KeyIndexDocument,
+  route: string,
+  endpoints: RouteEndpoints | undefined,
+): KeyIndexDocument {
+  const map: Record<string, RouteEndpoints> = { ...(document.endpoints ?? {}) }
+  const cleaned = normalizeRouteEndpoints(endpoints)
+  if (cleaned === undefined) delete map[route]
+  else map[route] = cleaned
+  const next: KeyIndexDocument = { version: 1, providers: document.providers }
+  return Object.keys(map).length === 0 ? next : { ...next, endpoints: map }
+}
+
+/**
+ * Carry a document's existing endpoint map forward on a providers-only rewrite.
+ * Spread as `{ version: 1, providers, ...endpointsOf(document) }` so the writers
+ * above never silently drop a route's endpoints when they only touch key lists.
+ * @param document - the source document.
+ * @returns `{ endpoints }` when one exists, else `{}` (spreads to nothing).
+ */
+function endpointsOf(document: KeyIndexDocument): { endpoints?: Record<string, RouteEndpoints> } {
+  return document.endpoints === undefined ? {} : { endpoints: document.endpoints }
 }
 
 /**
@@ -225,5 +372,5 @@ export function withoutKeyEntry(document: KeyIndexDocument, route: string, ref: 
   const providers: Record<string, readonly KeyIndexEntry[]> = { ...document.providers }
   if (list.length === 0) delete providers[route]
   else providers[route] = list
-  return { version: 1, providers }
+  return { version: 1, providers, ...endpointsOf(document) }
 }

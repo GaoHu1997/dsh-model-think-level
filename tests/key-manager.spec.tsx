@@ -21,8 +21,7 @@ const COPY: Record<string, string> = {
   keysLoading: 'Loading keys…',
   keysAdd: 'Add another key',
   keysAddConfirm: 'Add',
-  keysEnable: 'Use {name}',
-  keysEnabled: 'Enabled',
+  keysDefault: 'Default',
   keysMissing: 'Not stored',
   keysEdit: 'Edit',
   keysRemove: 'Delete',
@@ -39,7 +38,27 @@ const COPY: Record<string, string> = {
   keysRenamed: 'Label saved.',
   keysReplaced: 'Key replaced.',
   keysRemoved: 'Key removed.',
-  keysEnabledNote: '{name} is now in use.',
+  keysModels: 'Models',
+  keysScopeAll: 'All models',
+  keysScopeNone: 'No models found',
+  keysScopeCount: '{count} models',
+  keysScopeSaved: 'Models saved.',
+  keysScopePlaceholder: 'Model ids, comma separated',
+  keysScopeHint: 'Only the ticked models use this key.',
+  keysScopeEmpty: 'No models discovered yet.',
+  keysDiscover: 'Detect models',
+  keysDiscoverHint: 'Probe each key for the models it can reach.',
+  keysDiscovered: 'Detected models for {count} keys.',
+  keysProtocolLabel: 'Protocol for {name}',
+  keysProtocolAny: 'Any protocol',
+  keysProtocolAnthropic: 'Anthropic',
+  keysProtocolOpenAI: 'Chat Completions',
+  keysProtocolResponses: 'Responses',
+  keysProtocolSaved: 'Protocol saved.',
+  keysOpenAIUrl: 'OpenAI base URL',
+  keysAnthropicUrl: 'Anthropic base URL',
+  keysEndpointPlaceholder: 'https://…',
+  keysEndpointsSaved: 'Base URLs saved.',
   keysUnreachable: 'The plugin’s key route did not answer.',
   keysPanelFailed: 'Key manager failed to render',
 }
@@ -51,11 +70,11 @@ const t = (key: string, params?: Record<string, string | number>): string => {
 }
 
 function state(over: Partial<KeyState> = {}): KeyState {
-  return { ok: true, route: 'ofox', enabledRef: null, entries: [], ...over }
+  return { ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null }, ...over }
 }
 
 function row(over: Partial<KeyRow> & { ref: string }): KeyRow {
-  return { enabled: false, configured: true, ...over }
+  return { primary: false, configured: true, ...over }
 }
 
 /** A transport that records what it was asked, and answers what the test says. */
@@ -67,10 +86,13 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
   const base: KeyManagerClient = {
     list: async () => state(),
     add: async () => state(),
-    enable: async () => state(),
     rename: async () => state(),
     replace: async () => state(),
     remove: async () => state(),
+    setScope: async () => state(),
+    discover: async () => state(),
+    setProtocol: async () => state(),
+    setEndpoints: async () => state(),
     reveal: async () => undefined,
     ...script,
   }
@@ -83,10 +105,6 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
       calls.push({ op: 'add', args: [route, value, alias] })
       return base.add(route, value, alias)
     },
-    enable: (route, ref) => {
-      calls.push({ op: 'enable', args: [route, ref] })
-      return base.enable(route, ref)
-    },
     rename: (route, ref, alias) => {
       calls.push({ op: 'rename', args: [route, ref, alias] })
       return base.rename(route, ref, alias)
@@ -98,6 +116,22 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
     remove: (route, ref) => {
       calls.push({ op: 'remove', args: [route, ref] })
       return base.remove(route, ref)
+    },
+    setScope: (route, ref, models) => {
+      calls.push({ op: 'setScope', args: [route, ref, models] })
+      return base.setScope(route, ref, models)
+    },
+    discover: (route) => {
+      calls.push({ op: 'discover', args: [route] })
+      return base.discover(route)
+    },
+    setProtocol: (route, ref, protocol) => {
+      calls.push({ op: 'setProtocol', args: [route, ref, protocol] })
+      return base.setProtocol(route, ref, protocol)
+    },
+    setEndpoints: (route, openai, anthropic) => {
+      calls.push({ op: 'setEndpoints', args: [route, openai, anthropic] })
+      return base.setEndpoints(route, openai, anthropic)
     },
     reveal: (route, ref) => {
       calls.push({ op: 'reveal', args: [route, ref] })
@@ -259,13 +293,13 @@ describe('the list', () => {
     expect(rowOf(panel.root, 'sk-d...d1').dataset['state']).toBe('missing')
   })
 
-  it('marks a missing key as such, and names the enable control on every row', async () => {
+  it('marks a missing key as such, and shows a default badge and model scope on every row', async () => {
     const { client } = recorder({
       list: async () =>
         state({
           entries: [
-            row({ ref: 'A', enabled: false, configured: false, masked: 'sk-a...a1' }),
-            row({ ref: 'B', enabled: true, configured: true, masked: 'sk-b...b1' }),
+            row({ ref: 'A', primary: false, configured: false, masked: 'sk-a...a1', models: ['glm-4'] }),
+            row({ ref: 'B', primary: true, configured: true, masked: 'sk-b...b1' }),
           ],
         }),
     })
@@ -276,72 +310,91 @@ describe('the list', () => {
     const ready = rowOf(panel.root, 'sk-b...b1')
     expect(missing.dataset['state']).toBe('missing')
     expect(ready.dataset['state']).toBe('ready')
-    // The control says what it does on every row, so the word no longer comes
-    // and goes with the state; which key is in use is the checked radio and the
-    // tick beside it.
-    expect(missing.querySelector('.bre-keys-enable-text')?.textContent).toBe('Enabled')
-    expect(ready.querySelector('.bre-keys-enable-text')?.textContent).toBe('Enabled')
-    expect(missing.querySelector<HTMLInputElement>('input.bre-keys-enabled')?.checked).toBe(false)
-    expect(ready.querySelector<HTMLInputElement>('input.bre-keys-enabled')?.checked).toBe(true)
-    expect(missing.querySelector('.bre-keys-mark svg')).toBeNull()
-    expect(ready.querySelector('.bre-keys-mark svg')).not.toBeNull()
+    // Exactly one default badge, on the first key in preference order; the scope
+    // label states what each key was discovered to serve, or that it is a catch-all.
+    expect(missing.querySelector('.bre-keys-default')).toBeNull()
+    expect(ready.querySelector('.bre-keys-default')?.textContent).toBe('Default')
+    expect(missing.querySelector('.bre-keys-scope-label')?.textContent).toBe('1 models')
+    expect(ready.querySelector('.bre-keys-scope-label')?.textContent).toBe('All models')
   })
 })
 
-describe('the enable control', () => {
-  it('is a radio group: exactly one key, and picking another uses it', async () => {
+describe('the default badge and model scope', () => {
+  it('marks the first key as default and offers a models action on every row', async () => {
     const { client, calls } = recorder({
       list: async () =>
         state({
-          entries: [row({ ref: 'key-1', masked: 'sk-a...a1' }), row({ ref: 'key-2', masked: 'sk-b...b1', enabled: true })],
-          enabledRef: 'key-2',
+          entries: [
+            row({ ref: 'key-1', primary: true, masked: 'sk-a...a1' }),
+            row({ ref: 'key-2', primary: false, masked: 'sk-b...b1', models: ['glm-4', 'glm-4-flash'] }),
+          ],
         }),
     })
     const panel = mount({ client })
     await flush()
 
-    const radios = Array.from(panel.root.querySelectorAll<HTMLInputElement>('input.bre-keys-enabled'))
-    expect(radios).toHaveLength(2)
-    expect(radios.filter((radio) => radio.checked)).toHaveLength(1)
+    const badges = Array.from(panel.root.querySelectorAll('.bre-keys-default'))
+    expect(badges).toHaveLength(1)
+    expect(rowOf(panel.root, 'sk-a...a1').contains(badges[0] ?? null)).toBe(true)
+    expect(rowOf(panel.root, 'sk-b...b1').querySelector('.bre-keys-scope-label')?.textContent).toBe('2 models')
 
-    radios[0]?.click()
+    // The scope editor opens under the row it edits, as chips of the models that
+    // were discovered, with the row's current scope already ticked.
+    buttonByText(rowOf(panel.root, 'sk-b...b1'), 'Models').click()
     await flush()
+    const chips = Array.from((formRowOf(panel.root) as HTMLElement).querySelectorAll<HTMLButtonElement>('.bre-keys-chip'))
+    expect(chips.map((chip) => chip.textContent)).toEqual(['glm-4', 'glm-4-flash'])
+    expect(chips.every((chip) => chip.getAttribute('aria-pressed') === 'true')).toBe(true)
 
-    expect(calls.filter((call) => call.op === 'enable')).toEqual([{ op: 'enable', args: ['ofox', 'key-1'] }])
+    // Untick one and save: only the remaining ticked model is sent.
+    chips[1]?.click()
+    await flush()
+    buttonByText(formRowOf(panel.root) as HTMLElement, 'Save').click()
+    await flush()
+    expect(calls.filter((call) => call.op === 'setScope')).toEqual([
+      { op: 'setScope', args: ['ofox', 'key-2', ['glm-4']] },
+    ])
   })
 
-  it('closes the row, so the choice reads as the row it applies to', async () => {
-    const { client } = recorder({
-      list: async () =>
-        state({
-          entries: [
-            row({ ref: 'key-1', masked: 'sk-a...a1' }),
-            row({ ref: 'key-2', alias: 'key2', masked: 'sk-b...b1', enabled: true }),
-          ],
-          enabledRef: 'key-2',
-        }),
+  it('clears a scope to the catch-all when no model stays ticked', async () => {
+    const { client, calls } = recorder({
+      list: async () => state({ entries: [row({ ref: 'key-2', masked: 'sk-a...a1', models: ['glm-4'] })] }),
     })
     const panel = mount({ client })
     await flush()
 
-    // Both row shapes — with an alias and without — end on the control, so the
-    // choice is read once, at the point the row finishes saying what it offers.
-    for (const name of ['sk-a...a1', 'key2']) {
-      const line = rowOf(panel.root, name)
-      expect(line.lastElementChild?.classList.contains('bre-keys-enable')).toBe(true)
-      expect(line.querySelector('.bre-keys-enable-text')?.textContent).toBe('Enabled')
-    }
-    expect(rowOf(panel.root, 'key2').querySelector<HTMLInputElement>('input.bre-keys-enabled')?.checked).toBe(true)
+    buttonByText(rowOf(panel.root, 'sk-a...a1'), 'Models').click()
+    await flush()
+    // The "all models" shortcut empties the selection; saving then clears it.
+    buttonByText(formRowOf(panel.root) as HTMLElement, 'All models').click()
+    await flush()
+    buttonByText(formRowOf(panel.root) as HTMLElement, 'Save').click()
+    await flush()
+    expect(calls.filter((call) => call.op === 'setScope')).toEqual([
+      { op: 'setScope', args: ['ofox', 'key-2', undefined] },
+    ])
+  })
+
+  it('offers a discover control that probes every key at once', async () => {
+    const { client, calls } = recorder({ list: async () => state({ entries: [row({ ref: 'key-2' })] }) })
+    const panel = mount({ client })
+    await flush()
+
+    const footer = panel.root.querySelector('.bre-keys-footer')
+    expect(footer).not.toBeNull()
+    buttonByText(footer as HTMLElement, 'Detect models').click()
+    await flush()
+    expect(calls.filter((call) => call.op === 'discover')).toEqual([{ op: 'discover', args: ['ofox'] }])
   })
 })
 
 describe('the actions on a row', () => {
-  it('offers exactly delete, label and edit — and nothing else', async () => {
+  it('offers exactly delete, label, models and edit — and nothing else', async () => {
     const { client } = recorder({ list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }) })
     const panel = mount({ client })
     await flush()
 
-    expect(actionsOf(rowOf(panel.root, 'key2'))).toEqual(['Delete', 'Label', 'Edit'])
+    expect(actionsOf(rowOf(panel.root, 'key2'))).toEqual(['Delete', 'Label', 'Models', 'Edit'])
   })
 
   it('asks twice before deleting, and can be talked out of it', async () => {
@@ -356,7 +409,7 @@ describe('the actions on a row', () => {
 
     buttonByText(line, 'Cancel').click()
     await flush()
-    expect(actionsOf(line)).toEqual(['Delete', 'Label', 'Edit'])
+    expect(actionsOf(line)).toEqual(['Delete', 'Label', 'Models', 'Edit'])
     expect(calls.some((call) => call.op === 'remove')).toBe(false)
 
     buttonByText(line, 'Delete').click()
@@ -403,7 +456,7 @@ describe('the actions on a row', () => {
 
   it('relabels from the label it already has, and can clear it', async () => {
     const listed = (alias: string | undefined) =>
-      state({ entries: [row({ ref: 'key-2', alias, masked: 'sk-a...z9' })], enabledRef: 'key-2' })
+      state({ entries: [row({ ref: 'key-2', alias, masked: 'sk-a...z9' })] })
     const { client, calls } = recorder({
       list: async () => listed('key2'),
       // Answer like the host does: the list it returns is what the rows follow.
@@ -573,7 +626,7 @@ describe('adding a key', () => {
 describe('refusals', () => {
   it('keeps the list it already had when a write is refused', async () => {
     const { client } = recorder({
-      list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })], enabledRef: 'key-2' }),
+      list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }),
       remove: async () => ({ ok: false, error: 'the settings document kept changing; try again' }),
     })
     const panel = mount({ client })

@@ -21,7 +21,8 @@ import {
   requestUrlOf,
 } from '../src/headers-core.js'
 import { adapterSourcePatched } from '../src/headers-conflict.js'
-import { headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from '../src/headers-fetch.js'
+import { headerOverlayBypass, headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from '../src/headers-fetch.js'
+import { keysForModel } from '../src/key-route-core.js'
 
 describe('originOf', () => {
   it('reads the scheme, host and port and drops the path', () => {
@@ -535,5 +536,196 @@ describe('modelOfJsonBody', () => {
   it('refuses a body that is not JSON', () => {
     expect(modelOfJsonBody('model=gpt-5.6')).toBeUndefined()
     expect(modelOfJsonBody('')).toBeUndefined()
+  })
+})
+
+describe('multi-key request signing and failover', () => {
+  const original = globalThis.fetch
+  let sent: { url: unknown; headers: Headers }[]
+  let handles: { dispose(): void }[]
+  /** Per-attempt statuses to reply with, in order; defaults to 200. */
+  let statuses: number[]
+
+  function stubFetch(): void {
+    sent = []
+    statuses = []
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push({ url: input, headers: new Headers(init?.headers) })
+      const status = statuses.shift() ?? 200
+      return Promise.resolve(new Response('{}', { status }))
+    }) as unknown as typeof globalThis.fetch
+  }
+
+  function install(source: OverlaySource) {
+    const handle = installHeaderOverlay(source)
+    handles.push(handle)
+    return handle
+  }
+
+  beforeEach(() => {
+    handles = []
+    stubFetch()
+  })
+
+  afterEach(() => {
+    for (const handle of handles) handle.dispose()
+    globalThis.fetch = original
+  })
+
+  /** One route whose keys are supplied by a resolver that narrows by model, as the host does. */
+  function routeWithKeys(keys: readonly { ref: string; value: string; models?: readonly string[] }[]): OverlaySource {
+    const source: OverlaySource = {
+      current: buildUserAgentIndex({ relay: { api: 'openai-completions', baseURL: 'https://relay.example.com/v1' } }),
+      keys: async ({ model }) => keysForModel(keys, model),
+    }
+    return source
+  }
+
+  it('signs a shared model with the first key', async () => {
+    install(routeWithKeys([
+      { ref: 'A', value: 'sk-a', models: ['glm-4'] },
+      { ref: 'B', value: 'sk-b', models: ['glm-4'] },
+    ]))
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'glm-4' }),
+    })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-a')
+  })
+
+  it('uses the one key that can serve a model no other key can', async () => {
+    install(routeWithKeys([
+      { ref: 'A', value: 'sk-a', models: ['glm-4'] },
+      { ref: 'B', value: 'sk-b', models: ['kimi-k2'] },
+    ]))
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'kimi-k2' }),
+    })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-b')
+  })
+
+  it('fails over to the next key on a retryable status', async () => {
+    statuses = [401]
+    install(routeWithKeys([
+      { ref: 'A', value: 'sk-a', models: ['glm-4'] },
+      { ref: 'B', value: 'sk-b', models: ['glm-4'] },
+    ]))
+    const response = await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'glm-4' }),
+    })
+    expect(sent).toHaveLength(2)
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-a')
+    expect(sent[1]?.headers.get('authorization')).toBe('Bearer sk-b')
+    expect(response.status).toBe(200)
+  })
+
+  it('stops at the first key that answers, without trying the rest', async () => {
+    install(routeWithKeys([
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+      { ref: 'C', value: 'sk-c' },
+    ]))
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'glm-4' }),
+    })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-a')
+  })
+
+  it('exhausts every key before giving up, and returns the last failure', async () => {
+    statuses = [401, 429, 503]
+    install(routeWithKeys([
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+      { ref: 'C', value: 'sk-c' },
+    ]))
+    const response = await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'glm-4' }),
+    })
+    expect(sent).toHaveLength(3)
+    expect(sent.map(call => call.headers.get('authorization'))).toEqual(['Bearer sk-a', 'Bearer sk-b', 'Bearer sk-c'])
+    expect(response.status).toBe(503)
+  })
+
+  it('does not multiply a request-shape failure across keys', async () => {
+    statuses = [400]
+    install(routeWithKeys([
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+    ]))
+    const response = await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'glm-4' }),
+    })
+    expect(sent).toHaveLength(1)
+    expect(response.status).toBe(400)
+  })
+
+  it('re-signs an x-api-key request in its own scheme, not Bearer', async () => {
+    install({
+      current: buildUserAgentIndex({ anthropic: { api: 'anthropic-messages', baseURL: 'https://api.anthropic.com/v1' } }),
+      keys: async () => [
+        { ref: 'A', value: 'sk-ant-a' },
+        { ref: 'B', value: 'sk-ant-b' },
+      ],
+    })
+    statuses = [401]
+    await globalThis.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': 'route-default', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-x' }),
+    })
+    expect(sent).toHaveLength(2)
+    expect(sent[0]?.headers.get('x-api-key')).toBe('sk-ant-a')
+    expect(sent[0]?.headers.get('authorization')).toBeNull()
+    expect(sent[1]?.headers.get('x-api-key')).toBe('sk-ant-b')
+    // The unrelated header survives every attempt.
+    expect(sent[1]?.headers.get('anthropic-version')).toBe('2023-06-01')
+  })
+
+  it('sends exactly once when the resolver yields no key, leaving the request as the SDK made it', async () => {
+    install(routeWithKeys([]))
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'glm-4' }),
+    })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer route-default')
+  })
+
+  it('lets a caller that composes its own credential bypass key routing', async () => {
+    // The model probe and per-key discovery sign each request with a specific
+    // reference; without a bypass the wrapper would re-sign it with the first
+    // key and probe the wrong credential.
+    install(routeWithKeys([
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+    ]))
+    expect(headerOverlayInstalled()).toBe(true)
+    // Through the wrapper: re-signed to the first key.
+    await globalThis.fetch('https://relay.example.com/v1/models', {
+      method: 'GET',
+      headers: { authorization: 'Bearer sk-b' },
+    })
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-a')
+    // Through the bypass: the caller's own credential survives untouched.
+    await headerOverlayBypass()('https://relay.example.com/v1/models', {
+      method: 'GET',
+      headers: { authorization: 'Bearer sk-b' },
+    })
+    expect(sent[1]?.headers.get('authorization')).toBe('Bearer sk-b')
   })
 })

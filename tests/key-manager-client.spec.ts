@@ -58,18 +58,18 @@ afterEach(() => {
 
 describe('list', () => {
   it('GETs the route with no caching and same-origin credentials', async () => {
-    stubFetch({ body: { ok: true, route: 'ofox', enabledRef: null, entries: [] } })
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     const answer = await httpKeyManagerClient.list('ofox')
 
     expect(calls).toHaveLength(1)
     expect(calls[0]?.url).toBe(`${KEY_INDEX_PATH}?route=ofox`)
     expect(optionsOf()).toMatchObject({ method: 'GET', cache: 'no-store', credentials: 'same-origin' })
     expect(optionsOf()['body']).toBeUndefined()
-    expect(answer).toEqual({ ok: true, route: 'ofox', enabledRef: null, entries: [] })
+    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null } })
   })
 
   it('escapes the route it interpolates', async () => {
-    stubFetch({ body: { ok: true, route: 'a b', enabledRef: null, entries: [] } })
+    stubFetch({ body: { ok: true, route: 'a b', entries: [] } })
     await httpKeyManagerClient.list('a b')
     expect(calls[0]?.url).toBe(`${KEY_INDEX_PATH}?route=a%20b`)
   })
@@ -79,11 +79,10 @@ describe('list', () => {
       body: {
         ok: true,
         route: 'ofox',
-        enabledRef: 'A',
         entries: [
-          { ref: 'A', alias: 'main', enabled: true, configured: true },
-          { ref: 'B', alias: '', enabled: false, configured: false },
-          { ref: 'C', enabled: false, configured: 'yes' },
+          { ref: 'A', alias: 'main', primary: true, configured: true, models: ['glm-4', 'glm-4-flash'] },
+          { ref: 'B', alias: '', primary: false, configured: false },
+          { ref: 'C', primary: false, configured: 'yes' },
           { alias: 'no ref' },
           'nonsense',
         ],
@@ -93,12 +92,12 @@ describe('list', () => {
     expect(await httpKeyManagerClient.list('ofox')).toEqual({
       ok: true,
       route: 'ofox',
-      enabledRef: 'A',
       entries: [
-        { ref: 'A', alias: 'main', enabled: true, configured: true },
-        { ref: 'B', enabled: false, configured: false },
-        { ref: 'C', enabled: false, configured: null },
+        { ref: 'A', alias: 'main', primary: true, configured: true, models: ['glm-4', 'glm-4-flash'] },
+        { ref: 'B', primary: false, configured: false },
+        { ref: 'C', primary: false, configured: null },
       ],
+      endpoints: { openai: null, anthropic: null },
     })
   })
 
@@ -107,12 +106,11 @@ describe('list', () => {
       body: {
         ok: true,
         route: 'ofox',
-        enabledRef: 'A',
         entries: [
-          { ref: 'A', enabled: true, configured: true, masked: 'sk-a...wxyz' },
-          { ref: 'B', enabled: false, configured: true, masked: '' },
-          { ref: 'C', enabled: false, configured: true, masked: 42 },
-          { ref: 'D', enabled: false, configured: true },
+          { ref: 'A', primary: true, configured: true, masked: 'sk-a...wxyz' },
+          { ref: 'B', primary: false, configured: true, masked: '' },
+          { ref: 'C', primary: false, configured: true, masked: 42 },
+          { ref: 'D', primary: false, configured: true },
         ],
       },
     })
@@ -120,22 +118,39 @@ describe('list', () => {
     expect(await httpKeyManagerClient.list('ofox')).toEqual({
       ok: true,
       route: 'ofox',
-      enabledRef: 'A',
       entries: [
-        { ref: 'A', enabled: true, configured: true, masked: 'sk-a...wxyz' },
-        { ref: 'B', enabled: false, configured: true },
-        { ref: 'C', enabled: false, configured: true },
-        { ref: 'D', enabled: false, configured: true },
+        { ref: 'A', primary: true, configured: true, masked: 'sk-a...wxyz' },
+        { ref: 'B', primary: false, configured: true },
+        { ref: 'C', primary: false, configured: true },
+        { ref: 'D', primary: false, configured: true },
       ],
+      endpoints: { openai: null, anthropic: null },
     })
   })
 
-  it('reports no enabled reference when the host says null, empty or nothing', async () => {
-    for (const enabledRef of [null, '', undefined, 7]) {
-      stubFetch({ body: { ok: true, route: 'ofox', enabledRef, entries: [] } })
-      const answer = await httpKeyManagerClient.list('ofox')
-      expect(answer).toEqual({ ok: true, route: 'ofox', enabledRef: null, entries: [] })
-    }
+  it('drops model ids that are not non-empty strings, and keeps an empty scope list', async () => {
+    stubFetch({
+      body: {
+        ok: true,
+        route: 'ofox',
+        entries: [
+          { ref: 'A', primary: true, configured: true, models: ['glm-4', '', 42, 'glm-4'] },
+          { ref: 'B', primary: false, configured: true, models: [] },
+          { ref: 'C', primary: false, configured: true, models: 'nonsense' },
+        ],
+      },
+    })
+
+    expect(await httpKeyManagerClient.list('ofox')).toEqual({
+      ok: true,
+      route: 'ofox',
+      entries: [
+        { ref: 'A', primary: true, configured: true, models: ['glm-4', 'glm-4'] },
+        { ref: 'B', primary: false, configured: true, models: [] },
+        { ref: 'C', primary: false, configured: true },
+      ],
+      endpoints: { openai: null, anthropic: null },
+    })
   })
 })
 
@@ -157,20 +172,29 @@ describe('mutations', () => {
     expect(bodyOf()).not.toHaveProperty('alias')
   })
 
-  it('POSTs enable, rename and remove with their own fields', async () => {
-    stubFetch({ body: { ok: true, route: 'ofox', enabledRef: 'A', entries: [] } })
-    await httpKeyManagerClient.enable('ofox', 'A')
-    expect(bodyOf()).toEqual({ op: 'enable', ref: 'A' })
+  it('POSTs a scope, a discover, a rename and a remove with their own fields', async () => {
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
+    await httpKeyManagerClient.setScope('ofox', 'A', ['glm-4', 'glm-4-flash'])
+    expect(bodyOf()).toEqual({ op: 'scope', ref: 'A', models: ['glm-4', 'glm-4-flash'] })
 
-    stubFetch({ body: { ok: true, route: 'ofox', enabledRef: null, entries: [] } })
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
+    await httpKeyManagerClient.setScope('ofox', 'A', undefined)
+    expect(bodyOf()).toEqual({ op: 'scope', ref: 'A' })
+    expect(bodyOf()).not.toHaveProperty('models')
+
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
+    await httpKeyManagerClient.discover('ofox')
+    expect(bodyOf()).toEqual({ op: 'discover' })
+
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     await httpKeyManagerClient.rename('ofox', 'A', 'primary')
     expect(bodyOf()).toEqual({ op: 'rename', ref: 'A', alias: 'primary' })
 
-    stubFetch({ body: { ok: true, route: 'ofox', enabledRef: null, entries: [] } })
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     await httpKeyManagerClient.rename('ofox', 'A', undefined)
     expect(bodyOf()).toEqual({ op: 'rename', ref: 'A' })
 
-    stubFetch({ body: { ok: true, route: 'ofox', enabledRef: null, entries: [] } })
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     await httpKeyManagerClient.remove('ofox', 'A')
     expect(bodyOf()).toEqual({ op: 'remove', ref: 'A' })
   })
@@ -178,14 +202,14 @@ describe('mutations', () => {
 
 describe('replace', () => {
   it('POSTs the new secret and the reference it belongs to', async () => {
-    stubFetch({ body: { ok: true, route: 'ofox', enabledRef: 'key-2', entries: [] } })
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     const answer = await httpKeyManagerClient.replace('ofox', 'key-2', 'sk-live-secret')
 
     expect(calls[0]?.url).toBe(`${KEY_INDEX_PATH}?route=ofox`)
     expect(optionsOf()).toMatchObject({ method: 'POST', cache: 'no-store', credentials: 'same-origin' })
     expect(headersOf()['content-type']).toBe('application/json')
     expect(bodyOf()).toEqual({ op: 'value', ref: 'key-2', value: 'sk-live-secret' })
-    expect(answer).toEqual({ ok: true, route: 'ofox', enabledRef: 'key-2', entries: [] })
+    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null } })
   })
 
   it('passes the host’s refusal through untouched', async () => {
@@ -200,7 +224,7 @@ describe('replace', () => {
 describe('refusals', () => {
   it('passes the host’s own wording through, body first and status irrelevant', async () => {
     stubFetch({ status: 400, body: { ok: false, error: 'that key is not listed for this provider' } })
-    expect(await httpKeyManagerClient.enable('ofox', 'GHOST')).toEqual({
+    expect(await httpKeyManagerClient.setScope('ofox', 'GHOST', [])).toEqual({
       ok: false,
       error: 'that key is not listed for this provider',
     })
