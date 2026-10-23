@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { decorateProviderCard, forgetEndpointCache, type EndpointLabels } from '../src/client/injection/provider-endpoints.js'
 import type { KeyAnswer, KeyManagerClient } from '../src/client/key-manager-client.js'
+import { STYLES } from '../src/client/styles.js'
 
 const LABELS: EndpointLabels = {
   routeId: ['Provider ID'],
@@ -160,6 +161,36 @@ describe('the reshaped provider card', () => {
     expect(card.querySelector<HTMLElement>('[data-bre-endpoint-row]')?.hidden).toBe(true)
   })
 
+  it('tucks 更多端点 directly after the API-protocol title, not after the control', () => {
+    const card = buildCard({ protocol: 'openai-completions' })
+    decorateProviderCard(card, LABELS, { t })
+    const toggle = card.querySelector<HTMLElement>('[data-bre-endpoint-toggle]')
+    expect(toggle).not.toBeNull()
+    if (toggle === null) return
+
+    const title = Array.from(card.querySelectorAll<HTMLElement>('.field span')).find(
+      span => (span.textContent ?? '').trim() === 'API protocol',
+    )
+    expect(title).toBeDefined()
+    // Same parent as the title, immediately following it: it reads as part of the
+    // heading rather than a control in the field (user item 2).
+    expect(toggle.parentElement).toBe(title?.parentElement)
+    expect(toggle.previousElementSibling).toBe(title)
+  })
+
+  it('keeps the second address row out of the way until it is asked for', () => {
+    // A row that is injected but visible would defeat the whole point: the card
+    // must keep its single-address shape. `hidden` alone only works because the
+    // stylesheet also carries a `[hidden]` rule for this row, asserted below.
+    for (const protocol of ['openai-completions', 'openai-responses', 'anthropic-messages']) {
+      document.body.innerHTML = ''
+      const card = buildCard({ protocol })
+      decorateProviderCard(card, LABELS, { t })
+      expect(card.querySelector<HTMLElement>('[data-bre-endpoint-row]')?.hidden).toBe(true)
+      document.body.removeChild(card)
+    }
+  })
+
   it('files the second address under the family the main address does not serve', async () => {
     const { client, writes } = fakeClient()
     const card = buildCard({ route: 'acme', protocol: 'openai-completions' })
@@ -196,5 +227,15 @@ describe('the reshaped provider card', () => {
     const before = card.innerHTML
     decorateProviderCard(card, LABELS, { t })
     expect(card.innerHTML).toBe(before)
+  })
+
+  it('hides a collapsed second row in CSS, since `display: flex` beats the UA rule', () => {
+    // The row sets `display: flex`, which outranks the user agent's
+    // `[hidden] { display: none }`. Without an explicit rule the injected row
+    // would be on screen from the first scan (the reported bug).
+    expect(STYLES).toContain('.bre-endpoint-row[hidden] { display: none; }')
+    // 更多端点 reads as an aside, smaller than the title it follows.
+    expect(STYLES).toContain('.bre-endpoint-toggle {')
+    expect(STYLES).toContain('font-size: 11px;')
   })
 })

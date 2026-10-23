@@ -386,7 +386,13 @@ describe('the actions on a row', () => {
   })
 
   it('keeps the protocol picker inside the hover action tray, defaulting to the route', async () => {
-    const { client, calls } = recorder({ list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }) })
+    const { client, calls } = recorder({
+      list: async () =>
+        state({
+          entries: [row({ ref: 'key-2', alias: 'key2' })],
+          endpoints: { openai: null, anthropic: 'https://anthropic.example' },
+        }),
+    })
     const panel = mount({ client })
     await flush()
 
@@ -406,6 +412,47 @@ describe('the actions on a row', () => {
     expect(calls.filter((call) => call.op === 'setProtocol')).toEqual([
       { op: 'setProtocol', args: ['ofox', 'key-2', 'anthropic-messages'] },
     ])
+  })
+
+  it('only offers a protocol whose address the provider actually configured', async () => {
+    // No addresses recorded: every pin would point at a URL the provider never
+    // named, so only the default stays selectable (user rule 3).
+    const none = recorder({
+      list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }),
+    })
+    const bare = mount({ client: none.client })
+    await flush()
+    const barePicker = rowOf(bare.root, 'key2').querySelector<HTMLSelectElement>('.bre-keys-protocol')
+    const disabledOf = (picker: HTMLSelectElement | null): string[] =>
+      Array.from(picker?.querySelectorAll('option[disabled]') ?? []).map(option => option.getAttribute('value') ?? '')
+    expect(disabledOf(barePicker)).toEqual(['anthropic-messages', 'openai-completions', 'openai-responses'])
+
+    // An Anthropic address configured: only the Anthropic family unlocks.
+    const anthropicOnly = recorder({
+      list: async () =>
+        state({
+          entries: [row({ ref: 'key-2', alias: 'key2' })],
+          endpoints: { openai: null, anthropic: 'https://anthropic.example' },
+        }),
+    })
+    const half = mount({ client: anthropicOnly.client })
+    await flush()
+    expect(disabledOf(rowOf(half.root, 'key2').querySelector<HTMLSelectElement>('.bre-keys-protocol'))).toEqual([
+      'openai-completions',
+      'openai-responses',
+    ])
+
+    // Both families configured: nothing is refused.
+    const both = recorder({
+      list: async () =>
+        state({
+          entries: [row({ ref: 'key-2', alias: 'key2' })],
+          endpoints: { openai: 'https://openai.example/v1', anthropic: 'https://anthropic.example' },
+        }),
+    })
+    const full = mount({ client: both.client })
+    await flush()
+    expect(disabledOf(rowOf(full.root, 'key2').querySelector<HTMLSelectElement>('.bre-keys-protocol'))).toEqual([])
   })
 
   it('asks twice before deleting, and can be talked out of it', async () => {

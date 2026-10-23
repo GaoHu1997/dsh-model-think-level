@@ -1967,7 +1967,10 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 
 /* The injected second address row. Collapsed until 更多端点 is pressed, so the
-   card keeps its one-address shape until a second endpoint is actually wanted. */
+   card keeps its one-address shape until a second endpoint is actually wanted.
+   The [hidden] rule is not redundant: a class rule that sets display beats the
+   user agent's [hidden] rule, so without it the row would be on screen from the
+   moment it is injected. */
 .bre-endpoint-row {
   display: flex;
   align-items: center;
@@ -1975,21 +1978,26 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   margin-top: 8px;
 }
 
+.bre-endpoint-row[hidden] { display: none; }
+
 .bre-endpoint-url {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-/* 更多端点: a grey text button beside the API-protocol label — the host's own
-   link affordance, not a filled button, so it never competes with Save. */
+/* 更多端点: a grey text button tucked after the API-protocol title — the host's
+   own link affordance, and deliberately smaller than the title so it reads as
+   an aside rather than a field of its own. */
 .bre-endpoint-toggle {
-  margin-left: 8px;
+  margin-left: 6px;
   padding: 0;
   border: none;
   background: none;
   color: var(--dsw-alias-label-secondary, #6b7280);
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1;
   cursor: pointer;
 }
 

@@ -1495,6 +1495,18 @@ export function apply(ctx: Context, config: Config = {}): void {
                   refuse('that protocol is not supported')
                   return
                 }
+                // A pinned protocol sends the key to THAT family's base URL. With
+                // no such address configured the request would go out against the
+                // other family's endpoint, which fails at the wire — so a pin is
+                // only accepted once its address exists.
+                if (protocol !== undefined) {
+                  const family = endpointFamilyOf(protocol)
+                  const endpoint = readKeyIndex(indexFile).endpoints?.[route]?.[family]
+                  if (endpoint === undefined || endpoint.length === 0) {
+                    refuse(`add this provider's ${family} address before pinning that protocol`)
+                    return
+                  }
+                }
                 const target = ref
                 updateKeyIndex(
                   document2 =>

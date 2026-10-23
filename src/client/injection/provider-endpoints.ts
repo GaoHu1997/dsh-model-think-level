@@ -221,9 +221,30 @@ function decorateAddressLabel(card: HTMLElement, labels: EndpointLabels, t: Endp
 }
 
 /**
- * Ensure the "更多端点" toggle sits beside the API-protocol label. Clicking it
- * flips the injected second row: the row is a plugin node, so its own state is
- * the source of truth for its visibility.
+ * The node that renders a field's TITLE text, which is the thing 更多端点 must sit
+ * after. Official cards render the title as an element beside the control (a
+ * `<span>` next to the `<select>`), so the title is the last element that is not
+ * the control itself. Returns undefined when no such element exists, and the
+ * caller then appends to the group instead.
+ */
+function titleNodeOf(group: HTMLElement, labels: readonly string[]): HTMLElement | undefined {
+  const control = controlByLabel(group, labels)
+  if (control === undefined) return undefined
+  const holders = [group, control.closest('label')]
+  for (const holder of holders) {
+    if (holder === null) continue
+    const title = Array.from(holder.children).find(
+      child => child !== control && !child.contains(control) && (child.textContent ?? '').trim().length > 0,
+    )
+    if (title !== undefined) return title as HTMLElement
+  }
+  return undefined
+}
+
+/**
+ * Ensure the "更多端点" toggle sits immediately after the API-protocol TITLE.
+ * Clicking it flips the injected second row: the row is a plugin node, so its
+ * own state is the source of truth for its visibility.
  */
 function decorateToggle(card: HTMLElement, labels: EndpointLabels, t: EndpointDeps['t']): void {
   const protocolGroup = fieldGroupOf(card, labels.apiProtocol)
@@ -243,7 +264,11 @@ function decorateToggle(card: HTMLElement, labels: EndpointLabels, t: EndpointDe
     if (row === null) return
     row.hidden = !row.hidden
   })
-  protocolGroup.appendChild(button)
+  // Tuck it right after the title text, so it reads as part of the heading
+  // rather than as a control of its own.
+  const title = titleNodeOf(protocolGroup, labels.apiProtocol)
+  if (title !== undefined && title.parentElement !== null) title.parentElement.insertBefore(button, title.nextSibling)
+  else protocolGroup.appendChild(button)
 }
 
 /** Per-route cache of the stored endpoints, so a scan does not re-read them. */

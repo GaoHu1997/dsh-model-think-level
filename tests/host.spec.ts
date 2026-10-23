@@ -1616,7 +1616,14 @@ describe('apply() key-index route', () => {
   })
 
   it('pins a key to a protocol, and clears it back to "any"', async () => {
-    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] } }, indexFile())
+    writeKeyIndex(
+      {
+        version: 1,
+        providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
+        endpoints: { aliyun: { anthropic: 'https://anthropic.example' } },
+      },
+      indexFile(),
+    )
     const { handler } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'a', ALIYUN_KEY_2: 'b' }))
 
     const pinned = fakeRes()
@@ -1633,6 +1640,40 @@ describe('apply() key-index route', () => {
     await handler(fakeReq({ method: 'POST', body: { op: 'protocol', ref: 'ALIYUN_KEY_2' } }), cleared.res)
     expect(cleared.out().status).toBe(200)
     expect(readKeyIndex(indexFile()).providers['aliyun']?.[1]).toEqual({ ref: 'ALIYUN_KEY_2' })
+  })
+
+  it('refuses to pin a protocol whose address the provider has not configured', async () => {
+    // No endpoints recorded: an Anthropic pin would send the key to a URL the
+    // provider never named, so it is refused rather than stored and left to fail
+    // at the wire (user rule: an unfilled address cannot be selected on a key).
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
+    const { handler } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'a' }))
+
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'protocol', ref: 'ALIYUN_KEY', protocol: 'anthropic-messages' } }), res)
+    expect(out().status).toBe(400)
+    expect(String(out().body['error'])).toContain('anthropic address')
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY' }])
+  })
+
+  it('pins a protocol once its own family\'s address exists', async () => {
+    writeKeyIndex(
+      {
+        version: 1,
+        providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] },
+        endpoints: { aliyun: { openai: 'https://openai.example/v1' } },
+      },
+      indexFile(),
+    )
+    const { handler } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'a' }))
+
+    const pinned = fakeRes()
+    await handler(
+      fakeReq({ method: 'POST', body: { op: 'protocol', ref: 'ALIYUN_KEY', protocol: 'openai-responses' } }),
+      pinned.res,
+    )
+    expect(pinned.out().status).toBe(200)
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY', protocol: 'openai-responses' }])
   })
 
   it('refuses a protocol it cannot dispatch', async () => {

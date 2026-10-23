@@ -43,6 +43,7 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
+  endpointFamilyOf,
   isLegalKeyValue,
   normalizeKeyAlias,
   type RouteProtocol,
@@ -50,6 +51,7 @@ import {
 import {
   httpKeyManagerClient,
   type KeyAnswer,
+  type KeyEndpoints,
   type KeyManagerClient,
   type KeyRow,
 } from './key-manager-client.js'
@@ -155,6 +157,18 @@ function parseScope(text: string): string[] | undefined {
 /** The protocols a key may pin, in the picker's order (undefined = any). */
 const PROTOCOL_CHOICES: readonly RouteProtocol[] = ['anthropic-messages', 'openai-completions', 'openai-responses']
 
+/**
+ * Whether a protocol's address is configured on this provider.
+ *
+ * A pinned protocol sends the key to its own family's base URL, so without that
+ * address a pin can only produce failing requests (user rule: an address that was
+ * never filled in must not be selectable on a key).
+ */
+function hasAddress(protocol: RouteProtocol, endpoints: KeyEndpoints): boolean {
+  const address = endpointFamilyOf(protocol) === 'anthropic' ? endpoints.anthropic : endpoints.openai
+  return address !== null && address.length > 0
+}
+
 /** A protocol's short human label for the picker's trigger. */
 function protocolLabel(protocol: RouteProtocol | undefined, t: Translate): string {
   if (protocol === 'anthropic-messages') return t('keysProtocolAnthropic')
@@ -174,6 +188,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
 
   const [rows, setRows] = useState<readonly KeyRow[] | undefined>(undefined)
   const [routeModels, setRouteModels] = useState<readonly string[]>([])
+  const [endpoints, setEndpoints] = useState<KeyEndpoints>({ openai: null, anthropic: null })
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<Editing | undefined>(undefined)
@@ -195,6 +210,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
       }
       setRows(answer.entries)
       setRouteModels(answer.models ?? [])
+      setEndpoints(answer.endpoints ?? { openai: null, anthropic: null })
       setNotice(okText === undefined ? undefined : { kind: 'status', text: okText })
     },
     [t],
@@ -488,7 +504,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                       >
                         <option value="">{t('keysProtocolDefault')}</option>
                         {PROTOCOL_CHOICES.map(protocol => (
-                          <option key={protocol} value={protocol}>
+                          <option key={protocol} value={protocol} disabled={!hasAddress(protocol, endpoints)}>
                             {protocolLabel(protocol, t)}
                           </option>
                         ))}
