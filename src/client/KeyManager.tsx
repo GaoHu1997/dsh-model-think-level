@@ -19,18 +19,16 @@
  *     model that more than one key can serve, a model only one key lists sticks
  *     to that key, and a failed request fails over to the next capable key. The
  *     old per-row radio is gone because the model, not a global switch, decides.
- *   - **each key shows the models it serves.** Auto-discovered from a probe of
- *     each key's model list, and editable as chips — an empty scope means "not
- *     probed yet", which the host treats as a catch-all that serves whatever is
- *     left, so a never-probed key still signs requests. The scope summary shares
- *     the hover-revealed action tray, so a resting row stays quiet.
+ *   - **each key shows the models it serves.** Picked as chips from the models
+ *     the route already offers — never the provider's whole catalog — so no one
+ *     has to recall a model id, and an empty scope means "catch-all", serving
+ *     whatever is left. The scope summary shares the hover-revealed action tray,
+ *     so a resting row stays quiet.
  *   - **each key may pin a wire protocol.** A key that pins a protocol speaks
  *     that API shape (Anthropic Messages, Chat Completions or Responses) instead
- *     of the provider's default, and uses the matching base URL below. A key
- *     left on "any protocol" follows the route's own protocol.
- *   - **the provider keeps two base URLs.** One OpenAI-style and one Anthropic
- *     never mix: a key pinned to a protocol family signs against that family's
- *     URL, so a single route can serve both wires.
+ *     of the provider's default, and uses the matching base URL. A key left on
+ *     "default protocol" follows the route's own API protocol. The protocol
+ *     picker lives in the same hover-revealed action tray as the other actions.
  *   - **a value is shown masked, or not at all.** The host reads the stored
  *     secret and answers a head-and-tail preview; the middle never leaves it,
  *     and the eye beside the field stays the one gesture that reveals a value.
@@ -42,7 +40,7 @@
  * @module dsh-model-think-level/client/KeyManager
  */
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   isLegalKeyValue,
@@ -52,7 +50,6 @@ import {
 import {
   httpKeyManagerClient,
   type KeyAnswer,
-  type KeyEndpoints,
   type KeyManagerClient,
   type KeyRow,
 } from './key-manager-client.js'
@@ -84,9 +81,6 @@ interface Editing {
 
 /** The circle-plus drawn on the row that opens the add form. */
 const PLUS_PATHS: readonly string[] = ['M8 3.9v8.2', 'M3.9 8h8.2']
-
-/** The magnifier drawn on the discover action. */
-const SEARCH_PATHS: readonly string[] = ['M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10Z', 'M10.6 10.6 14 14']
 
 /** The tick drawn inside a selected model chip. */
 const CHECK_PATH = 'M3.9 8.35 6.6 11.05 12.1 5.5'
@@ -179,7 +173,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   const client = props.client ?? httpKeyManagerClient
 
   const [rows, setRows] = useState<readonly KeyRow[] | undefined>(undefined)
-  const [endpoints, setEndpoints] = useState<KeyEndpoints>({ openai: null, anthropic: null })
+  const [routeModels, setRouteModels] = useState<readonly string[]>([])
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<Editing | undefined>(undefined)
@@ -187,8 +181,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   const [valueDraft, setValueDraft] = useState('')
   const [scopeDraft, setScopeDraft] = useState<readonly string[]>([])
   const [confirming, setConfirming] = useState<string | undefined>(undefined)
-  const [openaiDraft, setOpenaiDraft] = useState('')
-  const [anthropicDraft, setAnthropicDraft] = useState('')
 
   /**
    * Adopt whatever the host just answered. A refusal keeps the list that is
@@ -202,9 +194,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
         return
       }
       setRows(answer.entries)
-      setEndpoints(answer.endpoints)
-      setOpenaiDraft(answer.endpoints.openai ?? '')
-      setAnthropicDraft(answer.endpoints.anthropic ?? '')
+      setRouteModels(answer.models ?? [])
       setNotice(okText === undefined ? undefined : { kind: 'status', text: okText })
     },
     [t],
@@ -220,15 +210,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
       live = false
     }
   }, [adopt, client, route])
-
-  /** Every model any key was discovered to serve — the chip picker's universe. */
-  const knownModels = useMemo((): readonly string[] => {
-    const seen = new Set<string>()
-    for (const row of rows ?? []) {
-      for (const model of row.models ?? []) seen.add(model)
-    }
-    return [...seen].sort((a, b) => a.localeCompare(b))
-  }, [rows])
 
   /** Run one mutation, then take the host's word for the new list. */
   const run = useCallback(
@@ -322,10 +303,10 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
       <div className="bre-keys-form">
         {wantsScope ? (
           <div className="bre-keys-chips" role="group" aria-label={t('keysScope')}>
-            {knownModels.length === 0 ? (
+            {routeModels.length === 0 ? (
               <p className="bre-keys-hint">{t('keysScopeEmpty')}</p>
             ) : (
-              knownModels.map(model => {
+              routeModels.map(model => {
                 const selected = scopeDraft.includes(model)
                 return (
                   <button
@@ -441,77 +422,11 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
       </li>
     )
 
-  /**
-   * The discover action: probe every listed key's model list and record what
-   * each can serve. Sits at the foot of the list because it acts on all keys.
-   */
-  const discoverEntry = (): ReactNode => (
-    <button
-      type="button"
-      className="bre-keys-discover"
-      disabled={busy}
-      title={t('keysDiscoverHint')}
-      onClick={() => void run(() => client.discover(route), t('keysDiscovered'))}
-    >
-      <span className="bre-keys-discover-mark" aria-hidden="true">
-        <Glyph paths={SEARCH_PATHS} />
-      </span>
-      {t('keysDiscover')}
-    </button>
-  )
-
   /** Change one key's pinned protocol; undefined restores the route's own. */
   const changeProtocol = (row: KeyRow, next: string): void => {
     const protocol = next === '' ? undefined : (next as RouteProtocol)
     void run(() => client.setProtocol(route, row.ref, protocol), t('keysProtocolSaved'))
   }
-
-  /** Persist both base URLs in one write. */
-  const saveEndpoints = (): void => {
-    void run(
-      () => client.setEndpoints(route, openaiDraft.trim(), anthropicDraft.trim()),
-      t('keysEndpointsSaved'),
-    )
-  }
-
-  /**
-   * The two base-URL rows (OpenAI + Anthropic). The provider already carries one
-   * `baseURL`; this adds the second so a key pinned to either protocol family
-   * has a matching address to sign against.
-   */
-  const endpointsSection = (): ReactNode => (
-    <div className="bre-keys-endpoints">
-      <label className="bre-keys-endpoint-row">
-        <span className="bre-keys-endpoint-label">{t('keysOpenAIUrl')}</span>
-        <input
-          className="bre-text-input bre-keys-endpoint"
-          type="url"
-          spellCheck={false}
-          value={openaiDraft}
-          placeholder={t('keysEndpointPlaceholder')}
-          disabled={busy}
-          onChange={event => setOpenaiDraft(event.target.value)}
-        />
-      </label>
-      <label className="bre-keys-endpoint-row">
-        <span className="bre-keys-endpoint-label">{t('keysAnthropicUrl')}</span>
-        <input
-          className="bre-text-input bre-keys-endpoint"
-          type="url"
-          spellCheck={false}
-          value={anthropicDraft}
-          placeholder={t('keysEndpointPlaceholder')}
-          disabled={busy}
-          onChange={event => setAnthropicDraft(event.target.value)}
-        />
-      </label>
-      <div className="bre-keys-endpoint-actions">
-        <button type="button" className="bre-link-button" disabled={busy} onClick={saveEndpoints}>
-          {t('keysSave')}
-        </button>
-      </div>
-    </div>
-  )
 
   if (rows === undefined) {
     // Still reading: NOTHING, until the answer lands. A read that FAILED says so
@@ -540,21 +455,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                 <span className={row.alias === undefined ? 'bre-keys-mask bre-keys-mask-plain' : 'bre-keys-mask'}>
                   {previewOf(row, t)}
                 </span>
-                <select
-                  className="bre-keys-protocol"
-                  value={row.protocol ?? ''}
-                  aria-label={t('keysProtocolLabel', { name })}
-                  title={t('keysProtocolLabel', { name })}
-                  disabled={busy}
-                  onChange={event => changeProtocol(row, event.target.value)}
-                >
-                  <option value="">{t('keysProtocolAny')}</option>
-                  {PROTOCOL_CHOICES.map(protocol => (
-                    <option key={protocol} value={protocol}>
-                      {protocolLabel(protocol, t)}
-                    </option>
-                  ))}
-                </select>
                 <span className="bre-keys-actions">
                   {confirming === row.ref ? (
                     <>
@@ -578,6 +478,21 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                   ) : (
                     <>
                       <span className="bre-keys-scope-label">{scopeText(row, t)}</span>
+                      <select
+                        className="bre-keys-protocol"
+                        value={row.protocol ?? ''}
+                        aria-label={t('keysProtocolLabel', { name })}
+                        title={t('keysProtocolLabel', { name })}
+                        disabled={busy}
+                        onChange={event => changeProtocol(row, event.target.value)}
+                      >
+                        <option value="">{t('keysProtocolDefault')}</option>
+                        {PROTOCOL_CHOICES.map(protocol => (
+                          <option key={protocol} value={protocol}>
+                            {protocolLabel(protocol, t)}
+                          </option>
+                        ))}
+                      </select>
                       <button
                         type="button"
                         className="bre-link-button"
@@ -626,14 +541,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
         })}
         {addEntry()}
       </ul>
-
-      {rows.length === 0 ? null : (
-        <div className="bre-keys-footer">
-          {discoverEntry()}
-        </div>
-      )}
-
-      {endpointsSection()}
 
       {notice === undefined ? null : (
         <p className={'bre-effort-message bre-' + notice.kind} role={notice.kind === 'error' ? 'alert' : 'status'}>

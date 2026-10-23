@@ -47,7 +47,6 @@ function stubClient(): KeyManagerClient {
     replace: async () => EMPTY,
     remove: async () => EMPTY,
     setScope: async () => EMPTY,
-    discover: async () => EMPTY,
     setProtocol: async () => EMPTY,
     setEndpoints: async () => EMPTY,
     reveal: async () => undefined,

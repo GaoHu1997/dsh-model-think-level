@@ -172,7 +172,7 @@ describe('mutations', () => {
     expect(bodyOf()).not.toHaveProperty('alias')
   })
 
-  it('POSTs a scope, a discover, a rename and a remove with their own fields', async () => {
+  it('POSTs a scope, a protocol, a rename and a remove with their own fields', async () => {
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     await httpKeyManagerClient.setScope('ofox', 'A', ['glm-4', 'glm-4-flash'])
     expect(bodyOf()).toEqual({ op: 'scope', ref: 'A', models: ['glm-4', 'glm-4-flash'] })
@@ -183,8 +183,13 @@ describe('mutations', () => {
     expect(bodyOf()).not.toHaveProperty('models')
 
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
-    await httpKeyManagerClient.discover('ofox')
-    expect(bodyOf()).toEqual({ op: 'discover' })
+    await httpKeyManagerClient.setProtocol('ofox', 'A', 'anthropic-messages')
+    expect(bodyOf()).toEqual({ op: 'protocol', ref: 'A', protocol: 'anthropic-messages' })
+
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
+    await httpKeyManagerClient.setProtocol('ofox', 'A', undefined)
+    expect(bodyOf()).toEqual({ op: 'protocol', ref: 'A' })
+    expect(bodyOf()).not.toHaveProperty('protocol')
 
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     await httpKeyManagerClient.rename('ofox', 'A', 'primary')

@@ -30,6 +30,7 @@ import type { ReactNode } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { setClass } from './dom.js'
 import { CreateCardPane } from './create-card-pane.js'
+import { revealKeyField, resetKeyField, KEY_FIELD_CLASS } from './key-reveal.js'
 import { mountReact, unmountReact, type ForeignMount } from './mount.js'
 import type { StagedHeadersState } from './staged-headers.js'
 import type { RemoteApi } from '../types.js'
@@ -144,9 +145,41 @@ function applyAddCard(card: HTMLElement, deps: AddCardDeps, state: AddCardState)
     return
   }
   ensureHost(card, custom, deps, state)
+  // User item 7: the add-provider form's API-key field is dressed exactly like
+  // the edit-provider form's — same field wrapper, same masked input padding,
+  // same reveal eye. There is no route yet, so the eye is a plain mask toggle
+  // (it never asks the host for a stored key) and the key list is not mounted:
+  // keys belong to a route that exists. The whole card is walked, not just the
+  // visible half, because which half the official page puts the key field in is
+  // the host's business; a hidden panel's field is simply dressed out of sight.
+  dressKeyFields(card, deps)
   // Hidden only once the custom form is really up: a card whose custom half is
   // disabled must keep the switch that explains why.
   setPickerHidden(card, true)
+}
+
+/** The field wrappers of a form, as the official page spells them: the element
+ * that holds a single labelled control. */
+const FIELD_SELECTOR = '.field, label'
+
+/**
+ * Give every API-key field in the card the edit card's dressing.
+ *
+ * The create card is not one of the editor cards the tab takeover walks (it only
+ * carries a plugin mount for the bar), so nothing else dresses its key field.
+ * Without this the same input looks like an ordinary official box here and like
+ * the plugin's managed field one card above.
+ */
+function dressKeyFields(scope: HTMLElement, deps: AddCardDeps): void {
+  for (const field of Array.from(scope.querySelectorAll<HTMLElement>(FIELD_SELECTOR))) {
+    try {
+      revealKeyField(field, { t: deps.t })
+    } catch (error) {
+      // A form the official page restructured mid-scan is not worth a card: the
+      // eye is an affordance, and the field it decorates still works without it.
+      console.warn('[bre] add provider card: could not dress a key field:', error)
+    }
+  }
 }
 
 /** Show or hide the official switch. */
@@ -258,5 +291,10 @@ export function teardownAddCards(state: AddCardState): void {
   for (const host of Array.from(document.querySelectorAll<HTMLElement>(`.${CREATE_HOST_CLASS}`))) host.remove()
   for (const picker of Array.from(document.querySelectorAll<HTMLElement>(`.${MODE_PICKER_CLASS}`))) {
     setClass(picker, MODE_PICKER_CLASS, false)
+  }
+  // The key-field dressing this module added goes with the rest of its marks, so
+  // a withdrawn takeover leaves the official form exactly as the page built it.
+  for (const field of Array.from(document.querySelectorAll<HTMLElement>(`.${KEY_FIELD_CLASS}`))) {
+    resetKeyField(field)
   }
 }

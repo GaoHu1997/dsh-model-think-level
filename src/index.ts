@@ -63,7 +63,7 @@ import { keysForModel, type KeyCandidate } from './key-route-core.js'
 import { suggestEfforts } from './knowledge.js'
 import type { ReasoningEfforts } from './knowledge.js'
 import { resolveGuardEffort } from './guard.js'
-import { isRecord, looksLikeCompatRefusal, routeFactsOf } from './shared.js'
+import { isRecord, looksLikeCompatRefusal, modelsOf, routeFactsOf } from './shared.js'
 import { buildHeaderIndex, emptyIndex, type UserAgentIndex } from './headers-core.js'
 import { headerOverlayBypass, headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from './headers-fetch.js'
 import { describePiAiHeaderState, installPiAiHeaderTransforms } from './headers-pi-ai.js'
@@ -1377,10 +1377,17 @@ export function apply(ctx: Context, config: Config = {}): void {
                   return view
                 })
                 const endpoints = readKeyIndex(indexFile).endpoints?.[route]
+                // The models this route actually offers — the universe a key's
+                // scope is chosen from (user rule: pick from the models already
+                // added, never the provider's whole catalog).
+                const routeModels = modelsOf(providersOf(), route)
+                  .map(model => (typeof model['id'] === 'string' ? model['id'] : ''))
+                  .filter(id => id.length > 0)
                 return {
                   ok: true,
                   route,
                   entries,
+                  models: routeModels,
                   endpoints: {
                     openai: endpoints?.openai ?? null,
                     anthropic: endpoints?.anthropic ?? null,

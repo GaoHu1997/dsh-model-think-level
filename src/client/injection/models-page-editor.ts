@@ -48,6 +48,7 @@ import { cataloguesOf, reconcileAutoEffortSeats, type AutoEffortSeatTarget } fro
 import type { AutoAdaptReport } from '../auto-effort.js'
 import { panelRoot } from './mount.js'
 import { scrollChainOf } from './row-drag.js'
+import { decorateProviderCard, type EndpointLabels } from './provider-endpoints.js'
 
 export type { SettingsJoin }
 
@@ -2648,6 +2649,39 @@ function officialCardOpen(): boolean {
 }
 
 /**
+ * Reshape every provider card on the page: the official edit card AND the add
+ * card, which share the display-name / base-URL / API-protocol fields.
+ *
+ * Scoped to card containers rather than the whole document, so a card that has
+ * scrolled out or a different pane's look-alike form is never touched. The work
+ * itself is idempotent, which is what makes running it on every scan safe: a
+ * React re-render that restores the host's field order is repaired next pass.
+ * @param root - the settings panel root.
+ * @param labels - the host's resolved label anchors.
+ * @param t - the injected copy.
+ */
+function decorateCards(root: HTMLElement, labels: HostLabels, t: InjectorDeps['t']): void {
+  const endpoints: EndpointLabels = {
+    routeId: labels.routeId,
+    modelName: labels.modelName,
+    baseUrl: labels.baseUrl,
+    apiProtocol: labels.apiProtocol,
+  }
+  const cards = new Set<HTMLElement>()
+  for (const node of Array.from(root.querySelectorAll<HTMLElement>('[class*="editor"], [class*="addCard"], [class*="rowCard"]'))) {
+    // Only a card that actually carries the protocol and address is ours to
+    // reshape; a model row's own inputs sit inside the editor container and
+    // would otherwise match the broad selector above. The display name is NOT
+    // required: the add-provider card has no such field and must get the same
+    // treatment (user item 6).
+    if (hasLabeledInput(node, labels.apiProtocol) && hasLabeledInput(node, labels.baseUrl)) {
+      cards.add(node)
+    }
+  }
+  for (const card of cards) decorateProviderCard(card, endpoints, { t })
+}
+
+/**
  * Scan the settings DOM for official model rows and reconcile the injected
  * editors. Idempotent: existing editors are left alone, new disclosures get
  * one, and removed ones are unmounted.
@@ -2682,6 +2716,12 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   for (const row of Array.from(root.querySelectorAll<HTMLElement>('[class*="rowCard"], [class*="setupCard"]'))) {
     for (const trigger of editTriggersOf(row, labels)) wireEditRepin(trigger, state.editWired)
   }
+  // The provider card's own layout (display name → API protocol → base URL, the
+  // protocol-labelled address, the 更多端点 second endpoint). Wired before every
+  // gate below and applied to BOTH the edit card and the add card, so 添加供应商
+  // is not left in the old shape. Idempotent per card, so re-running on every
+  // scan is what repairs a React re-render that put the fields back.
+  decorateCards(root, labels, deps.t)
   // Match on the attribute VALUE, never through a selector built out of host
   // copy: a language pack whose label carries a quote or a bracket would make
   // `querySelector` throw, and this scan has no try/catch around it, so the

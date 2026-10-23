@@ -123,6 +123,7 @@ function buildCard(custom: CustomHalf = 'unmounted'): Fixture {
           <div class="editor">
             <div class="field"><input aria-label="Provider ID" /></div>
             <div class="field"><input aria-label="Base URL" /></div>
+            <div class="field"><input aria-label="API key" type="password" /></div>
             <section class="modelCatalog"><div class="modelListHead"></div></section>
             <div class="editorActions">
               <button class="secondaryButton" type="button">Cancel</button>
@@ -321,6 +322,36 @@ describe('the create-provider card', () => {
     expect(fixture.customPanel.querySelector(`.${CREATE_HOST_CLASS}`)).toBeNull()
     expect(fixture.picker?.classList.contains(MODE_PICKER_CLASS)).toBe(false)
     expect(state.hosts.size).toBe(0)
+  })
+
+  it('dresses the add form key field exactly like the edit form does', () => {
+    // User item 7: the same input must look the same on both cards. On the edit
+    // card the key field comes out of the tab takeover (`revealKeyField`); here
+    // nothing else walks this form, so this pass has to dress it itself.
+    const fixture = buildCard('shown')
+
+    reconcileAddCards(fixture.root, deps(), state)
+    reconcileAddCards(fixture.root, deps(), state)
+
+    const keyField = fixture.customPanel.querySelector<HTMLElement>('input[aria-label="API key"]')?.parentElement
+    expect(keyField).not.toBeNull()
+    expect(keyField?.classList.contains('bre-key-field')).toBe(true)
+    // Exactly one eye per key field, however many scans ran.
+    expect(keyField?.querySelectorAll('.bre-key-eye')).toHaveLength(1)
+    // The other fields of the form are not key fields and are left alone.
+    const routeField = fixture.customPanel.querySelector<HTMLElement>('input[aria-label="Provider ID"]')?.parentElement
+    expect(routeField?.classList.contains('bre-key-field')).toBe(false)
+    expect(routeField?.querySelector('.bre-key-eye')).toBeNull()
+  })
+
+  it('gives the key field back with the rest of the card', () => {
+    const fixture = buildCard('shown')
+    reconcileAddCards(fixture.root, deps(), state)
+
+    teardownAddCards(state)
+
+    expect(document.querySelectorAll('.bre-key-field')).toHaveLength(0)
+    expect(document.querySelectorAll('.bre-key-eye')).toHaveLength(0)
   })
 
   it('sweeps a mount left behind by a dead fiber', () => {

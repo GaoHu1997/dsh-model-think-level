@@ -50,6 +50,7 @@ const COPY: Record<string, string> = {
   keysDiscoverHint: 'Probe each key for the models it can reach.',
   keysDiscovered: 'Detected models for {count} keys.',
   keysProtocolLabel: 'Protocol for {name}',
+  keysProtocolDefault: 'Default protocol',
   keysProtocolAny: 'Any protocol',
   keysProtocolAnthropic: 'Anthropic',
   keysProtocolOpenAI: 'Chat Completions',
@@ -90,7 +91,6 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
     replace: async () => state(),
     remove: async () => state(),
     setScope: async () => state(),
-    discover: async () => state(),
     setProtocol: async () => state(),
     setEndpoints: async () => state(),
     reveal: async () => undefined,
@@ -120,10 +120,6 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
     setScope: (route, ref, models) => {
       calls.push({ op: 'setScope', args: [route, ref, models] })
       return base.setScope(route, ref, models)
-    },
-    discover: (route) => {
-      calls.push({ op: 'discover', args: [route] })
-      return base.discover(route)
     },
     setProtocol: (route, ref, protocol) => {
       calls.push({ op: 'setProtocol', args: [route, ref, protocol] })
@@ -324,6 +320,9 @@ describe('the default badge and model scope', () => {
     const { client, calls } = recorder({
       list: async () =>
         state({
+          // The universe a scope is chosen from is the route's own added models —
+          // never the provider's whole catalog.
+          models: ['glm-4', 'glm-4-flash', 'glm-4-air'],
           entries: [
             row({ ref: 'key-1', primary: true, masked: 'sk-a...a1' }),
             row({ ref: 'key-2', primary: false, masked: 'sk-b...b1', models: ['glm-4', 'glm-4-flash'] }),
@@ -338,13 +337,13 @@ describe('the default badge and model scope', () => {
     expect(rowOf(panel.root, 'sk-a...a1').contains(badges[0] ?? null)).toBe(true)
     expect(rowOf(panel.root, 'sk-b...b1').querySelector('.bre-keys-scope-label')?.textContent).toBe('2 models')
 
-    // The scope editor opens under the row it edits, as chips of the models that
-    // were discovered, with the row's current scope already ticked.
+    // The scope editor opens under the row it edits, as chips of the route's
+    // added models, with the row's current scope already ticked.
     buttonByText(rowOf(panel.root, 'sk-b...b1'), 'Models').click()
     await flush()
     const chips = Array.from((formRowOf(panel.root) as HTMLElement).querySelectorAll<HTMLButtonElement>('.bre-keys-chip'))
-    expect(chips.map((chip) => chip.textContent)).toEqual(['glm-4', 'glm-4-flash'])
-    expect(chips.every((chip) => chip.getAttribute('aria-pressed') === 'true')).toBe(true)
+    expect(chips.map((chip) => chip.textContent)).toEqual(['glm-4', 'glm-4-flash', 'glm-4-air'])
+    expect(chips.map((chip) => chip.getAttribute('aria-pressed'))).toEqual(['true', 'true', 'false'])
 
     // Untick one and save: only the remaining ticked model is sent.
     chips[1]?.click()
@@ -358,7 +357,8 @@ describe('the default badge and model scope', () => {
 
   it('clears a scope to the catch-all when no model stays ticked', async () => {
     const { client, calls } = recorder({
-      list: async () => state({ entries: [row({ ref: 'key-2', masked: 'sk-a...a1', models: ['glm-4'] })] }),
+      list: async () =>
+        state({ models: ['glm-4'], entries: [row({ ref: 'key-2', masked: 'sk-a...a1', models: ['glm-4'] })] }),
     })
     const panel = mount({ client })
     await flush()
@@ -374,18 +374,6 @@ describe('the default badge and model scope', () => {
       { op: 'setScope', args: ['ofox', 'key-2', undefined] },
     ])
   })
-
-  it('offers a discover control that probes every key at once', async () => {
-    const { client, calls } = recorder({ list: async () => state({ entries: [row({ ref: 'key-2' })] }) })
-    const panel = mount({ client })
-    await flush()
-
-    const footer = panel.root.querySelector('.bre-keys-footer')
-    expect(footer).not.toBeNull()
-    buttonByText(footer as HTMLElement, 'Detect models').click()
-    await flush()
-    expect(calls.filter((call) => call.op === 'discover')).toEqual([{ op: 'discover', args: ['ofox'] }])
-  })
 })
 
 describe('the actions on a row', () => {
@@ -395,6 +383,29 @@ describe('the actions on a row', () => {
     await flush()
 
     expect(actionsOf(rowOf(panel.root, 'key2'))).toEqual(['Delete', 'Label', 'Models', 'Edit'])
+  })
+
+  it('keeps the protocol picker inside the hover action tray, defaulting to the route', async () => {
+    const { client, calls } = recorder({ list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }) })
+    const panel = mount({ client })
+    await flush()
+
+    const line = rowOf(panel.root, 'key2')
+    // The picker is part of the hover-revealed action tray, not a control sitting
+    // on the resting row where it would always show.
+    const picker = line.querySelector<HTMLSelectElement>('.bre-keys-actions .bre-keys-protocol')
+    expect(picker).not.toBeNull()
+    expect(line.querySelector(':scope > .bre-keys-protocol')).toBeNull()
+    // The empty choice is the route's own API protocol, labelled as the default.
+    expect(picker?.querySelector('option[value=""]')?.textContent).toBe('Default protocol')
+
+    if (picker === null) throw new Error('no protocol picker')
+    picker.value = 'anthropic-messages'
+    picker.dispatchEvent(new Event('change', { bubbles: true }))
+    await flush()
+    expect(calls.filter((call) => call.op === 'setProtocol')).toEqual([
+      { op: 'setProtocol', args: ['ofox', 'key-2', 'anthropic-messages'] },
+    ])
   })
 
   it('asks twice before deleting, and can be talked out of it', async () => {

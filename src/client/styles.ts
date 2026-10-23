@@ -1930,32 +1930,76 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 
 .bre-keys .bre-effort-message { font-size: 11px; }
 
-/* The per-key protocol picker. A key that pins a protocol speaks that API shape;
-   "any protocol" (the empty value) keeps following the route's own. Sized to its
-   content so it reads as a small attribute of the row, not a field to fill in. */
+/* The per-key protocol picker. It lives inside .bre-keys-actions, so it must
+   look like the buttons beside it — same size, same colour, no box of its own —
+   or the hover tray reads as two different kinds of control. "Default protocol"
+   (the empty value) follows the route's own API protocol. */
 .bre-keys-protocol {
   flex: 0 0 auto;
-  height: 22px;
-  padding: 0 4px;
-  border: 1px solid var(--dsw-alias-line-regular, #d8dbe2);
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-elevated, #fff);
-  color: var(--dsw-alias-label-secondary, #6b7280);
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--dsw-alias-link);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
 }
 
-.bre-keys-protocol:hover { color: var(--dsw-alias-label-primary, #0f1115); }
+.bre-keys-protocol:hover { text-decoration: underline; }
 
 .bre-keys-protocol:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
 }
 
-.bre-keys-protocol:disabled { opacity: 0.55; cursor: default; }
+.bre-keys-protocol:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
+
+/* The provider card's address tag: the protocol family the base URL serves.
+   Quiet enough to read as a field prefix, never as a control. */
+.bre-endpoint-family {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  white-space: nowrap;
+}
+
+/* The injected second address row. Collapsed until 更多端点 is pressed, so the
+   card keeps its one-address shape until a second endpoint is actually wanted. */
+.bre-endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.bre-endpoint-url {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 更多端点: a grey text button beside the API-protocol label — the host's own
+   link affordance, not a filled button, so it never competes with Save. */
+.bre-endpoint-toggle {
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bre-endpoint-toggle:hover { color: var(--dsw-alias-label-primary, #0f1115); text-decoration: underline; }
+
+.bre-endpoint-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+  border-radius: 4px;
+}
 
 /* The model-scope chips: the models the provider actually offers, each a toggle.
    A selected chip takes the brand tint and a tick, so a quick glance tells which

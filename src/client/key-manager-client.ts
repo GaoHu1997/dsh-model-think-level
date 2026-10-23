@@ -16,6 +16,8 @@
  * key, and a failed request fails over to the next capable key. There is no
  * single "enabled" seat to point at any more — the old radio is gone — so a row's
  * {@link KeyRow.primary} flag (its position) is what the panel marks as default.
+ * A key's model scope is chosen from the models the route already offers (never
+ * the provider's whole catalog), so no auto-discovery step is needed.
  *
  * Fails closed. A refused fence, a route that is not in the settings document,
  * a store that cannot be written, a network error — each answers `{ ok: false }`
@@ -50,8 +52,8 @@ export interface KeyRow {
    */
   readonly masked?: string
   /**
-   * The model ids this key was discovered to serve. Absent means "unscoped": not
-   * probed yet, or deliberately left as a catch-all that serves whatever is left.
+   * The model ids this key serves, picked from the route's own added models.
+   * Absent means "unscoped": a catch-all that serves whatever is left.
    */
   readonly models?: readonly string[]
   /**
@@ -73,6 +75,12 @@ export interface KeyState {
   readonly ok: true
   readonly route: string
   readonly entries: readonly KeyRow[]
+  /**
+   * The model ids this route actually offers — the universe a key's scope is
+   * chosen from (the models already added to the provider, never its whole
+   * catalog). Absent when the route declares none yet.
+   */
+  readonly models?: readonly string[]
   /** The provider's two base URLs, keyed by protocol family. */
   readonly endpoints: KeyEndpoints
 }
@@ -104,8 +112,6 @@ export interface KeyManagerClient {
   setProtocol(route: string, ref: string, protocol: RouteProtocol | undefined): Promise<KeyAnswer>
   /** Set one protocol family's base URL (undefined/empty clears that side). */
   setEndpoints(route: string, openai: string | undefined, anthropic: string | undefined): Promise<KeyAnswer>
-  /** Probe every listed key's model list and record the scopes it found. */
-  discover(route: string): Promise<KeyAnswer>
   /** The stored value of one listed reference, or undefined. */
   reveal(route: string, ref: string): Promise<string | undefined>
 }
@@ -160,6 +166,7 @@ function stateOf(body: Record<string, unknown>): KeyState | undefined {
     if (row !== undefined) rows.push(row)
   }
   const route = body['route']
+  const routeModels = modelsOf(body['models'])
   const endpoints = body['endpoints']
   const openai = isRecord(endpoints) && typeof endpoints['openai'] === 'string' ? endpoints['openai'] : null
   const anthropic = isRecord(endpoints) && typeof endpoints['anthropic'] === 'string' ? endpoints['anthropic'] : null
@@ -167,6 +174,7 @@ function stateOf(body: Record<string, unknown>): KeyState | undefined {
     ok: true,
     route: typeof route === 'string' ? route : '',
     entries: rows,
+    ...(routeModels === undefined ? {} : { models: routeModels }),
     endpoints: { openai, anthropic },
   }
 }
@@ -228,7 +236,6 @@ export const httpKeyManagerClient: KeyManagerClient = {
     request(route, { op: 'protocol', ref, ...(protocol === undefined ? {} : { protocol }) }),
   setEndpoints: (route, openai, anthropic) =>
     request(route, { op: 'endpoints', openai: openai ?? '', anthropic: anthropic ?? '' }),
-  discover: route => request(route, { op: 'discover' }),
   async reveal(route, ref) {
     try {
       const response = await fetch(
