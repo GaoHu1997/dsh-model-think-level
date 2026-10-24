@@ -8,13 +8,19 @@
  *
  *   - **the fields are re-ordered** to display name → API protocol → base URL,
  *     so the protocol sits above the address it governs.
+ *   - **the API protocol is picked from cards.** The official `<select>` is kept
+ *     as the value the host reads, but it is hidden behind a row of plugin cards —
+ *     one per protocol, the one in force highlighted — so every choice is visible
+ *     without opening a dropdown (user item 1).
  *   - **the address is labelled by protocol family.** The official base-URL
  *     input is prefixed with "OpenAI"/"Anthropic" according to the protocol the
- *     card currently selects, so it is obvious which wire that URL serves.
- *   - **a second endpoint can be added.** A grey "更多端点" text button beside the
- *     API-protocol label reveals one more address row holding the OTHER family's
- *     URL. It persists to the route's `endpoints` in this plugin's key index,
- *     which is what a key pinned to that family signs against.
+ *     card currently selects, seated immediately LEFT of the input on its own
+ *     line — never stacked above it — so the tag reads as the field's prefix.
+ *   - **a second endpoint can be added.** A grey "更多端点" text button directly
+ *     under the API address — where the row it reveals appears — opens one more
+ *     address row holding the OTHER family's URL (user item 2). It persists to the
+ *     route's `endpoints` in this plugin's key index, which is what a key pinned
+ *     to that family signs against.
  *
  * The add card carries the same three fields, so the same decoration applies to
  * it — "添加供应商" is not left behind (user item 6).
@@ -23,6 +29,7 @@
  */
 
 import { endpointFamilyOf, type RouteProtocol } from '../../key-refs.js'
+import { ENDPOINTS_CHANGED_EVENT } from '../events.js'
 import { httpKeyManagerClient, type KeyManagerClient } from '../key-manager-client.js'
 
 /** The card-field label anchors this module needs, as the host spells them. */
@@ -52,10 +59,37 @@ type Family = 'openai' | 'anthropic'
 const SECOND_ROW_ATTR = 'data-bre-endpoint-row'
 /** Marks the family tag span. */
 const FAMILY_ATTR = 'data-bre-endpoint-family'
+/** Marks the address field whose tag shares a row with the input. */
+const ADDRESS_FIELD_ATTR = 'data-bre-endpoint-field'
+/** Marks the address field's own title inside that wrapper. */
+const ADDRESS_TITLE_ATTR = 'data-bre-endpoint-title'
 /** Marks the injected toggle button. */
 const TOGGLE_ATTR = 'data-bre-endpoint-toggle'
 /** Marks a card whose field order was already enforced. */
 const ORDERED_ATTR = 'data-bre-field-order'
+/** Holds the family the main address field currently serves, on that field. */
+const ADDRESS_FAMILY_ATTR = 'data-bre-endpoint-serving'
+/** Marks a protocol select whose changes the card already follows. */
+const PROTOCOL_WATCH_ATTR = 'data-bre-protocol-watch'
+/**
+ * The host's own address fields already listened to.
+ *
+ * Kept out of the DOM on purpose: marking the attribute would be a visible change
+ * to a card this plugin otherwise leaves untouched.
+ */
+const watchedAddresses = new WeakSet<HTMLElement>()
+/**
+ * The provider route, published by the tab pass on the card row
+ * (`src/client/injection/editor-tabs.ts` sets `data-bre-row-provider={route}`).
+ * The edit card carries no provider-id field, so this is the only route it has.
+ */
+const ROW_PROVIDER_ATTR = 'data-bre-row-provider'
+/** Marks the plugin-owned group that shows the API protocol as cards. */
+const PROTOCOL_CARDS_ATTR = 'data-bre-protocol-cards'
+/** Set on one card, holding the select value that card stands for. */
+const PROTOCOL_VALUE_ATTR = 'data-bre-protocol-value'
+/** Marks the host select the card group drives, and keeps out of sight. */
+const PROTOCOL_SOURCE_ATTR = 'data-bre-protocol-source'
 
 /** The first labelled input/select of a card, matched by label stem. */
 function controlByLabel(card: HTMLElement, labels: readonly string[]): HTMLElement | undefined {
@@ -144,9 +178,20 @@ function familyOf(card: HTMLElement, labels: EndpointLabels): Family | undefined
   return protocol === undefined ? undefined : endpointFamilyOf(protocol)
 }
 
-/** The route id the card holds, or '' while it is still unnamed. */
+/**
+ * The route id the card holds.
+ *
+ * The EDIT card names no route in a field at all — its provider-id field only
+ * exists on the create card — so the route is read from the row the editor sits
+ * in, which the tab pass and the provider-card slot both publish. Falling back to
+ * the create card's own field keeps the other form working.
+ */
 function routeOf(card: HTMLElement, labels: EndpointLabels): string {
-  return valueByLabel(card, labels.routeId)
+  const typed = valueByLabel(card, labels.routeId)
+  if (typed.length > 0) return typed
+  const row = card.closest<HTMLElement>(`[${ROW_PROVIDER_ATTR}]`)
+  const published = row?.getAttribute(ROW_PROVIDER_ATTR) ?? ''
+  return published.trim()
 }
 
 /** The family tag copy for one family. */
@@ -192,8 +237,49 @@ function enforceFieldOrder(card: HTMLElement, labels: EndpointLabels): void {
 }
 
 /**
+ * The node that renders an address field's TITLE text. The title sits beside the
+ * control (the official card: `<span>API 地址</span><input>`), so it is whichever
+ * child is neither the control nor this module's family tag. Reading the child
+ * that HAS text keeps the walk harmless on wrappers that only hold the input.
+ */
+function addressTitleOf(urlGroup: HTMLElement, control: HTMLElement): HTMLElement | undefined {
+  for (const node of Array.from(urlGroup.children)) {
+    if (node === control || node.contains(control)) continue
+    if (node.hasAttribute(FAMILY_ATTR)) continue
+    // The disclosure link is seated ON the label line, so it must never be
+    // mistaken for the label itself.
+    if (node.hasAttribute(TOGGLE_ATTR)) continue
+    if (!(node instanceof HTMLElement)) continue
+    if ((node.textContent ?? '').trim().length > 0) return node
+  }
+  return undefined
+}
+
+/**
+ * Mark the address field so the stylesheet can seat the family tag BESIDE the
+ * input. The official field stacks title and control in a column flex box, so a
+ * tag injected before the control lands on a line of its own above the input —
+ * the stylesheet turns a marked wrapper into a two-column grid whose title keeps
+ * the full width and whose tag and control share the address row.
+ *
+ * Marks are removed when there is no tag to place: a grid first column holding
+ * only a hidden tag still indents the input by the column gap, which would make
+ * a protocol the plugin cannot name look misaligned.
+ */
+function markAddressRow(urlGroup: HTMLElement, control: HTMLElement, tagged: boolean): void {
+  const title = addressTitleOf(urlGroup, control)
+  if (!tagged) {
+    urlGroup.removeAttribute(ADDRESS_FIELD_ATTR)
+    title?.removeAttribute(ADDRESS_TITLE_ATTR)
+    return
+  }
+  urlGroup.setAttribute(ADDRESS_FIELD_ATTR, '1')
+  title?.setAttribute(ADDRESS_TITLE_ATTR, '1')
+}
+
+/**
  * Keep a family tag immediately before the base-URL control, reading the family
- * of the protocol the card currently selects.
+ * of the protocol the card currently selects, and lay it out on the input's left.
  */
 function decorateAddressLabel(card: HTMLElement, labels: EndpointLabels, t: EndpointDeps['t']): void {
   const control = controlByLabel(card, labels.baseUrl)
@@ -202,11 +288,10 @@ function decorateAddressLabel(card: HTMLElement, labels: EndpointLabels, t: Endp
   if (urlGroup === undefined) return
   const text = familyText(familyOf(card, labels), t)
   let tag = urlGroup.querySelector<HTMLElement>(`[${FAMILY_ATTR}]`)
-  if (tag === null) {
-    // A protocol the plugin does not know has no family to name, so no tag is
-    // injected at all — an empty span would still be a node the host did not
-    // put there, and the card's own label already says "Base URL".
-    if (text.length === 0) return
+  // A protocol the plugin does not know has no family to name, so no tag is
+  // injected at all — an empty span would still be a node the host did not
+  // put there, and the card's own label already says "Base URL".
+  if (tag === null && text.length > 0) {
     tag = document.createElement('span')
     tag.setAttribute(FAMILY_ATTR, '1')
     tag.className = 'bre-endpoint-family'
@@ -216,80 +301,327 @@ function decorateAddressLabel(card: HTMLElement, labels: EndpointLabels, t: Endp
     if (label !== null && label.contains(control)) label.insertBefore(tag, control)
     else urlGroup.insertBefore(tag, control)
   }
-  if (tag.textContent !== text) tag.textContent = text
-  tag.hidden = text.length === 0
-}
-
-/**
- * The node that renders a field's TITLE text, which is the thing 更多端点 must sit
- * after. Official cards render the title as an element beside the control (a
- * `<span>` next to the `<select>`), so the title is the last element that is not
- * the control itself. Returns undefined when no such element exists, and the
- * caller then appends to the group instead.
- */
-function titleNodeOf(group: HTMLElement, labels: readonly string[]): HTMLElement | undefined {
-  const control = controlByLabel(group, labels)
-  if (control === undefined) return undefined
-  const holders = [group, control.closest('label')]
-  for (const holder of holders) {
-    if (holder === null) continue
-    const title = Array.from(holder.children).find(
-      child => child !== control && !child.contains(control) && (child.textContent ?? '').trim().length > 0,
-    )
-    if (title !== undefined) return title as HTMLElement
+  if (tag !== null) {
+    if (tag.textContent !== text) tag.textContent = text
+    tag.hidden = text.length === 0
   }
-  return undefined
+  markAddressRow(urlGroup, control, tag !== null && text.length > 0)
+  // Remember which family this field currently serves: switching the protocol to
+  // the other family swaps the two addresses, and this is what says whose value
+  // the main field is holding at that moment.
+  const family = familyOf(card, labels)
+  if (family === undefined) urlGroup.removeAttribute(ADDRESS_FAMILY_ATTR)
+  else urlGroup.setAttribute(ADDRESS_FAMILY_ATTR, family)
 }
 
 /**
- * Ensure the "更多端点" toggle sits immediately after the API-protocol TITLE.
- * Clicking it flips the injected second row: the row is a plugin node, so its
- * own state is the source of truth for its visibility.
+ * Write a value into the host's select and let the host hear about it.
+ *
+ * The card's fields are controlled by React, which caches the value it last saw
+ * on the node itself: assigning `select.value` refreshes that cache, so the
+ * `change` that follows looks like no change at all and is dropped. The prototype
+ * setter is used on purpose — it writes the DOM value and leaves the cache stale,
+ * which is precisely the difference React reacts to.
  */
-function decorateToggle(card: HTMLElement, labels: EndpointLabels, t: EndpointDeps['t']): void {
-  const protocolGroup = fieldGroupOf(card, labels.apiProtocol)
-  if (protocolGroup === undefined) return
-  const existing = protocolGroup.querySelector<HTMLButtonElement>(`[${TOGGLE_ATTR}]`)
+function writeSelect(select: HTMLSelectElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set
+  if (setter === undefined) select.value = value
+  else setter.call(select, value)
+  select.dispatchEvent(new Event('input', { bubbles: true }))
+  select.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
+/** Highlight the card that stands for the value the select currently holds. */
+function syncProtocolSelection(select: HTMLSelectElement, cards: HTMLElement): void {
+  for (const card of Array.from(cards.querySelectorAll<HTMLElement>(`[${PROTOCOL_VALUE_ATTR}]`))) {
+    const selected = card.getAttribute(PROTOCOL_VALUE_ATTR) === select.value
+    card.classList.toggle('is-selected', selected)
+    card.setAttribute('aria-checked', selected ? 'true' : 'false')
+    // Roving tabindex: one stop for the whole group, as a radiogroup behaves.
+    card.tabIndex = selected ? 0 : -1
+  }
+}
+
+/** Whether the cards already mirror the select's options exactly. */
+function cardsMatch(select: HTMLSelectElement, cards: HTMLElement): boolean {
+  const rendered = Array.from(cards.querySelectorAll<HTMLElement>(`[${PROTOCOL_VALUE_ATTR}]`))
+  const options = Array.from(select.options).filter(option => option.value.length > 0)
+  if (rendered.length !== options.length) return false
+  return options.every((option, index) => {
+    const card = rendered[index]
+    return (
+      card !== undefined &&
+      card.getAttribute(PROTOCOL_VALUE_ATTR) === option.value &&
+      (card.textContent ?? '') === (option.textContent ?? '').trim()
+    )
+  })
+}
+
+/** Fill the group with one card per selectable option of the select. */
+function fillProtocolCards(select: HTMLSelectElement, cards: HTMLElement): void {
+  cards.replaceChildren()
+  for (const option of Array.from(select.options)) {
+    const value = option.value
+    // The empty value is the host's "nothing chosen" state, not a protocol.
+    if (value.length === 0) continue
+    const card = document.createElement('button')
+    card.type = 'button'
+    card.className = 'bre-protocol-card'
+    card.setAttribute('role', 'radio')
+    card.setAttribute(PROTOCOL_VALUE_ATTR, value)
+    // The host's own option text, so the cards say exactly what the select said.
+    card.textContent = (option.textContent ?? value).trim()
+    card.addEventListener('click', () => {
+      if (select.value === value) return
+      writeSelect(select, value)
+      // Paint the answer before the host re-renders: a click must feel instant.
+      syncProtocolSelection(select, cards)
+    })
+    cards.appendChild(card)
+  }
+}
+
+/**
+ * Show the API protocol as cards: one per protocol the host offers, the one in
+ * force highlighted, so the whole choice is visible at once and the control reads
+ * as a picker rather than as a dropdown (user item 1).
+ *
+ * The host's own `<select>` stays in the DOM and stays the source of truth — the
+ * host reads it when saving, this module reads the family from it, and the cards
+ * write to it — but it is kept out of sight behind the group.
+ */
+function decorateProtocolCards(card: HTMLElement, labels: EndpointLabels): void {
+  const control = controlByLabel(card, labels.apiProtocol)
+  if (!(control instanceof HTMLSelectElement)) return
+  const group = fieldGroupOf(card, labels.apiProtocol)
+  if (group === undefined) return
+  let cards = group.querySelector<HTMLElement>(`[${PROTOCOL_CARDS_ATTR}]`)
+  if (cards === null) {
+    const fresh = document.createElement('div')
+    cards = fresh
+    fresh.setAttribute(PROTOCOL_CARDS_ATTR, '1')
+    fresh.className = 'bre-protocol-cards'
+    fresh.setAttribute('role', 'radiogroup')
+    const aria = control.getAttribute('aria-label')
+    if (aria !== null) fresh.setAttribute('aria-label', aria)
+    control.setAttribute(PROTOCOL_SOURCE_ATTR, '1')
+    control.after(fresh)
+    fillProtocolCards(control, fresh)
+    // Arrow keys walk the group, as a radiogroup is expected to: the roving
+    // tabindex leaves only the selected card in the tab order.
+    fresh.addEventListener('keydown', event => {
+      const step =
+        event.key === 'ArrowRight' || event.key === 'ArrowDown'
+          ? 1
+          : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+            ? -1
+            : 0
+      const all = Array.from(fresh.querySelectorAll<HTMLElement>(`[${PROTOCOL_VALUE_ATTR}]`))
+      if (all.length === 0) return
+      if (event.key === 'Home' || event.key === 'End') {
+        event.preventDefault()
+        const edge = event.key === 'Home' ? all[0] : all[all.length - 1]
+        edge?.click()
+        edge?.focus()
+        return
+      }
+      if (step === 0) return
+      event.preventDefault()
+      const current = all.findIndex(entry => entry.classList.contains('is-selected'))
+      const next = all[(Math.max(current, 0) + step + all.length) % all.length]
+      next?.click()
+      next?.focus()
+    })
+  } else if (!cardsMatch(control, cards)) {
+    fillProtocolCards(control, cards)
+  }
+  // Hidden, never removed: removing the select would take the value the host
+  // saves with it. Re-asserted every scan, because a re-render can drop the flag
+  // while the group it belongs to survives.
+  control.hidden = true
+  syncProtocolSelection(control, cards)
+}
+
+/**
+ * Ensure the "更多端点" toggle rides the API ADDRESS field's own label line, right
+ * after the label text (user item 4). The official label is an inline-flex box, so
+ * joining its children puts the link on the same line as "API 地址" with the host's
+ * own gap between them; the row it opens still appears directly under the field.
+ * Clicking it flips the injected second row, which is a plugin node, so its own
+ * state is the source of truth for its visibility.
+ */
+function decorateToggle(card: HTMLElement, labels: EndpointLabels, deps: EndpointDeps): void {
+  const existing = card.querySelector<HTMLButtonElement>(`[${TOGGLE_ATTR}]`)
+  // A card without a protocol field is not one of these provider cards at all:
+  // leave it exactly as it was rather than growing a stray disclosure on it.
+  if (fieldGroupOf(card, labels.apiProtocol) === undefined) {
+    existing?.remove()
+    return
+  }
+  const urlGroup = fieldGroupOf(card, labels.baseUrl)
+  if (urlGroup === undefined) return
+  const control = controlByLabel(card, labels.baseUrl)
+  if (control === undefined) return
+  const title = addressTitleOf(urlGroup, control)
+  if (title === undefined || title === existing) return
   if (existing !== null) {
-    if (existing.textContent !== t('keysMoreEndpoints')) existing.textContent = t('keysMoreEndpoints')
+    if (existing.textContent !== deps.t('keysMoreEndpoints')) existing.textContent = deps.t('keysMoreEndpoints')
+    // A card reshaped by an older build can still hold the link below the field;
+    // it is moved up onto the label line it now belongs to.
+    if (existing.parentElement !== title) title.append(existing)
     return
   }
   const button = document.createElement('button')
   button.type = 'button'
   button.setAttribute(TOGGLE_ATTR, '1')
   button.className = 'bre-endpoint-toggle'
-  button.textContent = t('keysMoreEndpoints')
+  button.textContent = deps.t('keysMoreEndpoints')
   button.addEventListener('click', () => {
     const row = card.querySelector<HTMLElement>(`[${SECOND_ROW_ATTR}]`)
     if (row === null) return
     row.hidden = !row.hidden
+    button.setAttribute('aria-expanded', row.hidden ? 'false' : 'true')
+    // Revealing the row is the one moment its value must be fresh, and a
+    // `hidden` flip fires no childList mutation the scan could ride — read it
+    // right here instead of waiting for the throttled scan-driven hydrate.
+    if (!row.hidden) {
+      const route = routeOf(card, labels)
+      if (route.length > 0) void hydrate(row, route, deps, card, labels)
+    }
   })
-  // Tuck it right after the title text, so it reads as part of the heading
-  // rather than as a control of its own.
-  const title = titleNodeOf(protocolGroup, labels.apiProtocol)
-  if (title !== undefined && title.parentElement !== null) title.parentElement.insertBefore(button, title.nextSibling)
-  else protocolGroup.appendChild(button)
+  title.append(button)
 }
 
-/** Per-route cache of the stored endpoints, so a scan does not re-read them. */
-const endpointCache = new Map<string, { openai: string; anthropic: string }>()
+/**
+ * Per-row ticket, so only the newest hydration pass may write the second address.
+ *
+ * The stored pair is always read from the host (a cache here went stale and merged
+ * one family's URL into the other), but overlapping reads still finish out of order:
+ * without a ticket a slow answer can overwrite the value a newer pass just showed.
+ */
+const hydrateTickets = new WeakMap<HTMLElement, number>()
+/**
+ * How often a visible second-address row may be re-read by the scan pass.
+ *
+ * The scan re-runs the decoration constantly (every debounced mutation burst),
+ * and each hydrate is a GET on the key route — unthrottled, a settings page
+ * left open floods the host with identical reads.
+ */
+const HYDRATE_MIN_INTERVAL_MS = 1_000
+/**
+ * When each row was last read, so the scan pass cannot flood the key route.
+ * The epoch rides along: a successful write bumps it (see {@link announceEndpoints}),
+ * and a row whose last read predates the bump is read again immediately — the
+ * post-write repaint must not wait out the interval.
+ */
+const hydrateReads = new WeakMap<HTMLElement, { at: number; epoch: number }>()
+/** Bumped by every endpoints write, invalidating the rows' read stamps. */
+let endpointsEpoch = 0
+/** Serialize whole-pair read/merge/write operations for each route. */
+const endpointUpdates = new Map<string, Promise<unknown>>()
 
-/** Fill the second row's input from the route's stored endpoints. */
-async function hydrate(row: HTMLElement, route: string, deps: EndpointDeps, other: Family): Promise<void> {
+/** Tell every listener the route's addresses just moved. */
+function announceEndpoints(route: string, endpoints: { openai: string | null; anthropic: string | null }): void {
+  // A write changed what every row of this route shows: the next decoration
+  // pass may read past the throttle (see hydrateReads).
+  endpointsEpoch += 1
+  if (typeof CustomEvent !== 'function') return
+  document.dispatchEvent(
+    new CustomEvent(ENDPOINTS_CHANGED_EVENT, {
+      detail: { route, openai: endpoints.openai ?? '', anthropic: endpoints.anthropic ?? '' },
+    }),
+  )
+}
+
+/**
+ * Fill the second row's input from the route's stored endpoints.
+ *
+ * Which family the row serves is read AGAIN once the host has answered: a
+ * protocol switch can land while the read is in flight, and the row then holds
+ * the other family — writing the old answer would put an address under the wrong
+ * name. The same reason makes a late answer harmful: two passes can overlap (a
+ * switch repaints the row, then the swap repaints it again), so only the LATEST
+ * pass may write, or a slow stale read would blank what the fresh one just showed.
+ */
+async function hydrate(
+  row: HTMLElement,
+  route: string,
+  deps: EndpointDeps,
+  card: HTMLElement,
+  labels: EndpointLabels,
+): Promise<void> {
   const input = row.querySelector<HTMLInputElement>('.bre-endpoint-url')
   if (input === null) return
-  let stored = endpointCache.get(route)
-  if (stored === undefined) {
-    const client = deps.client ?? httpKeyManagerClient
-    const answer = await client.list(route)
-    if (!answer.ok) return
-    stored = { openai: answer.endpoints.openai ?? '', anthropic: answer.endpoints.anthropic ?? '' }
-    endpointCache.set(route, stored)
-  }
+  const ticket = (hydrateTickets.get(row) ?? 0) + 1
+  hydrateTickets.set(row, ticket)
+  hydrateReads.set(row, { at: Date.now(), epoch: endpointsEpoch })
+  const client = deps.client ?? httpKeyManagerClient
+  const stored = await readEndpoints(route, client)
+  if (stored === undefined) return
+  if (hydrateTickets.get(row) !== ticket) return
   // Never clobber what the user is typing.
   if (document.activeElement === input) return
+  const family = familyOf(card, labels)
+  const other: Family | undefined = family === 'anthropic' ? 'openai' : family === 'openai' ? 'anthropic' : undefined
+  if (family === undefined || other === undefined) return
+  // Learn what the card's own field shows, so the picker can offer this family.
+  await adoptVisibleAddress(card, labels, deps, route, family, stored)
   const value = stored[other]
   if (input.value !== value) input.value = value
+}
+
+/**
+ * File the address the card ALREADY shows under the family its protocol names.
+ *
+ * The key picker offers a family only when the route holds an address for it, and
+ * that address lives in the plugin's `endpoints` pair — but the card's own field
+ * belongs to the host. A provider set up by typing straight into that field
+ * therefore had nothing filed, so its keys were offered no protocol of the very
+ * family the provider serves (user report: an Anthropic provider with its address
+ * filled offered no Anthropic protocol to pick). Learning what the field shows
+ * repairs those routes without retyping anything.
+ *
+ * Only an EMPTY side is filled. The pair is the plugin's own routing data and may
+ * deliberately hold a different URL for the same family, so an address that is
+ * already stored is never overwritten here; the second row is how that value is
+ * changed.
+ * @param card - the provider card.
+ * @param labels - the host's resolved label anchors.
+ * @param deps - the transport and copy.
+ * @param route - the route the card edits.
+ * @param family - the family the card's protocol currently names.
+ * @param stored - the pair just read from the store.
+ * @param overwrite - `true` for an edit the user made in that field (the value IS
+ *   the address now, even if one was stored); `false` for the pass that only
+ *   repairs a family the store never learned about.
+ */
+async function adoptVisibleAddress(
+  card: HTMLElement,
+  labels: EndpointLabels,
+  deps: EndpointDeps,
+  route: string,
+  family: Family,
+  stored: { openai: string; anthropic: string },
+  overwrite = false,
+): Promise<void> {
+  if (!overwrite && stored[family].length > 0) return
+  const control = controlByLabel(card, labels.baseUrl)
+  if (!(control instanceof HTMLInputElement)) return
+  // Half-typed input is not an address yet.
+  if (document.activeElement === control) return
+  const visible = control.value.trim()
+  if (visible.length === 0 && !overwrite) return
+  const client = deps.client ?? httpKeyManagerClient
+  await updateEndpoints(route, client, current => {
+    if (!overwrite && current[family].length > 0) return undefined
+    // Programmatic repaints (a protocol switch) re-dispatch a change carrying the
+    // value already stored; writing it again would be a pointless round trip.
+    if (current[family] === visible) return undefined
+    return {
+      openai: family === 'openai' ? visible : current.openai,
+      anthropic: family === 'anthropic' ? visible : current.anthropic,
+    }
+  })
 }
 
 /**
@@ -324,42 +656,264 @@ function decorateSecondRow(
     const client = deps.client ?? httpKeyManagerClient
     input.addEventListener('change', () => {
       const route = routeOf(card, labels)
-      const familyNow = familyOf(card, labels)
-      if (route.length === 0 || familyNow === undefined) return
+      if (route.length === 0) return
+      // Captured synchronously: the row repaints itself (and may rewrite the field)
+      // as soon as the stored pair arrives.
       const value = input.value.trim()
-      // A pinned key signs against ITS family's URL, so the second address is
-      // filed under the family the main address does not already serve.
-      const openai = familyNow === 'anthropic' ? value : ''
-      const anthropic = familyNow === 'openai' ? value : ''
-      void client.setEndpoints(route, openai, anthropic).then(answer => {
-        if (answer.ok) endpointCache.set(route, { openai: answer.endpoints.openai ?? '', anthropic: answer.endpoints.anthropic ?? '' })
-      })
+      // The host drops a non-http(s) side silently (normalizeRouteEndpoints);
+      // refusing it here keeps the field from showing an address the store
+      // never took.
+      if (value.length > 0 && !/^https?:\/\//i.test(value)) {
+        input.setAttribute('aria-invalid', 'true')
+        input.title = deps.t('keysEndpointInvalid')
+        return
+      }
+      if (input.hasAttribute('aria-invalid')) input.removeAttribute('aria-invalid')
+      if (input.hasAttribute('title')) input.removeAttribute('title')
+      void (async () => {
+        // The family is re-read after the answer: the user may have switched while
+        // the read was in flight, and filing under the stale one misfiles the URL.
+        await updateEndpoints(route, client, stored => {
+          const familyNow = familyOf(card, labels)
+          if (familyNow === undefined) return undefined
+          // A pinned key signs against ITS family's URL, so the second address is
+          // filed under the family the main field does not serve — and the main
+          // field's own side is carried over untouched, never blanked.
+          return {
+            openai: familyNow === 'anthropic' ? value : stored.openai,
+            anthropic: familyNow === 'openai' ? value : stored.anthropic,
+          }
+        })
+      })()
     })
     row.append(tag, input)
-    urlGroup.parentElement.insertBefore(row, urlGroup.nextSibling)
   }
+  // Directly under the address: after 更多端点 when it is there, so the link, the
+  // extra row and the field read as one block top-down.
+  const parent = urlGroup.parentElement
+  const toggle = parent.querySelector<HTMLElement>(`[${TOGGLE_ATTR}]`)
+  const anchor = toggle !== null && toggle.parentElement === parent ? toggle : urlGroup
+  if (row.previousElementSibling !== anchor) anchor.after(row)
+  // The link's caret follows the row it governs (the click handler keeps it in
+  // step afterwards).
+  if (toggle !== null) toggle.setAttribute('aria-expanded', row.hidden ? 'false' : 'true')
   const tag = row.querySelector<HTMLElement>('.bre-endpoint-family')
   const text = familyText(other, deps.t)
   if (tag !== null && tag.textContent !== text) tag.textContent = text
   const route = routeOf(card, labels)
-  if (route.length > 0) void hydrate(row, route, deps, other)
+  if (route.length > 0) {
+    // The scan re-runs this decoration constantly (and the hydrate is also the
+    // "learn the address the card already shows" repair, which must run while
+    // the row is still hidden), so the read is rate-limited per row instead:
+    // once per interval beats once per scan by every measure. A write bumps
+    // the epoch and reads past the interval, and the toggle hydrates the
+    // moment it reveals the row (see decorateToggle).
+    const last = hydrateReads.get(row)
+    if (last === undefined || last.epoch !== endpointsEpoch || Date.now() - last.at >= HYDRATE_MIN_INTERVAL_MS) {
+      void hydrate(row, route, deps, card, labels)
+    }
+  }
 }
 
 /**
- * Reshape one provider card: field order, address label, 更多端点 toggle and the
- * second endpoint row. Safe to call on every scan.
+ * Swap the address the card presents when the protocol crosses families.
+ *
+ * The host keeps ONE base URL per route, so the field cannot show two addresses at
+ * once: the plugin's `endpoints` pair is the only place both survive. On a crossing
+ * the value the field holds is filed under the family being LEFT (only when the user
+ * changed it — otherwise the store already has it), and the field then presents the
+ * family being ENTERED, blank when that family has no address yet so the user can
+ * type the one that protocol needs.
+ *
+ * Every merge reads the store first. Merging against a cached pair is what made an
+ * earlier build mirror one URL into both families.
+ */
+async function swapFamilyAddress(
+  card: HTMLElement,
+  labels: EndpointLabels,
+  deps: EndpointDeps,
+  previous: Family,
+  next: Family,
+): Promise<void> {
+  const route = routeOf(card, labels)
+  const control = controlByLabel(card, labels.baseUrl)
+  if (route.length === 0 || !(control instanceof HTMLInputElement)) return
+  const client = deps.client ?? httpKeyManagerClient
+  let stored = await readEndpoints(route, client)
+  if (stored === undefined) return
+  // Another switch landed while this read was in flight: that click's own pass owns
+  // the field from here, and filing this now-stale value would misfile it.
+  if (familyOf(card, labels) !== next) return
+  const leaving = control.value.trim()
+  if (leaving.length > 0 && leaving !== stored[previous]) {
+    const answer = await updateEndpoints(route, client, current => {
+      if (familyOf(card, labels) !== next) return undefined
+      return {
+        openai: previous === 'openai' ? leaving : current.openai,
+        anthropic: previous === 'anthropic' ? leaving : current.anthropic,
+      }
+    })
+    if (answer === undefined) return
+    stored = answer
+    if (familyOf(card, labels) !== next) return
+  }
+  const arriving = stored[next]
+  if (control.value === arriving) return
+  // The host owns this input: write through the prototype setter so its onChange
+  // sees a change (a plain assignment only refreshes React's cached value).
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+  if (setter === undefined) control.value = arriving
+  else setter.call(control, arriving)
+  control.dispatchEvent(new Event('input', { bubbles: true }))
+  control.dispatchEvent(new Event('change', { bubbles: true }))
+  // The row now carries the family just left, so repaint it from the new state.
+  decorateSecondRow(card, labels, deps)
+}
+
+/**
+ * Store both addresses of a route and publish the result.
+ *
+ * Both sides always travel together: a write that carried only the field the user
+ * touched would blank the other one. Every caller merges with what the store holds
+ * first, and this is the single place that records and announces the outcome.
+ * @returns the stored pair, or undefined when the write was refused.
+ */
+async function updateEndpoints(
+  route: string,
+  client: KeyManagerClient,
+  merge: (stored: { openai: string; anthropic: string }) => { openai: string; anthropic: string } | undefined,
+): Promise<{ openai: string; anthropic: string } | undefined> {
+  const previous = endpointUpdates.get(route) ?? Promise.resolve()
+  const update = previous.then(async () => {
+    const stored = await readEndpoints(route, client)
+    if (stored === undefined) return undefined
+    const next = merge(stored)
+    if (next === undefined) return undefined
+    const answer = await client.setEndpoints(route, next.openai, next.anthropic)
+    if (!answer.ok) return undefined
+    const result = { openai: answer.endpoints.openai ?? '', anthropic: answer.endpoints.anthropic ?? '' }
+    announceEndpoints(route, answer.endpoints)
+    return result
+  })
+  endpointUpdates.set(route, update)
+  try {
+    return await update
+  } finally {
+    if (endpointUpdates.get(route) === update) endpointUpdates.delete(route)
+  }
+}
+
+/**
+ * The route's stored addresses, straight from the host.
+ *
+ * No cache: every caller merges one family's URL with the other family's, so the
+ * other side has to be what the store really holds. A cached pair went stale after a
+ * write from another card or window and merged one family's URL into BOTH sides,
+ * which also made the key picker offer a family whose address was already cleared.
+ * @returns the pair, or undefined when the read was refused.
+ */
+async function readEndpoints(
+  route: string,
+  client: KeyManagerClient,
+): Promise<{ openai: string; anthropic: string } | undefined> {
+  const answer = await client.list(route)
+  if (!answer.ok) return undefined
+  return { openai: answer.endpoints.openai ?? '', anthropic: answer.endpoints.anthropic ?? '' }
+}
+
+/**
+ * Follow the protocol a card selects: relabel the address block for the family it
+ * now names and, when the family changed, move the addresses with it (user: the
+ * address below the protocol has to change with the protocol, not on the next
+ * tab switch).
+ */
+function followProtocolFamily(card: HTMLElement, labels: EndpointLabels, deps: EndpointDeps): void {
+  const urlGroup = fieldGroupOf(card, labels.baseUrl)
+  const next = familyOf(card, labels)
+  const previous = urlGroup?.getAttribute(ADDRESS_FAMILY_ATTR)
+  // Repaint first: the swap below waits on the host.
+  decorateAddressLabel(card, labels, deps.t)
+  decorateSecondRow(card, labels, deps)
+  if (urlGroup === undefined || previous === undefined || next === undefined) return
+  if (previous === next) return
+  if (previous !== 'openai' && previous !== 'anthropic') return
+  void swapFamilyAddress(card, labels, deps, previous, next)
+}
+
+/**
+ * Reshape one provider card: field order, protocol cards, address label, the
+ * 更多端点 toggle and the second endpoint row. Safe to call on every scan.
  * @param card - the official card element.
  * @param labels - the host's resolved label anchors.
  * @param deps - the transport and copy.
  */
 export function decorateProviderCard(card: HTMLElement, labels: EndpointLabels, deps: EndpointDeps): void {
   enforceFieldOrder(card, labels)
+  decorateProtocolCards(card, labels)
   decorateAddressLabel(card, labels, deps.t)
-  decorateToggle(card, labels, deps.t)
+  decorateToggle(card, labels, deps)
   decorateSecondRow(card, labels, deps)
+  // The address block follows the protocol as soon as it changes, whoever changed
+  // it: our cards dispatch a change on the host's select, and so does the host.
+  const select = controlByLabel(card, labels.apiProtocol)
+  if (select instanceof HTMLSelectElement && !select.hasAttribute(PROTOCOL_WATCH_ATTR)) {
+    select.setAttribute(PROTOCOL_WATCH_ATTR, '1')
+    select.addEventListener('change', () => followProtocolFamily(card, labels, deps))
+  }
+  // The card's own field is the host's, but it is also the address the family its
+  // protocol names serves: file an edit of it, replacing what the route held for
+  // that family, so keys pinned to that protocol dial the address the card shows
+  // (see adoptVisibleAddress).
+  const address = controlByLabel(card, labels.baseUrl)
+  if (address instanceof HTMLInputElement && !watchedAddresses.has(address)) {
+    watchedAddresses.add(address)
+    address.addEventListener('change', () => {
+      const route = routeOf(card, labels)
+      const family = familyOf(card, labels)
+      if (route.length === 0 || family === undefined) return
+      const client = deps.client ?? httpKeyManagerClient
+      void (async () => {
+        const stored = await readEndpoints(route, client)
+        if (stored === undefined) return
+        // A switch may have landed while the read was in flight.
+        if (familyOf(card, labels) !== family) return
+        await adoptVisibleAddress(card, labels, deps, route, family, stored, true)
+      })()
+    })
+  }
 }
 
-/** Drop the per-route endpoint cache (called on teardown). */
+/**
+ * Hand the protocol selects back to the host (called on teardown): a hidden select
+ * is this module's doing, so it must not outlive the module.
+ */
 export function forgetEndpointCache(): void {
-  endpointCache.clear()
+  for (const select of Array.from(document.querySelectorAll<HTMLSelectElement>(`select[${PROTOCOL_SOURCE_ATTR}]`))) {
+    select.hidden = false
+    select.removeAttribute(PROTOCOL_SOURCE_ATTR)
+  }
+}
+
+/**
+ * Hand the provider cards back to the host entirely (called on teardown): every
+ * node and attribute this module injected — the hidden protocol selects, the
+ * protocol card groups, the family tags, the 更多端点 toggle and the second
+ * address row — comes out, so a disabled plugin leaves the official card
+ * exactly as the page built it.
+ */
+export function teardownProviderEndpoints(): void {
+  forgetEndpointCache()
+  for (const node of Array.from(document.querySelectorAll<HTMLElement>(
+    `[${SECOND_ROW_ATTR}], [${TOGGLE_ATTR}], [${PROTOCOL_CARDS_ATTR}], [${FAMILY_ATTR}]`,
+  ))) {
+    node.remove()
+  }
+  for (const marked of Array.from(document.querySelectorAll<HTMLElement>(
+    `[${ORDERED_ATTR}], [${ADDRESS_FIELD_ATTR}], [${ADDRESS_TITLE_ATTR}], [${ADDRESS_FAMILY_ATTR}]`,
+  ))) {
+    marked.removeAttribute(ORDERED_ATTR)
+    marked.removeAttribute(ADDRESS_FIELD_ATTR)
+    marked.removeAttribute(ADDRESS_TITLE_ATTR)
+    marked.removeAttribute(ADDRESS_FAMILY_ATTR)
+  }
 }

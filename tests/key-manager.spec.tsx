@@ -21,7 +21,8 @@ const COPY: Record<string, string> = {
   keysLoading: 'Loading keys…',
   keysAdd: 'Add another key',
   keysAddConfirm: 'Add',
-  keysDefault: 'Default',
+  keysEnable: 'Enable {name}',
+  keysDisable: 'Disable {name}',
   keysMissing: 'Not stored',
   keysEdit: 'Edit',
   keysRemove: 'Delete',
@@ -51,10 +52,14 @@ const COPY: Record<string, string> = {
   keysDiscovered: 'Detected models for {count} keys.',
   keysProtocolLabel: 'Protocol for {name}',
   keysProtocolDefault: 'Default protocol',
+  keysProtocolDefaultHint: 'Follows the provider’s own protocol.',
   keysProtocolAny: 'Any protocol',
   keysProtocolAnthropic: 'Anthropic',
+  keysProtocolAnthropicHint: 'Anthropic API · Claude models',
   keysProtocolOpenAI: 'Chat Completions',
+  keysProtocolOpenAIHint: 'OpenAI API · GPT models, most agents',
   keysProtocolResponses: 'Responses',
+  keysProtocolResponsesHint: 'OpenAI API · Codex',
   keysProtocolSaved: 'Protocol saved.',
   keysOpenAIUrl: 'OpenAI base URL',
   keysAnthropicUrl: 'Anthropic base URL',
@@ -62,6 +67,9 @@ const COPY: Record<string, string> = {
   keysEndpointsSaved: 'Base URLs saved.',
   keysUnreachable: 'The plugin’s key route did not answer.',
   keysPanelFailed: 'Key manager failed to render',
+  keysMergedOffer: '{count} more models are served by your keys but not added to this provider: {models}.',
+  keysMergedApply: 'Add them',
+  keysMergedApplied: 'Models added to the provider.',
 }
 
 const t = (key: string, params?: Record<string, string | number>): string => {
@@ -75,7 +83,7 @@ function state(over: Partial<KeyState> = {}): KeyState {
 }
 
 function row(over: Partial<KeyRow> & { ref: string }): KeyRow {
-  return { primary: false, configured: true, ...over }
+  return { enabled: true, configured: true, ...over }
 }
 
 /** A transport that records what it was asked, and answers what the test says. */
@@ -91,8 +99,10 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
     replace: async () => state(),
     remove: async () => state(),
     setScope: async () => state(),
+    setEnabled: async () => state(),
     setProtocol: async () => state(),
     setEndpoints: async () => state(),
+    applyMerged: async () => state(),
     reveal: async () => undefined,
     ...script,
   }
@@ -121,6 +131,10 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
       calls.push({ op: 'setScope', args: [route, ref, models] })
       return base.setScope(route, ref, models)
     },
+    setEnabled: (route, ref, enabled) => {
+      calls.push({ op: 'setEnabled', args: [route, ref, enabled] })
+      return base.setEnabled(route, ref, enabled)
+    },
     setProtocol: (route, ref, protocol) => {
       calls.push({ op: 'setProtocol', args: [route, ref, protocol] })
       return base.setProtocol(route, ref, protocol)
@@ -128,6 +142,10 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
     setEndpoints: (route, openai, anthropic) => {
       calls.push({ op: 'setEndpoints', args: [route, openai, anthropic] })
       return base.setEndpoints(route, openai, anthropic)
+    },
+    applyMerged: (route) => {
+      calls.push({ op: 'applyMerged', args: [route] })
+      return base.applyMerged(route)
     },
     reveal: (route, ref) => {
       calls.push({ op: 'reveal', args: [route, ref] })
@@ -189,8 +207,18 @@ function rowOf(root: HTMLElement, name: string): HTMLElement {
   return found
 }
 
+/** The action links on a row — the picker is a control, not one of them. */
 function actionsOf(row: HTMLElement): string[] {
-  return Array.from(row.querySelectorAll('.bre-keys-actions button')).map((button) => button.textContent ?? '')
+  return Array.from(row.querySelectorAll<HTMLElement>('.bre-keys-actions .bre-link-button')).map(
+    (button) => button.textContent ?? '',
+  )
+}
+
+/** The values the open protocol menu offers, in its own order. */
+function menuValues(): string[] {
+  return Array.from(document.querySelectorAll('.bre-protocol-menu .bre-protocol-option')).map(
+    (option) => option.getAttribute('data-protocol-value') ?? '',
+  )
 }
 
 function formRowOf(root: HTMLElement): HTMLElement | null {
@@ -289,13 +317,13 @@ describe('the list', () => {
     expect(rowOf(panel.root, 'sk-d...d1').dataset['state']).toBe('missing')
   })
 
-  it('marks a missing key as such, and shows a default badge and model scope on every row', async () => {
+  it('marks a missing key as such, and opens every row with its enable check', async () => {
     const { client } = recorder({
       list: async () =>
         state({
           entries: [
-            row({ ref: 'A', primary: false, configured: false, masked: 'sk-a...a1', models: ['glm-4'] }),
-            row({ ref: 'B', primary: true, configured: true, masked: 'sk-b...b1' }),
+            row({ ref: 'A', configured: false, masked: 'sk-a...a1', models: ['glm-4'] }),
+            row({ ref: 'B', configured: true, masked: 'sk-b...b1' }),
           ],
         }),
     })
@@ -306,17 +334,130 @@ describe('the list', () => {
     const ready = rowOf(panel.root, 'sk-b...b1')
     expect(missing.dataset['state']).toBe('missing')
     expect(ready.dataset['state']).toBe('ready')
-    // Exactly one default badge, on the first key in preference order; the scope
-    // label states what each key was discovered to serve, or that it is a catch-all.
+    // Every row is in use until switched off, so both checks are lit. The scope
+    // rides on its own action button — its label IS the summary, so there is no
+    // separate text beside the key any more.
     expect(missing.querySelector('.bre-keys-default')).toBeNull()
-    expect(ready.querySelector('.bre-keys-default')?.textContent).toBe('Default')
-    expect(missing.querySelector('.bre-keys-scope-label')?.textContent).toBe('1 models')
-    expect(ready.querySelector('.bre-keys-scope-label')?.textContent).toBe('All models')
+    expect(missing.querySelector('.bre-keys-toggle')?.getAttribute('aria-pressed')).toBe('true')
+    expect(ready.querySelector('.bre-keys-toggle')?.getAttribute('aria-pressed')).toBe('true')
+    expect(buttonByText(missing, '1 models').className).toContain('bre-link-button')
+    expect(buttonByText(ready, 'All models').className).toContain('bre-link-button')
+    expect(panel.root.querySelector('.bre-keys-scope-label')).toBeNull()
   })
 })
 
-describe('the default badge and model scope', () => {
-  it('marks the first key as default and offers a models action on every row', async () => {
+describe('the merged catalogue', () => {
+  it('offers the models the keys serve that the provider does not declare, and adds them on click', async () => {
+    let merged = true
+    const { client, calls } = recorder({
+      list: async () =>
+        state({
+          entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
+          models: ['qwen-max'],
+          ...merged ? { mergedModels: ['qwen-max', 'glm-4'], unmergedModels: ['glm-4'] } : {},
+        }),
+      applyMerged: async () => {
+        merged = false
+        return state({
+          entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
+          models: ['qwen-max', 'glm-4'],
+        })
+      },
+    })
+    const panel = mount({ client })
+    await flush()
+
+    const note = panel.root.querySelector('.bre-keys-note')
+    expect(note?.textContent).toContain('1 more models')
+    expect(note?.textContent).toContain('glm-4')
+    // Reading the list never writes: only the click does.
+    expect(calls.filter(call => call.op === 'applyMerged')).toHaveLength(0)
+
+    buttonByText(note as HTMLElement, 'Add them').click()
+    await flush()
+
+    expect(calls.filter(call => call.op === 'applyMerged')).toHaveLength(1)
+    expect(panel.root.querySelector('.bre-keys-note')).toBeNull()
+    expect(panel.root.querySelector('.bre-effort-message')?.textContent).toBe('Models added to the provider.')
+  })
+
+  it('offers nothing when every advertised model is already declared', async () => {
+    const { client } = recorder({
+      list: async () =>
+        state({
+          entries: [row({ ref: 'A' })],
+          models: ['qwen-max'],
+          mergedModels: ['qwen-max'],
+        }),
+    })
+    const panel = mount({ client })
+    await flush()
+
+    expect(panel.root.querySelector('.bre-keys-note')).toBeNull()
+  })
+
+  it('lets a scope be chosen from the merged models too', async () => {
+    // A key serving a model the provider has not declared yet is exactly the case
+    // scopes exist for, so the chips must offer it rather than hide it.
+    const { client } = recorder({
+      list: async () =>
+        state({
+          entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
+          models: ['qwen-max'],
+          mergedModels: ['qwen-max', 'glm-4'],
+          unmergedModels: ['glm-4'],
+        }),
+    })
+    const panel = mount({ client })
+    await flush()
+
+    buttonByText(rowOf(panel.root, 'a'), 'All models').click()
+    await flush()
+
+    const chips = Array.from(panel.root.querySelectorAll('.bre-keys-chip')).map(chip => chip.textContent?.trim())
+    expect(chips).toEqual(['qwen-max', 'glm-4'])
+  })
+})
+
+describe('the enable check and model scope', () => {
+  it('switches a key into and out of use from the circular check on its row', async () => {
+    const { client, calls } = recorder({
+      list: async () =>
+        state({
+          entries: [
+            row({ ref: 'key-1', masked: 'sk-a...a1' }),
+            // A key the host says is switched off: grey check, dimmed row.
+            row({ ref: 'key-2', masked: 'sk-b...b1', enabled: false }),
+          ],
+        }),
+    })
+    const panel = mount({ client })
+    await flush()
+
+    const on = rowOf(panel.root, 'sk-a...a1')
+    const off = rowOf(panel.root, 'sk-b...b1')
+    expect(on.className).not.toContain('is-off')
+    expect(off.className).toContain('is-off')
+    const onCheck = on.querySelector<HTMLButtonElement>('.bre-keys-toggle')
+    const offCheck = off.querySelector<HTMLButtonElement>('.bre-keys-toggle')
+    expect(onCheck?.getAttribute('aria-pressed')).toBe('true')
+    expect(offCheck?.getAttribute('aria-pressed')).toBe('false')
+    // The state is drawn, not just coloured: off is a bare circle with nothing
+    // inside, on is the circle with the tick inside it.
+    expect(onCheck?.querySelectorAll('.bre-keys-toggle-mark svg')).toHaveLength(2)
+    expect(offCheck?.querySelectorAll('.bre-keys-toggle-mark svg')).toHaveLength(1)
+
+    // Clicking the grey check switches the key back into use; the label names
+    // the ACTION, so a lit check offers "Disable" and a grey one "Enable".
+    expect(offCheck?.getAttribute('aria-label')).toBe('Enable sk-b...b1')
+    offCheck?.click()
+    await flush()
+    expect(calls.filter((call) => call.op === 'setEnabled')).toEqual([
+      { op: 'setEnabled', args: ['ofox', 'key-2', true] },
+    ])
+  })
+
+  it('offers the model scope on every row', async () => {
     const { client, calls } = recorder({
       list: async () =>
         state({
@@ -324,22 +465,20 @@ describe('the default badge and model scope', () => {
           // never the provider's whole catalog.
           models: ['glm-4', 'glm-4-flash', 'glm-4-air'],
           entries: [
-            row({ ref: 'key-1', primary: true, masked: 'sk-a...a1' }),
-            row({ ref: 'key-2', primary: false, masked: 'sk-b...b1', models: ['glm-4', 'glm-4-flash'] }),
+            row({ ref: 'key-1', masked: 'sk-a...a1' }),
+            row({ ref: 'key-2', masked: 'sk-b...b1', models: ['glm-4', 'glm-4-flash'] }),
           ],
         }),
     })
     const panel = mount({ client })
     await flush()
 
-    const badges = Array.from(panel.root.querySelectorAll('.bre-keys-default'))
-    expect(badges).toHaveLength(1)
-    expect(rowOf(panel.root, 'sk-a...a1').contains(badges[0] ?? null)).toBe(true)
-    expect(rowOf(panel.root, 'sk-b...b1').querySelector('.bre-keys-scope-label')?.textContent).toBe('2 models')
+    expect(rowOf(panel.root, 'sk-a...a1').querySelector('.bre-keys-scope-label')).toBeNull()
+    expect(buttonByText(rowOf(panel.root, 'sk-b...b1'), '2 models').className).toContain('bre-link-button')
 
     // The scope editor opens under the row it edits, as chips of the route's
     // added models, with the row's current scope already ticked.
-    buttonByText(rowOf(panel.root, 'sk-b...b1'), 'Models').click()
+    buttonByText(rowOf(panel.root, 'sk-b...b1'), '2 models').click()
     await flush()
     const chips = Array.from((formRowOf(panel.root) as HTMLElement).querySelectorAll<HTMLButtonElement>('.bre-keys-chip'))
     expect(chips.map((chip) => chip.textContent)).toEqual(['glm-4', 'glm-4-flash', 'glm-4-air'])
@@ -363,7 +502,7 @@ describe('the default badge and model scope', () => {
     const panel = mount({ client })
     await flush()
 
-    buttonByText(rowOf(panel.root, 'sk-a...a1'), 'Models').click()
+    buttonByText(rowOf(panel.root, 'sk-a...a1'), '1 models').click()
     await flush()
     // The "all models" shortcut empties the selection; saving then clears it.
     buttonByText(formRowOf(panel.root) as HTMLElement, 'All models').click()
@@ -382,7 +521,7 @@ describe('the actions on a row', () => {
     const panel = mount({ client })
     await flush()
 
-    expect(actionsOf(rowOf(panel.root, 'key2'))).toEqual(['Delete', 'Label', 'Models', 'Edit'])
+    expect(actionsOf(rowOf(panel.root, 'key2'))).toEqual(['Delete', 'Label', 'All models', 'Edit'])
   })
 
   it('keeps the protocol picker inside the hover action tray, defaulting to the route', async () => {
@@ -399,60 +538,145 @@ describe('the actions on a row', () => {
     const line = rowOf(panel.root, 'key2')
     // The picker is part of the hover-revealed action tray, not a control sitting
     // on the resting row where it would always show.
-    const picker = line.querySelector<HTMLSelectElement>('.bre-keys-actions .bre-keys-protocol')
+    const picker = line.querySelector<HTMLButtonElement>('.bre-keys-actions .bre-keys-protocol')
     expect(picker).not.toBeNull()
     expect(line.querySelector(':scope > .bre-keys-protocol')).toBeNull()
-    // The empty choice is the route's own API protocol, labelled as the default.
-    expect(picker?.querySelector('option[value=""]')?.textContent).toBe('Default protocol')
+    // It wears its own chevron, and reads as the value in force.
+    expect(line.querySelector('.bre-keys-protocol-caret')?.textContent).toBe('›')
+    expect(picker?.querySelector('.bre-keys-protocol-label')?.textContent).toBe('Default protocol')
+    expect(picker?.getAttribute('aria-haspopup')).toBe('listbox')
 
     if (picker === null) throw new Error('no protocol picker')
-    picker.value = 'anthropic-messages'
-    picker.dispatchEvent(new Event('change', { bubbles: true }))
+    picker.click()
+    await flush()
+
+    // The menu is drawn on <body>, beside the name of each protocol a line that
+    // says what it is for — the reason this is not a native select.
+    const menu = document.querySelector<HTMLElement>('.bre-protocol-menu')
+    expect(menu).not.toBeNull()
+    expect(menu?.querySelector('.bre-protocol-menu-title')?.textContent).toBe('Protocol for key2')
+    const options = Array.from(menu?.querySelectorAll<HTMLButtonElement>('.bre-protocol-option') ?? [])
+    expect(options.map((option) => option.getAttribute('data-protocol-value'))).toEqual(['', 'anthropic-messages'])
+    expect(options.map((option) => option.querySelector('.bre-protocol-option-title')?.textContent)).toEqual([
+      'Default protocol',
+      'Anthropic',
+    ])
+    expect(options.map((option) => option.querySelector('.bre-protocol-option-hint')?.textContent)).toEqual([
+      'Follows the provider’s own protocol.',
+      'Anthropic API · Claude models',
+    ])
+    // The choice in force is ticked, and only it.
+    expect(options.map((option) => option.getAttribute('aria-selected'))).toEqual(['true', 'false'])
+    expect(options[0].querySelector('.bre-protocol-option-mark svg')).not.toBeNull()
+    expect(options[1].querySelector('.bre-protocol-option-mark svg')).toBeNull()
+
+    options[1].click()
     await flush()
     expect(calls.filter((call) => call.op === 'setProtocol')).toEqual([
       { op: 'setProtocol', args: ['ofox', 'key-2', 'anthropic-messages'] },
     ])
+    // Picking closes the menu.
+    expect(document.querySelector('.bre-protocol-menu')).toBeNull()
   })
 
-  it('only offers a protocol whose address the provider actually configured', async () => {
-    // No addresses recorded: every pin would point at a URL the provider never
-    // named, so only the default stays selectable (user rule 3).
-    const none = recorder({
+  it('closes the protocol menu on Escape and on an outside press', async () => {
+    const { client } = recorder({ list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }) })
+    const panel = mount({ client })
+    await flush()
+
+    const picker = rowOf(panel.root, 'key2').querySelector<HTMLButtonElement>('.bre-keys-protocol')
+    if (picker === null) throw new Error('no protocol picker')
+
+    picker.click()
+    await flush()
+    expect(document.querySelector('.bre-protocol-menu')).not.toBeNull()
+    // Escape arrives from the focused option, which is where the menu puts focus.
+    const focused = document.activeElement
+    if (focused === null) throw new Error('the menu focused nothing')
+    focused.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flush()
+    expect(document.querySelector('.bre-protocol-menu')).toBeNull()
+
+    picker.click()
+    await flush()
+    expect(document.querySelector('.bre-protocol-menu')).not.toBeNull()
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    await flush()
+    expect(document.querySelector('.bre-protocol-menu')).toBeNull()
+  })
+
+  it('offers only the protocols whose address the provider configured', async () => {
+    // User item 3: a pinned key signs against ITS family's URL, so a family with
+    // no address is not a choice — only the default remains.
+    const { client } = recorder({
       list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }),
     })
-    const bare = mount({ client: none.client })
+    const panel = mount({ client })
     await flush()
-    const barePicker = rowOf(bare.root, 'key2').querySelector<HTMLSelectElement>('.bre-keys-protocol')
-    const disabledOf = (picker: HTMLSelectElement | null): string[] =>
-      Array.from(picker?.querySelectorAll('option[disabled]') ?? []).map(option => option.getAttribute('value') ?? '')
-    expect(disabledOf(barePicker)).toEqual(['anthropic-messages', 'openai-completions', 'openai-responses'])
 
-    // An Anthropic address configured: only the Anthropic family unlocks.
-    const anthropicOnly = recorder({
+    const picker = rowOf(panel.root, 'key2').querySelector<HTMLButtonElement>('.bre-keys-protocol')
+    if (picker === null) throw new Error('no protocol picker')
+    expect(picker.disabled).toBe(false)
+    picker.click()
+    await flush()
+    expect(menuValues()).toEqual([''])
+  })
+
+  it('offers the families that have an address, and keeps a pin that lost its own', async () => {
+    const { client } = recorder({
       list: async () =>
         state({
-          entries: [row({ ref: 'key-2', alias: 'key2' })],
-          endpoints: { openai: null, anthropic: 'https://anthropic.example' },
+          entries: [row({ ref: 'key-2', alias: 'key2', protocol: 'anthropic-messages' }), row({ ref: 'key-3', alias: 'key3' })],
+          endpoints: { openai: 'https://openai.example/v1', anthropic: null },
         }),
     })
-    const half = mount({ client: anthropicOnly.client })
+    const panel = mount({ client })
     await flush()
-    expect(disabledOf(rowOf(half.root, 'key2').querySelector<HTMLSelectElement>('.bre-keys-protocol'))).toEqual([
-      'openai-completions',
-      'openai-responses',
-    ])
 
-    // Both families configured: nothing is refused.
-    const both = recorder({
-      list: async () =>
-        state({
-          entries: [row({ ref: 'key-2', alias: 'key2' })],
-          endpoints: { openai: 'https://openai.example/v1', anthropic: 'https://anthropic.example' },
-        }),
+    const values = async (ref: string) => {
+      const picker = rowOf(panel.root, ref).querySelector<HTMLButtonElement>('.bre-keys-protocol')
+      if (picker === null) throw new Error('no protocol picker')
+      picker.click()
+      await flush()
+      const offered = menuValues()
+      picker.click()
+      await flush()
+      return offered
+    }
+    // Only the OpenAI family has an address, so only its two wires are on offer.
+    expect(await values('key3')).toEqual(['', 'openai-completions', 'openai-responses'])
+    // The pinned key keeps its own protocol even though that family has no address
+    // any more: the row must not come back reading as "Default protocol".
+    expect(await values('key2')).toEqual(['', 'anthropic-messages', 'openai-completions', 'openai-responses'])
+  })
+
+  it('re-reads the addresses when the provider card reports a change', async () => {
+    // The card above owns the two base URLs and this list decides its offers from
+    // them, so a change there has to reach this list without a reload.
+    let endpoints: KeyState['endpoints'] = { openai: null, anthropic: null }
+    const { client } = recorder({
+      list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })], endpoints }),
     })
-    const full = mount({ client: both.client })
+    const panel = mount({ client })
     await flush()
-    expect(disabledOf(rowOf(full.root, 'key2').querySelector<HTMLSelectElement>('.bre-keys-protocol'))).toEqual([])
+
+    const values = async () => {
+      const picker = rowOf(panel.root, 'key2').querySelector<HTMLButtonElement>('.bre-keys-protocol')
+      if (picker === null) throw new Error('no protocol picker')
+      picker.click()
+      await flush()
+      const offered = menuValues()
+      picker.click()
+      await flush()
+      return offered
+    }
+    expect(await values()).toEqual([''])
+
+    endpoints = { openai: 'https://openai.example/v1', anthropic: null }
+    document.dispatchEvent(new CustomEvent('bre:endpoints-changed', { detail: { route: 'ofox', openai: 'https://openai.example/v1', anthropic: '' } }))
+    await flush()
+
+    expect(await values()).toEqual(['', 'openai-completions', 'openai-responses'])
   })
 
   it('asks twice before deleting, and can be talked out of it', async () => {
@@ -467,7 +691,7 @@ describe('the actions on a row', () => {
 
     buttonByText(line, 'Cancel').click()
     await flush()
-    expect(actionsOf(line)).toEqual(['Delete', 'Label', 'Models', 'Edit'])
+    expect(actionsOf(line)).toEqual(['Delete', 'Label', 'All models', 'Edit'])
     expect(calls.some((call) => call.op === 'remove')).toBe(false)
 
     buttonByText(line, 'Delete').click()

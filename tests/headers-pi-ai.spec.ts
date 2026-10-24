@@ -15,7 +15,13 @@ import {
 } from '@earendil-works/pi-ai'
 import { describe, expect, it } from 'vitest'
 import { buildHeaderIndex } from '../src/headers-core.js'
-import { describePiAiHeaderState, installPiAiHeaderTransform, installPiAiHeaderTransforms } from '../src/headers-pi-ai.js'
+import { installHeaderOverlay } from '../src/headers-fetch.js'
+import {
+  describePiAiHeaderState,
+  installPiAiHeaderTransform,
+  installPiAiHeaderTransforms,
+} from '../src/headers-pi-ai.js'
+import { readRoutePlans } from '../src/key-route-core.js'
 
 type ProviderHeaders = Record<string, string | null>
 type HeaderTransform = (headers: ProviderHeaders) => ProviderHeaders | Promise<ProviderHeaders>
@@ -528,5 +534,236 @@ describe('pi-ai key routing and failover', () => {
     expect(seen).toEqual([undefined])
     expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
     handle.dispose()
+  })
+})
+
+describe('pinned-protocol wire decisions', () => {
+  const MODEL = { id: 'alpha-model', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }
+
+  it('dispatches a cross-family pin without an endpoint on the route wire', async () => {
+    // The key is still the credential — it just cannot change the wire.
+    const { adapter, seen } = keyedSetup(() => emit({ type: 'start' }, { type: 'done' }))
+    const source = {
+      current: buildHeaderIndex({ beta: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'beta-model' }] } }),
+      keys: async () => [{ ref: 'A', value: 'sk-a', protocol: 'anthropic-messages' as const }],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    const events = await drain(
+      callStream(adapter, { id: 'beta-model', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }),
+    )
+    expect(seen).toEqual(['sk-a'])
+    expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
+    handle.dispose()
+  })
+
+  it('keeps the unpinned key on the route wire ahead of a cross-family pin', async () => {
+    const { adapter, seen } = keyedSetup(() => emit({ type: 'start' }, { type: 'done' }))
+    const source = {
+      current: buildHeaderIndex({ gamma: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'gamma-model' }] } }),
+      keys: async () => [{ ref: 'A', value: 'sk-a' }],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    const model = { id: 'gamma-model', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }
+    await drain(callStream(adapter, model))
+
+    // A mixed-protocol route now lists the Anthropic key first; the request that
+    // already succeeded on the OpenAI wire must not be sent down the other wire.
+    const mixed = {
+      current: source.current,
+      keys: async () => [
+        {
+          ref: 'B',
+          value: 'sk-b',
+          protocol: 'anthropic-messages' as const,
+          endpoint: 'https://relay.example.com/anthropic',
+        },
+        { ref: 'A', value: 'sk-a' },
+      ],
+    }
+    const mixedHandle = installPiAiHeaderTransform(adapter, mixed)
+    const events = await drain(callStream(adapter, model))
+    expect(seen).toEqual(['sk-a', 'sk-a'])
+    expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
+    mixedHandle.dispose()
+    handle.dispose()
+  })
+
+  it('leads with the wire the model belongs to', async () => {
+    // claude-haiku is an Anthropic shape: the key pinned to that protocol is the
+    // one that can actually serve it, so it leads even though the route is
+    // configured for the OpenAI wire. The attempt itself is handed to that
+    // protocol's own stream (not to the route's streamSimple), which is why the
+    // decision is asserted on the plan trace.
+    const { adapter } = keyedSetup(() => emit({ type: 'start' }, { type: 'done' }))
+    const source = {
+      current: buildHeaderIndex({
+        mixed: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'relay-model' }, { id: 'claude-haiku-5' }] },
+      }),
+      keys: async () => [
+        { ref: 'OPENAI', value: 'sk-openai' },
+        {
+          ref: 'ANTHROPIC',
+          value: 'sk-anthropic',
+          protocol: 'anthropic-messages' as const,
+          endpoint: 'https://relay.example.com/anthropic',
+          models: ['claude-*'],
+        },
+      ],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    await drain(
+      callStream(adapter, { id: 'claude-haiku-5', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }),
+    )
+    const [trace] = readRoutePlans(1)
+    expect(trace?.route).toBe('mixed')
+    expect(trace?.model).toBe('claude-haiku-5')
+    expect(trace?.wire).toBe('anthropic-messages')
+    expect(trace?.keys.map(key => key.ref)).toEqual(['ANTHROPIC', 'OPENAI'])
+    expect(trace?.keys[0]?.fit).toBe(0)
+    expect(trace?.keys[1]?.fit).toBe(2)
+    handle.dispose()
+  })
+
+  it('defers a key that was just charged for its quota on the next request', async () => {
+    // The cooldown memory is shared by the wire seam and every later request:
+    // the key that ran out of quota is tried last once it rests.
+    const { adapter, seen } = keyedSetup((apiKey) =>
+      apiKey === 'sk-a'
+        ? emit({
+            type: 'error',
+            reason: 'error',
+            error: { message: '429 insufficient_quota: You exceeded your current quota' },
+          })
+        : emit({ type: 'start' }, { type: 'done' }),
+    )
+    const source = {
+      current: buildHeaderIndex({ alpha: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'alpha-model' }] } }),
+      keys: async () => [
+        { ref: 'A', value: 'sk-a' },
+        { ref: 'B', value: 'sk-b' },
+      ],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    await drain(callStream(adapter, MODEL))
+    expect(seen).toEqual(['sk-a', 'sk-b'])
+
+    // A second request starts with B, because A is resting.
+    seen.length = 0
+    const events = await drain(callStream(adapter, MODEL))
+    expect(seen).toEqual(['sk-b'])
+    expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
+    handle.dispose()
+  })
+})
+
+describe('cross-seam: the fetch layer honours the wire seam\'s signature', () => {
+  // Both seams installed at once, sharing one source — the production shape.
+  // The wire seam ranks keys by honour and fit (planKeys); the fetch layer
+  // ranks by list order (keysForModel). A cross-family pin without an endpoint
+  // makes those two orders DISAGREE without any protocol re-dispatch (the pin
+  // falls back to the route's own wire but is demoted behind the keys that
+  // need no fallback), which is exactly what the wire-dispatch marker exists
+  // for: the fetch layer must patch the route's headers without re-signing a
+  // request the wire seam already signed, and without running its own failover
+  // loop under the wire seam's.
+  const MODEL = { id: 'gpt-6.1', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }
+
+  /** Both seams over one stubbed network; records every outgoing request. */
+  function crossSeamSetup(status = 200) {
+    const outgoing: Array<{ url: string; headers: Headers }> = []
+    const realFetch = globalThis.fetch
+    // The stub lands UNDER the overlay: installHeaderOverlay wraps whatever
+    // globalThis.fetch holds at install time.
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      outgoing.push({ url: String(input), headers: new Headers(init?.headers) })
+      return new Response(JSON.stringify({ ok: true }), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as typeof globalThis.fetch
+    const source = {
+      current: buildHeaderIndex({
+        alpha: {
+          baseURL: 'https://relay.example.com/v1',
+          models: [{ id: 'gpt-6.1' }],
+          headers: { 'x-route': 'alpha' },
+        },
+      }),
+      // List order puts the cross-family pin first — keysForModel's pick. The
+      // pin has no endpoint of its own family, so planKeys demotes it behind
+      // the unpinned key (honour before demotion) and the wire seam dispatches
+      // sk-b while the fetch layer's order would say sk-a.
+      keys: async () => [
+        { ref: 'A', value: 'sk-a', protocol: 'anthropic-messages' as const },
+        { ref: 'B', value: 'sk-b' },
+      ],
+    }
+    const overlay = installHeaderOverlay(source)
+    // A pi-ai-shaped provider: composes auth + transformHeaders and hands the
+    // result to the (wrapped) global fetch, exactly as the real one does.
+    const models: CapturedModels = {
+      async streamSimple(model, _context, options) {
+        const extra = typeof options['transformHeaders'] === 'function'
+          ? await (options['transformHeaders'] as HeaderTransform)({})
+          : {}
+        await globalThis.fetch(`${String((model as { baseUrl: string }).baseUrl)}/chat`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${String(options['apiKey'])}`, ...extra },
+          body: JSON.stringify({ model: (model as { id: string }).id }),
+        })
+        return status === 200
+          ? emit({ type: 'start' }, { type: 'done' })
+          : emit({ type: 'error', reason: 'error', error: { message: 'unauthorized' } })
+      },
+    }
+    const adapter: PiAiAdapter = { current: () => ({ models }) }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    return {
+      adapter,
+      outgoing,
+      restore() {
+        handle.dispose()
+        overlay.dispose()
+        globalThis.fetch = realFetch
+      },
+    }
+  }
+
+  it('keeps the wire seam\'s chosen key on the wire and strips the marker', async () => {
+    const { adapter, outgoing, restore } = crossSeamSetup()
+    try {
+      const events = await drain(callStream(adapter, MODEL))
+      expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
+      // One request, signed with the wire seam's pick (sk-b, the native-wire
+      // pin planKeys ranks first) — NOT sk-a, the list-order key the fetch
+      // layer would have re-signed with before the marker existed.
+      expect(outgoing).toHaveLength(1)
+      expect(outgoing[0]?.headers.get('authorization')).toBe('Bearer sk-b')
+      // The route's header patch still applies, and the marker never leaves.
+      expect(outgoing[0]?.headers.get('x-route')).toBe('alpha')
+      expect(outgoing[0]?.headers.has('x-dsh-model-think-level-wire')).toBe(false)
+    } finally {
+      restore()
+    }
+  })
+
+  it('lets the wire seam alone drive the failover of a marked request', async () => {
+    const { adapter, outgoing, restore } = crossSeamSetup(401)
+    try {
+      const events = await drain(callStream(adapter, MODEL))
+      expect(events).toHaveLength(1)
+      expect(events[0]?.['type']).toBe('error')
+      // The wire seam tried its two keys in ITS order (sk-b first, sk-a
+      // second) — one network attempt each. Without the marker the fetch
+      // layer would have run its own failover under every attempt, re-signing
+      // with list order (sk-a first) and doubling the round trips.
+      expect(outgoing.map((request) => request.headers.get('authorization')))
+        .toEqual(['Bearer sk-b', 'Bearer sk-a'])
+      for (const request of outgoing) {
+        expect(request.headers.has('x-dsh-model-think-level-wire')).toBe(false)
+      }
+    } finally {
+      restore()
+    }
   })
 })

@@ -74,15 +74,16 @@ describe('list', () => {
     expect(calls[0]?.url).toBe(`${KEY_INDEX_PATH}?route=a%20b`)
   })
 
-  it('normalises rows: a label must be a string, an unknown badge is null', async () => {
+  it('normalises rows: a label must be a string, an unknown badge is null, off needs a literal false', async () => {
     stubFetch({
       body: {
         ok: true,
         route: 'ofox',
         entries: [
-          { ref: 'A', alias: 'main', primary: true, configured: true, models: ['glm-4', 'glm-4-flash'] },
-          { ref: 'B', alias: '', primary: false, configured: false },
-          { ref: 'C', primary: false, configured: 'yes' },
+          { ref: 'A', alias: 'main', enabled: false, configured: true, models: ['glm-4', 'glm-4-flash'] },
+          { ref: 'B', alias: '', enabled: true, configured: false },
+          { ref: 'C', configured: 'yes' },
+          { ref: 'D', enabled: 'no', configured: true },
           { alias: 'no ref' },
           'nonsense',
         ],
@@ -93,9 +94,11 @@ describe('list', () => {
       ok: true,
       route: 'ofox',
       entries: [
-        { ref: 'A', alias: 'main', primary: true, configured: true, models: ['glm-4', 'glm-4-flash'] },
-        { ref: 'B', primary: false, configured: false },
-        { ref: 'C', primary: false, configured: null },
+        { ref: 'A', alias: 'main', enabled: false, configured: true, models: ['glm-4', 'glm-4-flash'] },
+        { ref: 'B', enabled: true, configured: false },
+        // No field at all, or anything but a literal false, reads as in use.
+        { ref: 'C', enabled: true, configured: null },
+        { ref: 'D', enabled: true, configured: true },
       ],
       endpoints: { openai: null, anthropic: null },
     })
@@ -107,10 +110,10 @@ describe('list', () => {
         ok: true,
         route: 'ofox',
         entries: [
-          { ref: 'A', primary: true, configured: true, masked: 'sk-a...wxyz' },
-          { ref: 'B', primary: false, configured: true, masked: '' },
-          { ref: 'C', primary: false, configured: true, masked: 42 },
-          { ref: 'D', primary: false, configured: true },
+          { ref: 'A', enabled: true, configured: true, masked: 'sk-a...wxyz' },
+          { ref: 'B', enabled: true, configured: true, masked: '' },
+          { ref: 'C', enabled: true, configured: true, masked: 42 },
+          { ref: 'D', enabled: true, configured: true },
         ],
       },
     })
@@ -119,10 +122,10 @@ describe('list', () => {
       ok: true,
       route: 'ofox',
       entries: [
-        { ref: 'A', primary: true, configured: true, masked: 'sk-a...wxyz' },
-        { ref: 'B', primary: false, configured: true },
-        { ref: 'C', primary: false, configured: true },
-        { ref: 'D', primary: false, configured: true },
+        { ref: 'A', enabled: true, configured: true, masked: 'sk-a...wxyz' },
+        { ref: 'B', enabled: true, configured: true },
+        { ref: 'C', enabled: true, configured: true },
+        { ref: 'D', enabled: true, configured: true },
       ],
       endpoints: { openai: null, anthropic: null },
     })
@@ -134,9 +137,9 @@ describe('list', () => {
         ok: true,
         route: 'ofox',
         entries: [
-          { ref: 'A', primary: true, configured: true, models: ['glm-4', '', 42, 'glm-4'] },
-          { ref: 'B', primary: false, configured: true, models: [] },
-          { ref: 'C', primary: false, configured: true, models: 'nonsense' },
+          { ref: 'A', enabled: true, configured: true, models: ['glm-4', '', 42, 'glm-4'] },
+          { ref: 'B', enabled: true, configured: true, models: [] },
+          { ref: 'C', enabled: true, configured: true, models: 'nonsense' },
         ],
       },
     })
@@ -145,12 +148,43 @@ describe('list', () => {
       ok: true,
       route: 'ofox',
       entries: [
-        { ref: 'A', primary: true, configured: true, models: ['glm-4', 'glm-4'] },
-        { ref: 'B', primary: false, configured: true, models: [] },
-        { ref: 'C', primary: false, configured: true },
+        { ref: 'A', enabled: true, configured: true, models: ['glm-4', 'glm-4'] },
+        { ref: 'B', enabled: true, configured: true, models: [] },
+        { ref: 'C', enabled: true, configured: true },
       ],
       endpoints: { openai: null, anthropic: null },
     })
+  })
+
+  it('carries the merged catalogue and the part of it the provider is missing', async () => {
+    stubFetch({
+      body: {
+        ok: true,
+        route: 'ofox',
+        entries: [],
+        models: ['qwen-max'],
+        mergedModels: ['qwen-max', 'glm-4', ''],
+        unmergedModels: ['glm-4', 42],
+      },
+    })
+
+    expect(await httpKeyManagerClient.list('ofox')).toEqual({
+      ok: true,
+      route: 'ofox',
+      entries: [],
+      models: ['qwen-max'],
+      mergedModels: ['qwen-max', 'glm-4'],
+      unmergedModels: ['glm-4'],
+      endpoints: { openai: null, anthropic: null },
+    })
+  })
+
+  it('drops an empty offer instead of drawing one with nothing in it', async () => {
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [], mergedModels: ['qwen-max'], unmergedModels: [] } })
+
+    const answer = await httpKeyManagerClient.list('ofox')
+    expect(answer).not.toHaveProperty('unmergedModels')
+    expect(answer).toMatchObject({ mergedModels: ['qwen-max'] })
   })
 })
 
@@ -202,6 +236,18 @@ describe('mutations', () => {
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     await httpKeyManagerClient.remove('ofox', 'A')
     expect(bodyOf()).toEqual({ op: 'remove', ref: 'A' })
+
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
+    await httpKeyManagerClient.setEnabled('ofox', 'A', false)
+    expect(bodyOf()).toEqual({ op: 'enable', ref: 'A', enabled: false })
+
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
+    await httpKeyManagerClient.setEnabled('ofox', 'A', true)
+    expect(bodyOf()).toEqual({ op: 'enable', ref: 'A', enabled: true })
+
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
+    await httpKeyManagerClient.applyMerged('ofox')
+    expect(bodyOf()).toEqual({ op: 'applyMerged' })
   })
 })
 

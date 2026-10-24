@@ -46,11 +46,12 @@ const GUARD_ATTR = 'data-bre-settle'
 /**
  * The row's action buttons: the host's own action container, whose class is a
  * CSS-module hash, hence the fragment probe. 编辑 and 删除 are its children; the
- * enable switch this plugin injects is one too, so it is excluded by its own
- * class — its enabled state is the plugin's, and a held opacity there would
- * hide the plugin's own busy or off state.
+ * enable switch and the delete seat this plugin injects are children too, so
+ * each is excluded by its own class — their enabled state is the plugin's (a
+ * delete seat is disabled until its card opens), and a held opacity there
+ * would paint an unusable button as usable while pinning the pending count.
  */
-const ROW_ACTION_PROBE = '[class*="rowActions"] > button:not(.bre-provider-switch)'
+const ROW_ACTION_PROBE = '[class*="rowActions"] > button:not(.bre-provider-switch):not(.bre-provider-delete)'
 
 /** How long one write is allowed to explain a disable. */
 const SETTLE_WINDOW_MS = 8000

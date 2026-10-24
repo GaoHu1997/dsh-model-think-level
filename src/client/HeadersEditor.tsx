@@ -455,46 +455,16 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
                       </div>
                     ))}
                     <button
-                       type="button"
-                       className="bre-link-button bre-headers-add"
-                       disabled={disabled}
-                       onClick={addRow}
-                     >
+                      type="button"
+                      className="bre-link-button bre-headers-add"
+                      disabled={disabled}
+                      onClick={addRow}
+                    >
                       {t('headersAdd')}
                     </button>
-                    {false && (<div className="bre-headers-legacy">
-                      <span className="bre-effort-title">{t('headersUserAgentTitle')}</span>
-                      <input
-                        type="text"
-                        className="bre-text-input bre-headers-value"
-                        value={draft.userAgent ?? ''}
-                        disabled={disabled}
-                        list={uaListId}
-                        placeholder={t('headersUserAgentPlaceholder')}
-                        aria-label={t('headersUserAgentTitle')}
-                        onChange={(event) => {
-                          setDraft(current => ({ ...current, userAgent: event.target.value }))
-                          setMessage(undefined)
-                        }}
-                      />
-                      {(draft.userAgent ?? '').trim().length === 0
-                        ? null
-                        : (
-                          <button
-                            type="button"
-                            className="bre-link-button bre-headers-remove"
-                            disabled={disabled}
-                            onClick={() => { setDraft(current => ({ ...current, userAgent: '' })); setMessage(undefined) }}
-                          >
-                            {t('headersUserAgentClear')}
-                          </button>
-                        )}
-                    </div>
-                    )}
-                     <datalist id={uaListId}>
+                    <datalist id={uaListId}>
                       {USER_AGENT_PRESETS.map(preset => <option key={preset} value={preset} />)}
                     </datalist>
-                    <p className="bre-effort-note bre-headers-legacy" hidden>{t('headersUserAgentHint')}</p>
                     {/* The deferred pane's contract, stated where its Save would
                         have been: the draft is real, it is not written yet, and
                         it lands with the card's own commit. */}

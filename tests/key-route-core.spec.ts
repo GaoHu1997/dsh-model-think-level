@@ -56,9 +56,14 @@ describe('keysForModel', () => {
     expect(keysForModel(keys, 'kimi-k2').map(k => k.ref)).toEqual(['B'])
   })
 
-  it('keeps unscoped keys eligible alongside scoped ones, ahead of them when listed first', () => {
+  it('puts a key that names the model ahead of a catch-all key listed before it', () => {
     const keys = [key('A'), key('B', ['glm-4'])]
-    expect(keysForModel(keys, 'glm-4').map(k => k.ref)).toEqual(['A', 'B'])
+    expect(keysForModel(keys, 'glm-4').map(k => k.ref)).toEqual(['B', 'A'])
+  })
+
+  it('keeps catch-alls in list order after the keys that name the model', () => {
+    const keys = [key('A'), key('B', ['glm-4']), key('C')]
+    expect(keysForModel(keys, 'glm-4').map(k => k.ref)).toEqual(['B', 'A', 'C'])
   })
 
   it('falls back to every key when no scope claims the model, so a stale scope never strands it', () => {

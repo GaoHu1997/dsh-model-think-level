@@ -18,8 +18,62 @@
 
 import { isRecord } from './shared.js'
 import { selectOverride, type HeaderIndex, type HeaderOverride } from './headers-core.js'
-import type { KeyCandidate } from './key-route-core.js'
+import { anthropicRequestBaseUrl } from './listing.js'
+import {
+  classifyFailure,
+  isHonoured,
+  keyRest,
+  planKeys,
+  recordRoutePlan,
+  restKeyOf,
+  wireOf,
+  WIRE_DISPATCH_HEADER,
+  type KeyCandidate,
+} from './key-route-core.js'
 import type { RouteProtocol } from './key-refs.js'
+
+/**
+ * The wire each (route, model) was last served on, learned from the request that
+ * produced content.
+ *
+ * A route may hold two keys pinned to different protocols — one OpenAI-format
+ * key and one Anthropic-format key, say — and then the first key in list order
+ * is, for half the models, the wrong wire: the gateway rejects its body shape
+ * before the model is ever reached and the answer only arrives through the
+ * failover. That rejected round trip is paid on every request. Remembering the
+ * protocol that actually served the model lets the next request start on the
+ * right wire, so a mixed-protocol route settles after one request instead of
+ * failing over forever.
+ */
+const servedWire = new Map<string, RouteProtocol>()
+
+/** Models in use are few, but a long-lived host can still churn through ids. */
+const SERVED_WIRE_LIMIT = 256
+
+/** Record the wire that served a model, dropping stale ids when the map grows. */
+function rememberServedWire(key: string, wire: RouteProtocol): void {
+  if (servedWire.size >= SERVED_WIRE_LIMIT) servedWire.clear()
+  servedWire.set(key, wire)
+}
+
+/**
+ * Forget which wire served which model.
+ *
+ * The memory is a process-wide optimisation: it may be dropped at any time
+ * without changing an answer, only the number of rejected round trips it takes to
+ * find one. Tests (and a host that swaps its provider configuration) call this to
+ * start from a clean slate.
+ */
+export function resetServedWires(): void {
+  servedWire.clear()
+}
+
+/**
+ * The protocol a key actually dispatches on this route, and how much the model
+ * costs there, are decided by the one plan both seams share — see
+ * `planKeys` in the routing module. Nothing here ranks keys on its own: a second
+ * ordering would only be able to disagree with the wire the plan chose.
+ */
 
 /** What a key resolver is told about the request it must sign and dispatch. */
 export interface PiAiKeyContext {
@@ -53,6 +107,58 @@ interface ProtocolStreams {
 }
 
 const PROTOCOL_CACHE = new Map<RouteProtocol, Promise<ProtocolStreams>>()
+
+type ContextNormalizer = (context: unknown) => unknown
+
+let CONTEXT_NORMALIZER: Promise<ContextNormalizer | undefined> | undefined
+
+/**
+ * The runtime's context normaliser, when this pi-ai ships one.
+ *
+ * `Models.streamSimple` folds a legacy `{ systemPrompt, messages, tools }`
+ * context into the transcript shape before it dispatches (`normalizeContext`
+ * folds both the prompt and the tool declarations into the leading system
+ * message). A key that speaks another protocol has to reach that protocol's
+ * module DIRECTLY, which bypasses the fold: the implementation then reads tool
+ * declarations from the transcript only, so `context.tools` is invisible and
+ * the request goes out with NO tools at all. The model answers as if it had
+ * none — one text block, `stop`, `end_turn` — and the whole agent loop stalls
+ * after a single request.
+ *
+ * Older pi-ai builds have no `utils/transcript` subpath; those implementations
+ * still read `context.tools`, so the legacy context must be left untouched.
+ */
+function loadContextNormalizer(): Promise<ContextNormalizer | undefined> {
+  if (CONTEXT_NORMALIZER !== undefined) return CONTEXT_NORMALIZER
+  CONTEXT_NORMALIZER = (async (): Promise<ContextNormalizer | undefined> => {
+    try {
+      // Kept in a variable: the build's pi-ai typings predate the subpath, and
+      // the module only exists in the runtime the adapter is loaded from.
+      const specifier: string = '@earendil-works/pi-ai/utils/transcript'
+      const module = await import(/* @vite-ignore */ specifier) as unknown as { normalizeContext?: ContextNormalizer }
+      return typeof module.normalizeContext === 'function' ? module.normalizeContext : undefined
+    } catch {
+      return undefined
+    }
+  })()
+  return CONTEXT_NORMALIZER
+}
+
+/** Fold a legacy context once per request object; a no-op on transcript input. */
+const NORMALIZED_CONTEXTS = new WeakMap<object, unknown>()
+
+async function normalizeDispatchedContext(context: unknown): Promise<unknown> {
+  const object = objectOf(context)
+  if (object === undefined) return context
+  if (NORMALIZED_CONTEXTS.has(object)) return NORMALIZED_CONTEXTS.get(object)
+  if (!Array.isArray(object['messages'])) return context
+  const normalize = await loadContextNormalizer()
+  if (normalize === undefined) return context
+  const normalized = normalize(context)
+  if (objectOf(normalized) === undefined) return context
+  NORMALIZED_CONTEXTS.set(object, normalized)
+  return normalized
+}
 
 /**
  * Load one pi-ai protocol implementation on demand.
@@ -131,6 +237,20 @@ function routeOverrideOf(source: PiAiHeaderSource, model: unknown): HeaderOverri
   }
 }
 
+/**
+ * The text a stream error carries.
+ *
+ * pi-ai reports the provider's message in `error.message` (older shapes also use
+ * `error.errorMessage`) and a short `reason` on the event itself. The words in
+ * there are what tells a rate limit from a spent balance, which is the one
+ * distinction the cooldown memory acts on, so all of them are read.
+ */
+function errorTextOf(event: Record<string, unknown>): string {
+  const error = isRecord(event['error']) ? event['error'] : undefined
+  const parts: unknown[] = [error?.['message'], error?.['errorMessage'], event['reason']]
+  return parts.filter((part): part is string => typeof part === 'string').join(' ')
+}
+
 function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike {
   return new Proxy(models, {
     get(target, property, receiver): unknown {
@@ -157,6 +277,17 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
           return override?.hasHeaders ? { ...merged, ...override.headers } : merged
         }
 
+        // Requests this proxy signs carry the wire-dispatch marker on top of
+        // the header patch, so the fetch layer below applies its patch WITHOUT
+        // re-signing them (see WIRE_DISPATCH_HEADER): the key, the wire and the
+        // endpoint are THIS seam's choice, and this seam's failover loop owns
+        // the retries. Constant value only — it is stripped in the fetch
+        // wrapper before the request leaves the process.
+        const markedTransformHeaders: HeaderTransformer = async (headers) => ({
+          ...await transformHeaders(headers),
+          [WIRE_DISPATCH_HEADER]: '1',
+        })
+
         const modelId = typeof modelObject['id'] === 'string' ? modelObject['id'] : undefined
         const keyResolver = source.keys
         // Without a key resolver we are a pure header overlay: keep the exact
@@ -178,14 +309,22 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
         // otherwise delegate to the route provider (still honouring the key).
         const startAttempt = async (candidate: KeyCandidate): Promise<AsyncIterable<Record<string, unknown>>> => {
           const api = typeof modelObject['api'] === 'string' ? modelObject['api'] as RouteProtocol : 'openai-completions'
-          const protocol = candidate.protocol ?? api
-          const baseUrl = candidate.endpoint !== undefined ? candidate.endpoint : modelObject['baseUrl'] as string
+          const protocol = wireOf(candidate, api)
+          // An endpoint only rides along when its family is the one this request
+          // actually speaks; a pin the route could not honour keeps its own URL.
+          const honoured = isHonoured(candidate, api)
+          const selectedBaseUrl = honoured && candidate.endpoint !== undefined
+            ? candidate.endpoint
+            : modelObject['baseUrl'] as string
+          const baseUrl = protocol === 'anthropic-messages'
+            ? anthropicRequestBaseUrl(selectedBaseUrl)
+            : selectedBaseUrl
           const switched = protocol !== api || baseUrl !== modelObject['baseUrl']
           if (!switched) {
             return (streamSimple as UnknownFunction).call(target, model, context, {
               ...options,
               apiKey: candidate.value,
-              transformHeaders,
+              transformHeaders: markedTransformHeaders,
             }) as unknown as AsyncIterable<Record<string, unknown>>
           }
           // True protocol switch: the request body shape must change, so call the
@@ -195,21 +334,25 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
             ? options['headers'] as ProviderHeaders
             : {})
           const implementation = await loadProtocol(protocol)
+          // The registry call the adapter normally makes folds the context for
+          // us; this direct re-dispatch must do it itself or the target
+          // implementation never sees the request's tool declarations.
+          const dispatchedContext = await normalizeDispatchedContext(context)
           return implementation.streamSimple(
             { ...modelObject, api: protocol, baseUrl },
-            context,
+            dispatchedContext,
             {
               ...options,
               apiKey: candidate.value,
-              headers: mergedHeaders,
+              headers: { ...mergedHeaders, [WIRE_DISPATCH_HEADER]: '1' },
               transformHeaders: undefined,
             },
           )
         }
 
         const run = async function* (): AsyncGenerator<Record<string, unknown>> {
-          const candidates = await dispatch()
-          if (candidates.length === 0) {
+          const routeCandidates = await dispatch()
+          if (routeCandidates.length === 0) {
             // No key claims this route: fall back to the route's own credential.
             const stream = (streamSimple as UnknownFunction).call(target, model, context, {
               ...options,
@@ -218,16 +361,32 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
             for await (const event of stream) yield event
             return
           }
+          const api = typeof modelObject['api'] === 'string' ? modelObject['api'] as RouteProtocol : 'openai-completions'
+          const servedKey = `${route ?? ''}\u0000${modelId ?? ''}`
+          // One decision, shared by both seams: fit for this model, the wire that
+          // served it last time, honour of each pin, the wire pool, and the keys
+          // that are cooling down — in that order of authority.
+          const plan = planKeys(routeCandidates, {
+            api,
+            model: modelId,
+            preferredWire: servedWire.get(servedKey),
+            isResting: candidate => keyRest.isResting(restKeyOf(route ?? '', candidate.ref), Date.now()),
+          })
+          // The plan is reproduced in `?diag=1`; it carries references and ranks,
+          // never a key value.
+          recordRoutePlan(route ?? '', plan, { model: modelId })
           let lastErrorEvent: Record<string, unknown> | undefined
           let lastError: unknown
-          for (const candidate of candidates) {
+          for (const candidate of plan.ordered) {
+            const restKey = restKeyOf(route ?? '', candidate.ref)
             let stream: AsyncIterable<Record<string, unknown>>
             try {
               stream = await startAttempt(candidate)
             } catch (error) {
               // A synchronous setup failure (e.g. a missing client key) is a
-              // pre-content failure: try the next key.
+              // pre-content failure: bench the key and try the next one.
               lastError = error
+              keyRest.note(restKey, classifyFailure(undefined, error instanceof Error ? error.message : '') ?? 'refused')
               continue
             }
             let committed = false
@@ -236,12 +395,18 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
               const type = isRecord(event) ? event['type'] : undefined
               if (!committed) {
                 if (type === 'error') {
-                  // The key was rejected before any content streamed: fail over.
+                  // The key was rejected before any content streamed: fail over,
+                  // and remember why so the next request does not start here.
                   lastErrorEvent = event as Record<string, unknown>
                   failed = true
+                  keyRest.note(restKey, classifyFailure(undefined, errorTextOf(event as Record<string, unknown>)) ?? 'refused')
                   break
                 }
                 committed = true
+                keyRest.clear(restKey)
+                // This is the wire that actually serves the model; start here
+                // next time instead of paying the rejected round trip again.
+                rememberServedWire(servedKey, plan.entries.find(entry => entry.candidate === candidate)?.wire ?? wireOf(candidate, api))
               }
               yield event
             }

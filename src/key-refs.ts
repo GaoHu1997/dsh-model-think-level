@@ -43,6 +43,13 @@ export interface KeyEntry {
    * side by side (a true protocol switch, not just an endpoint swap).
    */
   readonly protocol?: RouteProtocol
+  /**
+   * Whether the key is switched OUT of the routing pool. Absent — the stored
+   * default — means the key is in use; a literal `true` lists it but lets no
+   * request sign with it. The label, model scope and protocol pin all stay, so
+   * switching the key back on restores exactly what it served.
+   */
+  readonly disabled?: boolean
 }
 
 /**
@@ -80,6 +87,19 @@ export function isRouteProtocol(value: unknown): value is RouteProtocol {
  */
 export function normalizeKeyProtocol(value: unknown): RouteProtocol | undefined {
   return isRouteProtocol(value) ? value : undefined
+}
+
+/**
+ * A stored switch-off mark, or undefined when the key is in use.
+ *
+ * Being enabled is the default and is never stored, so only a literal `true`
+ * means anything; a hand-edited index file cannot switch a key off by typo,
+ * and an entry never carries a redundant `disabled: false`.
+ * @param value - whatever arrived (a toggle answer, or a hand-edited file).
+ * @returns `true` when the key is switched off, else undefined.
+ */
+export function normalizeKeyDisabled(value: unknown): boolean | undefined {
+  return value === true ? true : undefined
 }
 
 /**

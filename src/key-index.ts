@@ -30,6 +30,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   normalizeKeyAlias,
+  normalizeKeyDisabled,
   normalizeKeyModels,
   normalizeKeyProtocol,
   normalizeRouteEndpoints,
@@ -46,17 +47,26 @@ export type KeyIndexEntry = KeyEntry
  * fields absent (rather than `undefined`) keeps hand-edited index files diff-
  * clean and lets `parseKeyIndex`/`writeKeyIndex` round-trip an unscoped key
  * without inventing an empty `models` list that would read as "reached nothing".
+ * Being enabled is the default, so only a switched-off key carries the flag.
  */
 function makeEntry(
   ref: string,
   alias: string | undefined,
   models: readonly string[] | undefined,
   protocol: RouteProtocol | undefined,
+  disabled: boolean | undefined,
 ): KeyIndexEntry {
-  const entry: { ref: string; alias?: string; models?: readonly string[]; protocol?: RouteProtocol } = { ref }
+  const entry: {
+    ref: string
+    alias?: string
+    models?: readonly string[]
+    protocol?: RouteProtocol
+    disabled?: boolean
+  } = { ref }
   if (alias !== undefined) entry.alias = alias
   if (models !== undefined) entry.models = models
   if (protocol !== undefined) entry.protocol = protocol
+  if (disabled === true) entry.disabled = true
   return entry
 }
 
@@ -124,7 +134,8 @@ export function parseKeyIndex(raw: unknown): KeyIndexDocument {
       const alias = normalizeKeyAlias(record['alias'])
       const models = normalizeKeyModels(record['models'])
       const protocol = normalizeKeyProtocol(record['protocol'])
-      list.push(makeEntry(ref, alias, models, protocol))
+      const disabled = normalizeKeyDisabled(record['disabled'])
+      list.push(makeEntry(ref, alias, models, protocol, disabled))
     }
     if (list.length > 0) out[route] = list
   }
@@ -243,14 +254,15 @@ export function withKeyEntry(
   const index = list.findIndex(entry => entry.ref === ref)
   const label = normalizeKeyAlias(alias)
   if (index === -1) {
-    list.push(makeEntry(ref, label, undefined, undefined))
+    list.push(makeEntry(ref, label, undefined, undefined, undefined))
   } else {
     const existing = list[index]
-    // A relabel with no alias keeps the stored one; the model scope and the
-    // pinned protocol always ride along untouched — adding or renaming a key
-    // never re-probes it, nor silently re-pins its protocol.
+    // A relabel with no alias keeps the stored one; the model scope, the
+    // pinned protocol and the switch state always ride along untouched —
+    // adding or renaming a key never re-probes it, nor silently re-pins its
+    // protocol, nor switches it back on.
     const keptLabel = label === undefined ? existing?.alias : label
-    list[index] = makeEntry(ref, keptLabel, existing?.models, existing?.protocol)
+    list[index] = makeEntry(ref, keptLabel, existing?.models, existing?.protocol, existing?.disabled)
   }
   return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
 }
@@ -272,7 +284,7 @@ export function withKeyAlias(
   const index = list.findIndex(entry => entry.ref === ref)
   if (index === -1) return document
   const label = normalizeKeyAlias(alias)
-  list[index] = makeEntry(ref, label, list[index]?.models, list[index]?.protocol)
+  list[index] = makeEntry(ref, label, list[index]?.models, list[index]?.protocol, list[index]?.disabled)
   return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
 }
 
@@ -299,7 +311,7 @@ export function withKeyModels(
   const index = list.findIndex(entry => entry.ref === ref)
   if (index === -1) return document
   const scope = models === undefined ? undefined : normalizeKeyModels(models)
-  list[index] = makeEntry(ref, list[index]?.alias, scope, list[index]?.protocol)
+  list[index] = makeEntry(ref, list[index]?.alias, scope, list[index]?.protocol, list[index]?.disabled)
   return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
 }
 
@@ -325,7 +337,33 @@ export function withKeyProtocol(
   const index = list.findIndex(entry => entry.ref === ref)
   if (index === -1) return document
   const pinned = normalizeKeyProtocol(protocol)
-  list[index] = makeEntry(ref, list[index]?.alias, list[index]?.models, pinned)
+  list[index] = makeEntry(ref, list[index]?.alias, list[index]?.models, pinned, list[index]?.disabled)
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
+}
+
+/**
+ * Switch one key into or out of the routing pool.
+ *
+ * Switching a key off keeps everything else about it — its label, its model
+ * scope, its pinned protocol — so switching it back on restores exactly what it
+ * served. Passing `false` clears the mark; the entry then reads as an ordinary
+ * in-use key again. A no-op when the reference is not listed.
+ * @param document - the current document.
+ * @param route - the provider route key.
+ * @param ref - the credential reference.
+ * @param disabled - whether no request may sign with this key.
+ */
+export function withKeyDisabled(
+  document: KeyIndexDocument,
+  route: string,
+  ref: string,
+  disabled: boolean,
+): KeyIndexDocument {
+  const list = [...keyEntriesOf(document, route)]
+  const index = list.findIndex(entry => entry.ref === ref)
+  if (index === -1) return document
+  const existing = list[index]
+  list[index] = makeEntry(ref, existing?.alias, existing?.models, existing?.protocol, disabled ? true : undefined)
   return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
 }
 

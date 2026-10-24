@@ -21,6 +21,7 @@ import {
   readKeyIndex,
   updateKeyIndex,
   withKeyAlias,
+  withKeyDisabled,
   withKeyEntry,
   withKeyModels,
   withKeyProtocol,
@@ -168,6 +169,47 @@ describe('parseKeyIndex', () => {
     document = withKeyAlias(document, 'ofox', 'A', 'main')
     expect(keyEntriesOf(document, 'ofox')).toEqual([{ ref: 'A', models: ['glm-4'], alias: 'main', protocol: 'openai-responses' }])
     expect(document.endpoints?.['ofox']).toEqual({ anthropic: 'https://a.example' })
+  })
+
+  it('round-trips a switched-off key, and stores nothing for an in-use one', () => {
+    const parsed = parseKeyIndex({
+      version: 1,
+      providers: {
+        ofox: [{ ref: 'A', disabled: true }, { ref: 'B', disabled: false }, { ref: 'C', disabled: 'nonsense' }],
+      },
+    })
+    // Only a literal `true` means switched off; being in use is the default and
+    // is never written, so a hand-edited file cannot disable a key by typo.
+    expect(keyEntriesOf(parsed, 'ofox')).toEqual([{ ref: 'A', disabled: true }, { ref: 'B' }, { ref: 'C' }])
+    writeKeyIndex(parsed, fileOf())
+    expect(readKeyIndex(fileOf())).toEqual(parsed)
+  })
+
+  it('keeps a switch-off mark through every writer, and clears it on switch back', () => {
+    let document = withKeyDisabled(withKeyEntry(emptyKeyIndex(), 'ofox', 'A'), 'ofox', 'A', true)
+    expect(keyEntriesOf(document, 'ofox')).toEqual([{ ref: 'A', disabled: true }])
+    // A pause is not a deletion: relabels, scope edits and protocol pins all
+    // leave the mark alone, so switching back on restores the whole key.
+    document = withKeyModels(document, 'ofox', 'A', ['glm-4'])
+    document = withKeyAlias(document, 'ofox', 'A', 'main')
+    document = withKeyProtocol(document, 'ofox', 'A', 'openai-responses')
+    document = withKeyEntry(document, 'ofox', 'A', 'renamed')
+    expect(keyEntriesOf(document, 'ofox')).toEqual([{
+      ref: 'A',
+      alias: 'renamed',
+      models: ['glm-4'],
+      protocol: 'openai-responses',
+      disabled: true,
+    }])
+    document = withKeyDisabled(document, 'ofox', 'A', false)
+    expect(keyEntriesOf(document, 'ofox')).toEqual([{
+      ref: 'A',
+      alias: 'renamed',
+      models: ['glm-4'],
+      protocol: 'openai-responses',
+    }])
+    // A reference the route does not list has nothing to switch.
+    expect(withKeyDisabled(document, 'ofox', 'NOPE', true)).toBe(document)
   })
 })
 

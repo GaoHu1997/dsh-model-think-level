@@ -22,9 +22,10 @@ import { PLUGIN_ID } from '../../constants.js'
 import { EffortEditor } from '../EffortEditor.tsx'
 import {
   createScanState, flushOnTeardown, flushOnUnload, pinModelListCards, reconcile,
-  releaseModelListRepins, unwatchModelListOffsets, watchModelListOffsets,
+  releaseModelListRepins, showOfficialReasoning, unwatchModelListOffsets, watchModelListOffsets,
   type HostLabels, type InjectorDeps, type ScanState,
 } from './models-page-editor.js'
+import { teardownProviderEndpoints } from './provider-endpoints.js'
 import { describeNamespace } from '../ops.ts'
 import type { ClientContext, RemoteApi } from '../types.js'
 import { EffortBoundary, panelRoot } from './mount.js'
@@ -306,13 +307,21 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   /**
    * Wake the injector when a failed idle pass's backoff expires: a settled
    * settings page emits no DOM mutation, so without this the held intent would
-   * wait for a scan that never comes. One timer at a time; the fired timer
-   * re-runs the scan, which re-arms the next backoff if the write is refused.
+   * wait for a scan that never comes. One timer at a time, and a SHORTER
+   * request always wins — a pending long backoff must not swallow the 1s
+   * deferred-headers wake-up that arrives after it; the fired timer re-runs
+   * the scan, which re-arms the next backoff if the write is refused.
    */
+  let retryAt = 0
   function scheduleRetry(delayMs: number): void {
-    if (stopped || retryTimer !== undefined) return
+    if (stopped) return
+    const at = Date.now() + delayMs
+    if (retryTimer !== undefined && at >= retryAt) return
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    retryAt = at
     retryTimer = window.setTimeout(() => {
       retryTimer = undefined
+      retryAt = 0
       schedule()
     }, delayMs)
   }
@@ -359,21 +368,25 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       scanTimer = undefined
       // The composer path rides along: the debounced scan is the only thing
       // that covers the paths no mutation carries — apply boot and a slider
-      // preference flip.
+      // preference flip. Every pass is fenced with `safely` so one throwing
+      // cannot cost the page the rounds that follow it in the same scan.
       safely('composer mutation', () => { composerMutation?.() })
-      reconcile(panelRoot(), injectorDeps, scanState)
+      // The editor injector is the data-aware reconcile; its own promise tail
+      // is caught (see models-page-editor), and this fence covers its sync
+      // scan head.
+      safely('editor reconcile', () => { reconcile(panelRoot(), injectorDeps, scanState) })
       // The create-provider card is reduced to its custom form first: the tab
       // pass below dresses the half this pass leaves showing.
-      reconcileAddCards(panelRoot(), addCardDeps, addCardState)
+      safely('add-card reconcile', () => { reconcileAddCards(panelRoot(), addCardDeps, addCardState) })
       // The tab pass rides the settled scan as well, after the editor injector
       // has stocked the open card. Its reactive path is the observer above; this
       // one covers the paths no mutation carries — a boot over an editor that
       // is already open, and a retry whose scan re-arms without a re-render.
       // Its own writes are guarded, so no scan ever chases its own tail.
-      reconcileEditorTabs(panelRoot(), editorTabsDeps, editorTabsState)
+      safely('editor tabs reconcile', () => { reconcileEditorTabs(panelRoot(), editorTabsDeps, editorTabsState) })
       // These passes are also run synchronously by the observer. Repeating them
       // here covers preference flips and retry scans that have no DOM mutation.
-      reconcileDom()
+      safely('dom decorations', () => { reconcileDom() })
       // LAST, and only here: the create card's held request headers drain on the
       // scan that finds their route declared. This is the one scan with wire
       // work already in it — the observer's synchronous pass must stay
@@ -443,7 +456,15 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       safely('models mutation', () => { onMutation(records) })
       schedule()
     })
-    observer.observe(document.body, { childList: true, subtree: true })
+    // `hidden` flips are observed too: the official create card switches its
+    // two halves by attribute only, and the passes that key on which half is
+    // showing would otherwise sleep until some unrelated childList mutation.
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['hidden'],
+    })
     schedule()
   }
 
@@ -473,8 +494,13 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     flushOnTeardown(scanState, injectorDeps)
     // Orphaned editors must not outlive the fiber: on plugin disable or HMR
     // they would keep rendering with a stale api face, failing every write
-    // visibly. Unmount every React root this plugin created.
-    for (const [, entry] of scanState.mounted) entry.editor.unmount()
+    // visibly. Unmount every React root this plugin created — restoring the
+    // official reasoning group each editor stood down FIRST, or the field it
+    // covered stays hidden on a page this plugin no longer decorates.
+    for (const [container, entry] of scanState.mounted) {
+      showOfficialReasoning(container)
+      entry.editor.unmount()
+    }
     scanState.mounted.clear()
     // The grips are raw DOM this plugin owns inside the official page: leaving
     // them behind would keep a dead fiber's listeners live on a live page.
@@ -510,6 +536,11 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // attributes this plugin owns inside the official card — a dead fiber must
     // not leave the page keyed to tabs nothing maintains anymore.
     teardownEditorTabs()
+    // And for the provider cards' dual-endpoint dressing: the second address
+    // rows, the family tags, the 更多端点 toggle and the hidden protocol
+    // selects are this plugin's — a dead fiber hands the official card back
+    // exactly as the page built it.
+    teardownProviderEndpoints()
     // Last, the deletion guard: the recorded positions are THIS fiber's
     // listeners, and the blanks holding scroll ranges open are raw DOM inside
     // the official panel, which a dead fiber must not leave behind either.

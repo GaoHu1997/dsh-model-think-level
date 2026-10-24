@@ -545,14 +545,17 @@ describe('multi-key request signing and failover', () => {
   let handles: { dispose(): void }[]
   /** Per-attempt statuses to reply with, in order; defaults to 200. */
   let statuses: number[]
+  /** Per-attempt bodies to reply with, in order; defaults to `{}`. */
+  let bodies: string[]
 
   function stubFetch(): void {
     sent = []
     statuses = []
+    bodies = []
     globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       sent.push({ url: input, headers: new Headers(init?.headers) })
       const status = statuses.shift() ?? 200
-      return Promise.resolve(new Response('{}', { status }))
+      return Promise.resolve(new Response(bodies.shift() ?? '{}', { status }))
     }) as unknown as typeof globalThis.fetch
   }
 
@@ -580,6 +583,46 @@ describe('multi-key request signing and failover', () => {
     }
     return source
   }
+
+  it('aggregates a GET model listing before ordinary key failover', async () => {
+    const source = routeWithKeys([
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+    ])
+    let resolved: readonly string[] = []
+    source.modelListing = async ({ keys }) => {
+      resolved = keys.map(key => key.ref)
+      return new Response(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    install(source)
+
+    const response = await globalThis.fetch('https://relay.example.com/v1/models')
+
+    expect(resolved).toEqual(['A', 'B'])
+    expect(await response.json()).toEqual({ data: [{ id: 'model-a' }, { id: 'model-b' }] })
+    expect(sent).toHaveLength(0)
+  })
+
+  it('keeps non-listing requests on the regular failover path', async () => {
+    const source = routeWithKeys([
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+    ])
+    source.modelListing = vi.fn(async () => new Response('{}', { status: 200 }))
+    install(source)
+
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'glm-4' }),
+    })
+
+    expect(source.modelListing).not.toHaveBeenCalled()
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-a')
+  })
 
   it('signs a shared model with the first key', async () => {
     install(routeWithKeys([
@@ -671,6 +714,31 @@ describe('multi-key request signing and failover', () => {
     })
     expect(sent).toHaveLength(1)
     expect(response.status).toBe(400)
+  })
+
+  it('leads the next request with a key that was not charged for its quota', async () => {
+    // The same cooldown memory is shared with the request seam: a key the
+    // provider told us is out of quota is deferred here too, so the next request
+    // signs with the healthy key instead of repeating a doomed attempt.
+    install(routeWithKeys([
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+    ]))
+    statuses = [429]
+    bodies = ['{"error":{"message":"You exceeded your current quota: insufficient_quota"}}']
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'glm-4' }),
+    })
+    expect(sent.map(attempt => attempt.headers.get('authorization'))).toEqual(['Bearer sk-a', 'Bearer sk-b'])
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'glm-4' }),
+    })
+    // B leads now; A is still in the list (a resting key is never dropped).
+    expect(sent.slice(2).map(attempt => attempt.headers.get('authorization'))).toEqual(['Bearer sk-b'])
   })
 
   it('re-signs an x-api-key request in its own scheme, not Bearer', async () => {

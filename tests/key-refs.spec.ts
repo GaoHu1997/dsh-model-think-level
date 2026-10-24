@@ -23,6 +23,7 @@ import {
   maskKeyValue,
   nextKeyRef,
   normalizeKeyAlias,
+  normalizeKeyDisabled,
   normalizeKeyProtocol,
   normalizeRouteEndpoints,
 } from '../src/key-refs.js'
@@ -149,6 +150,13 @@ describe('protocols and endpoints', () => {
     expect(normalizeKeyProtocol('carrier-pigeon')).toBeUndefined()
     expect(normalizeKeyProtocol('')).toBeUndefined()
     expect(normalizeKeyProtocol(undefined)).toBeUndefined()
+  })
+
+  it('reads a switch-off mark as literal true only; enabled is the unstored default', () => {
+    expect(normalizeKeyDisabled(true)).toBe(true)
+    expect(normalizeKeyDisabled(false)).toBeUndefined()
+    expect(normalizeKeyDisabled('yes')).toBeUndefined()
+    expect(normalizeKeyDisabled(undefined)).toBeUndefined()
   })
 
   it('keeps only http(s) endpoints, trims them, and drops an empty side', () => {

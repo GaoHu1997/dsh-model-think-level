@@ -48,7 +48,13 @@ import {
 } from './headers-core.js'
 import {
   applyKeyToHeaders,
+  classifyFailure,
+  keyRest,
+  parseRetryAfter,
+  restKeyOf,
+  restLast,
   shouldFailover,
+  WIRE_DISPATCH_HEADER,
   type KeyCandidate,
 } from './key-route-core.js'
 
@@ -61,6 +67,17 @@ export interface KeyRouteContext {
   readonly route: string
   /** The model id the request body named, when it could be read. */
   readonly model: string | undefined
+}
+
+/** Context for aggregating a provider's model listing across its keys. */
+export interface ModelListingContext {
+  readonly route: string
+  readonly url: string
+  readonly headers: Headers
+  readonly keys: readonly KeyCandidate[]
+  readonly signal?: AbortSignal | null
+  /** The fetch below this plugin's wrapper, avoiding recursive interception. */
+  readonly send: typeof globalThis.fetch
 }
 
 /** One activation's contribution to the process-wide wrapper. */
@@ -78,6 +95,8 @@ interface Entry {
    * reinstalling the wrapper.
    */
   keys?: (context: KeyRouteContext) => Promise<readonly KeyCandidate[]>
+  /** Combines a GET model listing across the resolved key candidates. */
+  modelListing?: (context: ModelListingContext) => Promise<Response | undefined>
 }
 
 /** The process-wide wrapper state. */
@@ -116,6 +135,16 @@ async function bodyTextOf(input: unknown, init: RequestInit | undefined): Promis
   return undefined
 }
 
+/** Whether this matched route request is asking for its model catalogue. */
+function isModelListingRequest(url: string, method: string | undefined): boolean {
+  if ((method ?? 'GET').toUpperCase() !== 'GET') return false
+  try {
+    return new URL(url).pathname.endsWith('/models')
+  } catch {
+    return false
+  }
+}
+
 /**
  * The caller's request headers as a mutable copy, seeded the way Fetch itself
  * resolves them: an explicit `init.headers` replaces a `Request`'s own headers,
@@ -123,6 +152,36 @@ async function bodyTextOf(input: unknown, init: RequestInit | undefined): Promis
  * the wrong one would either drop the caller's headers or resurrect the ones
  * the caller replaced.
  */
+/**
+ * Read at most `limit` characters of a response body WITHOUT pulling the rest.
+ *
+ * `response.clone().text()` would read the whole reply into one branch and tee
+ * the entire remainder into memory for the other; a provider that answers a
+ * failure with a page-sized body must not cost that. Reading the clone's
+ * reader up to the limit and cancelling bounds the buffered bytes to what was
+ * asked for.
+ */
+async function readBoundedText(response: Response, limit: number): Promise<string> {
+  const body = response.clone().body
+  if (body === null) return ''
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let text = ''
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      text += decoder.decode(value, { stream: true })
+      if (text.length >= limit) break
+    }
+  } finally {
+    await reader.cancel().catch(() => {
+      // The answer is already decided; releasing the stream is cleanup only.
+    })
+  }
+  return text.slice(0, limit)
+}
+
 function seedHeaders(input: unknown, init: RequestInit | undefined): Headers {
   if (init?.headers !== undefined && init.headers !== null) return new Headers(init.headers as HeadersInit)
   if (typeof Request !== 'undefined' && input instanceof Request) return new Headers(input.headers)
@@ -182,14 +241,6 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       }
     }
 
-    // The ordered keys that may sign this request. Empty when this activation
-    // does not route keys, in which case the request is sent exactly once with
-    // only the header patch (preserving the original object identity when there
-    // is no patch at all).
-    const keyCandidates: readonly KeyCandidate[] = keyed ? await entry.keys!({ route: override.route, model }) : []
-
-    if (!hasPatch && keyCandidates.length === 0) return base(input, init)
-
     /**
      * Send one attempt, optionally re-signed with `keyValue`. A fresh `Headers`
      * is built per attempt so a rejected attempt's header tweaks never leak into
@@ -206,22 +257,122 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       return base(input, { ...init, headers })
     }
 
+    // A request the wire seam (headers-pi-ai) already dispatched: it chose the
+    // key, the wire and the endpoint, and it owns the failover for them (see
+    // WIRE_DISPATCH_HEADER). Strip the marker, send exactly once with the
+    // signature already on the headers, and charge nothing — the wire seam
+    // benches its own keys from the stream events it sees.
+    if (patched.get(WIRE_DISPATCH_HEADER) === '1') {
+      patched.delete(WIRE_DISPATCH_HEADER)
+      if (!hasPatch) return base(input, init)
+      return attempt(undefined)
+    }
+
+    // The ordered keys that may sign this request. Empty when this activation
+    // does not route keys, in which case the request is sent exactly once with
+    // only the header patch (preserving the original object identity when there
+    // is no patch at all).
+    //
+    // This seam can neither switch a protocol nor choose another URL, so it does
+    // NOT rank by wire: that ranking belongs to the request seam, which can act
+    // on it, and a second opinion here could only contradict the wire actually
+    // chosen there. What it does share is the cooldown memory — a key that was
+    // just charged a rejection is deferred here too, because the failure happened
+    // on a request that passed through both seams.
+    const resolved = keyed ? await entry.keys!({ route: override.route, model }) : []
+    const keyCandidates: readonly KeyCandidate[] = restLast(
+      resolved,
+      candidate => keyRest.isResting(restKeyOf(override.route, candidate.ref), Date.now()),
+    )
+
+    const method = init?.method ?? (typeof Request !== 'undefined' && input instanceof Request ? input.method : undefined)
+    if (keyCandidates.length > 1 && entry.modelListing !== undefined && isModelListingRequest(url, method)) {
+      const signal = init?.signal ?? (typeof Request !== 'undefined' && input instanceof Request ? input.signal : undefined)
+      try {
+        const listing = await entry.modelListing({
+          route: override.route,
+          url,
+          headers: new Headers(patched),
+          keys: keyCandidates,
+          ...(signal === undefined ? {} : { signal }),
+          send: base,
+        })
+        if (listing !== undefined) return listing
+      } catch {
+        // Aggregation is an enrichment: the ordinary request path remains the
+        // fallback when no aggregate listing can be produced.
+      }
+    }
+
+    if (!hasPatch && keyCandidates.length === 0) return base(input, init)
+
+    /**
+     * Charge one rejected attempt to the key that placed it: the status, the
+     * provider's `Retry-After` and a bounded body (enough to tell "out of quota"
+     * from "too fast") decide how long it rests. Best effort — a body that cannot
+     * be read still leaves the status, which is the part that matters.
+     */
+    const chargeFailure = async (candidate: KeyCandidate, response: Response): Promise<void> => {
+      const now = Date.now()
+      const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'), now)
+      let bodyText = ''
+      try {
+        bodyText = await readBoundedText(response, 4096)
+      } catch {
+        // The status alone still classifies most failures.
+      }
+      const kind = classifyFailure(response.status, bodyText)
+      if (kind === undefined) return
+      keyRest.note(
+        restKeyOf(override.route, candidate.ref),
+        kind,
+        retryAfterMs === undefined ? { now } : { now, retryAfterMs },
+      )
+    }
+
+    /** Whether the caller walked away; a cancelled request is not a key failure. */
+    const callerAborted = (): boolean =>
+      init?.signal?.aborted === true ||
+      (typeof Request !== 'undefined' && input instanceof Request && input.signal.aborted)
+
     if (keyCandidates.length <= 1) {
-      return attempt(keyCandidates[0]?.value)
+      const solo = keyCandidates[0]
+      const response = await attempt(solo?.value)
+      if (solo !== undefined) {
+        if (shouldFailover(response.status)) await chargeFailure(solo, response)
+        else keyRest.clear(restKeyOf(override.route, solo.ref))
+      }
+      return response
     }
     // Try keys in preference order; a retryable status on a non-final attempt
     // releases the rejected body and moves to the next key. A 400/404/422 is a
     // request-shape failure every key would repeat, so it is returned as-is.
-    let response = await attempt(keyCandidates[0].value)
-    for (let index = 1; index < keyCandidates.length; index += 1) {
-      if (!shouldFailover(response.status)) return response
+    let lastFailure: unknown
+    for (let index = 0; index < keyCandidates.length; index += 1) {
+      const candidate = keyCandidates[index]
+      let response: Response
+      try {
+        response = await attempt(candidate.value)
+      } catch (error) {
+        // A transport failure (connection refused, DNS, a dropped connection) is
+        // this attempt's failure too: the next key may still reach the provider.
+        if (callerAborted()) throw error
+        lastFailure = error
+        keyRest.note(restKeyOf(override.route, candidate.ref), 'refused')
+        continue
+      }
+      if (!shouldFailover(response.status)) {
+        keyRest.clear(restKeyOf(override.route, candidate.ref))
+        return response
+      }
+      await chargeFailure(candidate, response)
+      if (index === keyCandidates.length - 1) return response
       await response.body?.cancel().catch(() => {
         // Releasing a rejected attempt's body is best-effort cleanup; the retry
         // decides the outcome either way.
       })
-      response = await attempt(keyCandidates[index].value)
     }
-    return response
+    throw lastFailure ?? new Error('no key could place the request')
   }
 }
 
@@ -247,6 +398,8 @@ export interface OverlaySource {
    * a live property so an activation can begin routing keys after install.
    */
   keys?: (context: KeyRouteContext) => Promise<readonly KeyCandidate[]>
+  /** Combines a GET model listing across the resolved key candidates. */
+  modelListing?: (context: ModelListingContext) => Promise<Response | undefined>
 }
 
 /**
@@ -271,6 +424,7 @@ export function installHeaderOverlay(source: OverlaySource): HeaderOverlay {
     // Delegate through the live source property so a resolver attached after
     // install is honoured, and its internal data stays current.
     keys: source.keys === undefined ? undefined : context => source.keys!(context),
+    modelListing: source.modelListing === undefined ? undefined : context => source.modelListing!(context),
   })
   const owned = registry
   return {

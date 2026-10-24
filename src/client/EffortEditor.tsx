@@ -13,7 +13,7 @@
  * @module dsh-model-think-level/EffortEditor
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { PLUGIN_ID } from '../constants.js'
 import type {
@@ -372,15 +372,18 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     // a level of the declared ladder, and a stale one must not survive.
     const nextDefaultEffort = !on && defaultEffort === level ? '' : defaultEffort
     if (nextDefaultEffort !== defaultEffort) setDefaultEffort(nextDefaultEffort)
-    setDraft(current => {
-      const next = { ...current, [level]: { ...current[level], on } }
-      // Enabling a thinking level pre-fills the conventional spelling.
-      if (on && level !== 'off' && next[level].wire.trim().length === 0) {
-        next[level] = { ...next[level], wire: level }
-      }
-      commitPending(next, modality, nextDefaultEffort)
-      return next
-    })
+    // The next draft is built OUTSIDE the state updater, exactly like
+    // patchThinking: an updater must stay pure (React may double-invoke it in
+    // StrictMode or discard a speculative render), and the ledger commit below
+    // is a side effect by definition. These handlers run once per user event,
+    // so the render-scope draft is current.
+    const next = { ...draft, [level]: { ...draft[level], on } }
+    // Enabling a thinking level pre-fills the conventional spelling.
+    if (on && level !== 'off' && next[level].wire.trim().length === 0) {
+      next[level] = { ...next[level], wire: level }
+    }
+    setDraft(next)
+    commitPending(next, modality, nextDefaultEffort)
     setMessage(undefined)
   }
 
@@ -401,11 +404,10 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
 
   const patchWire = (level: (typeof LEVEL_ORDER)[number], wire: string): void => {
     markDirty()
-    setDraft(current => {
-      const next = { ...current, [level]: { ...current[level], wire } }
-      commitPending(next, modality, defaultEffort)
-      return next
-    })
+    // Same purity rule as patchLevel: compute, set, then commit.
+    const next = { ...draft, [level]: { ...draft[level], wire } }
+    setDraft(next)
+    commitPending(next, modality, defaultEffort)
     setMessage(undefined)
   }
 
@@ -536,12 +538,14 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
 
   // Default-wire warning (issue #2): a stored forced-thinking ladder sends
   // an off-equivalent on Default/test calls. The format prefers the just
-  // applied suggestion, else the knowledge base for this route.
-  const wireFormat = appliedCompatRef.current?.thinkingFormat
-    ?? suggestEfforts(modelId, {
-      ...(routeApi === undefined ? {} : { api: routeApi }),
-      ...(routeBaseURL === undefined ? {} : { baseURL: routeBaseURL }),
-    }).compat?.thinkingFormat
+  // applied suggestion, else the knowledge base for this route. The knowledge
+  // scan is memoised on its inputs: every keystroke in a wire input re-renders
+  // this editor, and the match is a full knowledge-table pass.
+  const routeWireFormat = useMemo(() => suggestEfforts(modelId, {
+    ...(routeApi === undefined ? {} : { api: routeApi }),
+    ...(routeBaseURL === undefined ? {} : { baseURL: routeBaseURL }),
+  }).compat?.thinkingFormat, [modelId, routeApi, routeBaseURL])
+  const wireFormat = appliedCompatRef.current?.thinkingFormat ?? routeWireFormat
   const wireRisk = defaultWireRisk(initialEfforts, wireFormat)
 
   const disabled = readOnly || busy

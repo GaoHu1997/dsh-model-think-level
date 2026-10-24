@@ -1687,20 +1687,68 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   padding: 9px 10px;
 }
 
-/* The default key is the first in preference order; it signs any model more than
-   one key can serve, so it opens the row as a small filled pill rather than a
-   radio. Every key is active — there is no single enabled seat any more. */
-.bre-keys-default {
+/* The switch at the head of every key row: an empty grey circle while the key
+   is switched off, a green circle with a tick inside once it is switched into
+   use. Off is a pause, not a deletion — the label, scope and protocol stay —
+   so the bare ring reads as the row's state, not as an error. With several
+   keys coexisting there is no "default" badge: which key signs a model is the
+   scope's decision. */
+.bre-keys-toggle {
   flex: 0 0 auto;
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
   border-radius: 999px;
-  background: var(--dsw-alias-label-primary, #0f1115);
-  color: var(--dsw-alias-label-primary-foreground, #ffffff);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.5;
-  letter-spacing: 0.02em;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #9aa1ab);
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: color 140ms ease, opacity 140ms ease;
 }
+
+.bre-keys-toggle:hover:not(:disabled),
+.bre-keys-toggle:focus-visible { color: var(--dsw-alias-label-secondary, #6b7280); }
+
+.bre-keys-toggle:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--dsw-alias-border-l3);
+}
+
+.bre-keys-toggle:disabled { cursor: default; }
+
+.bre-keys-toggle.is-on { color: var(--dsw-alias-state-success-primary, #22c55e); }
+
+.bre-keys-toggle.is-on:hover:not(:disabled),
+.bre-keys-toggle.is-on:focus-visible {
+  color: var(--dsw-alias-state-success-primary, #22c55e);
+  opacity: 0.85;
+}
+
+/* Ring and tick are two stacked glyphs in one 16px cell: the tick is absent
+   while off, so the circle stands alone rather than showing a faded check. */
+.bre-keys-toggle-mark {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+}
+
+.bre-keys-toggle-mark > svg {
+  grid-area: 1 / 1;
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+/* A switched-off key stays listed but reads as idle: its name and preview dim,
+   while the actions keep their full strength so the row stays workable. */
+.bre-keys-row.is-off .bre-keys-alias,
+.bre-keys-row.is-off .bre-keys-mask { opacity: 0.45; }
 
 /* With an alias the alias is the row's name and the masked key follows it as a
    quiet code pill; without one the masked key is the name and takes the row's
@@ -1739,23 +1787,12 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   font-size: 12px;
 }
 
-/* The model-scope summary beside the key: how many models this key serves (or
-   "all models" before a probe, or "none found" after an empty one). Quiet, so
-   the alias and the mask stay the row's name. */
-.bre-keys-scope-label {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: var(--dsw-alias-label-secondary, #6b7280);
-}
-
 /* The row's three actions, revealed on hover or keyboard focus rather than
    removed, so the row keeps its width and nothing shifts under the pointer.
    Revealing is opacity alone; a pointer that cannot hover simply always sees
-   them, because a hidden action there would be an unreachable one. */
+   them, because a hidden action there would be an unreachable one. The model
+   scope rides on its own button here (its label is the count), so there is no
+   separate summary text beside the key any more. */
 .bre-keys-actions {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1883,6 +1920,15 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    once, not on the row it would otherwise live in. */
 .bre-keys-footer { display: flex; justify-content: flex-end; }
 
+/* The offer to add the models the keys advertise but the provider does not
+   declare: one sentence and one link, never a silent write. */
+.bre-keys-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+}
+
 .bre-keys-discover {
   display: inline-flex;
   align-items: center;
@@ -1931,39 +1977,269 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-keys .bre-effort-message { font-size: 11px; }
 
 /* The per-key protocol picker. It lives inside .bre-keys-actions, so it must
-   look like the buttons beside it — same size, same colour, no box of its own —
-   or the hover tray reads as two different kinds of control. "Default protocol"
-   (the empty value) follows the route's own API protocol. */
+   look like the plain buttons beside it — same size, same grey, no box of its
+   own — or the hover tray reads as two different kinds of control. "Default
+   protocol" (the empty value) follows the route's own API protocol.
+   What you read is a LABEL, not a control: a native <select> is as wide as its
+   widest OPTION, so a short value left the chevron floating a hundred pixels to
+   its right (user item 2). The button is exactly as wide as the text and opens
+   this module's own menu, which can explain each protocol (参考图样式). */
+.bre-keys-protocol-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  color: var(--dsw-alias-label-secondary, #61666b);
+}
+
 .bre-keys-protocol {
-  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
   padding: 2px 6px;
   border: none;
   border-radius: 4px;
   background: none;
-  color: var(--dsw-alias-link);
+  color: inherit;
   font: inherit;
   font-size: 12px;
+  line-height: 1;
   cursor: pointer;
-  -webkit-appearance: none;
-  appearance: none;
 }
 
-.bre-keys-protocol:hover { text-decoration: underline; }
+.bre-keys-protocol-label {
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.bre-keys-protocol-caret {
+  color: inherit;
+  font-size: 12px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.bre-keys-protocol:hover .bre-keys-protocol-label { text-decoration: underline; }
+
+/* An open menu is a pressed control: while its list is up, the trigger keeps the
+   tray's colour instead of going back to quiet grey. */
+.bre-keys-protocol[aria-expanded='true'] { color: var(--dsw-alias-label-primary, #0f1115); }
 
 .bre-keys-protocol:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
 }
 
-.bre-keys-protocol:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
+.bre-keys-protocol:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- The protocol menu ----
+   One entry per protocol, its name over the line that says what that wire is
+   for: the names alone do not tell Chat Completions and Responses apart, and the
+   choice is about the models behind the key (user request, 参考图样式). Portalled
+   onto <body> because the key list clips its overflow; the panel wears the same
+   surface, radius and hairline as the app's own menus. */
+.bre-protocol-menu {
+  position: fixed;
+  z-index: 2147483000;
+  box-sizing: border-box;
+  width: 292px;
+  padding: 6px;
+  border-radius: 12px;
+  border: 0.5px solid var(--dsw-alias-border-l4, rgba(0, 0, 0, .1));
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .16), 0 2px 6px rgba(0, 0, 0, .08);
+  animation: bre-protocol-menu-in 120ms ease-out;
+}
+
+@keyframes bre-protocol-menu-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.bre-protocol-menu-title {
+  margin: 0;
+  padding: 6px 10px 4px;
+  color: var(--dsw-alias-label-secondary, #61666b);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.bre-protocol-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bre-protocol-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bre-protocol-option:hover { background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09)); }
+
+.bre-protocol-option:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+}
+
+/* The choice in force is a grey pillow with a tick, exactly like the app's own
+   single-choice menus; its title sits a hair heavier so it reads as the answer. */
+.bre-protocol-option[aria-selected='true'] {
+  background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09));
+}
+
+.bre-protocol-option-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 18px;
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+
+.bre-protocol-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* One line each, always: a wrapped hint made one row taller than its neighbours
+   and the column of ticks lost its rhythm. A hint too long for the panel is cut
+   with an ellipsis rather than allowed to reflow the list. */
+.bre-protocol-option-title,
+.bre-protocol-option-hint {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.bre-protocol-option-title {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.bre-protocol-option[aria-selected='true'] .bre-protocol-option-title { font-weight: 600; }
+
+.bre-protocol-option-hint {
+  color: var(--dsw-alias-label-secondary, #61666b);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bre-protocol-menu { animation: none; }
+}
+
+/* The key list's own links read as plain grey text: a row can carry four of them
+   and blue made them compete with the value they act on (user item 3). Danger
+   keeps its hue, and the scope form's primary shortcuts stay untouched. */
+.bre-keys-actions .bre-link-button { color: var(--dsw-alias-label-secondary, #61666b); }
+.bre-keys-actions .bre-link-button:hover { color: var(--dsw-alias-label-primary, #0f1115); }
+.bre-keys-actions .bre-keys-danger { color: var(--dsw-alias-state-error-primary, #d33); }
+
+/* The API protocol as ONE segmented bar: one segment per protocol, the one in
+   force sitting in a white pill on a shared grey track, so the alternatives read
+   as parts of a single choice instead of three loose buttons (user item 1). The
+   host's own <select> stays in the DOM behind them — hidden by the module, not
+   removed — because it is what the host saves and what this module reads the
+   family from. */
+.bre-protocol-cards {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09));
+}
+
+.bre-protocol-card {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 0;
+  min-width: max-content;
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #61666b);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  text-align: center;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.bre-protocol-card:hover { color: var(--dsw-alias-label-primary, #0f1115); }
+
+.bre-protocol-card.is-selected {
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  color: var(--dsw-alias-label-primary, #0f1115);
+  box-shadow: 0 1px 2px #0000001a, 0 0 0 1px var(--dsw-alias-border-l2, #0000001a);
+}
+
+.bre-protocol-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
+}
 
 /* The provider card's address tag: the protocol family the base URL serves.
-   Quiet enough to read as a field prefix, never as a control. */
+   Quiet enough to read as a field prefix, never as a control. The min-width is a
+   shared prefix column: both the card's address row and the 更多端点 row start
+   their inputs at the same offset, and a wider family name still grows it. */
 .bre-endpoint-family {
   flex: 0 0 auto;
+  min-width: 64px;
   font-size: 12px;
   color: var(--dsw-alias-label-secondary, #6b7280);
   white-space: nowrap;
+}
+
+/* The tag sits BESIDE the address input, not stacked above it. The official
+   field is a column flex box (title, then control), so a tag inserted before the
+   control would get a line of its own; a marked field becomes a two-column grid
+   instead — the title keeps the full width, the tag takes the first column and
+   the input the second. The first column is max-content so a wider family name
+   is never clipped. */
+[data-bre-endpoint-field] {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+}
+
+[data-bre-endpoint-field] > [data-bre-endpoint-title] { grid-column: 1 / -1; }
+
+[data-bre-endpoint-field] > .bre-endpoint-family { grid-column: 1; }
+
+[data-bre-endpoint-field] > input {
+  grid-column: 2;
+  width: 100%;
 }
 
 /* The injected second address row. Collapsed until 更多端点 is pressed, so the
@@ -1980,28 +2256,56 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 
 .bre-endpoint-row[hidden] { display: none; }
 
+/* The injected second row's own input. The shared input caps itself at 240px for
+   the narrow panels it was written for; beside a full-width address box that cap
+   showed up as a short field under a long one (user item 5), so the row's input
+   takes the column the main input takes. */
 .bre-endpoint-url {
   flex: 1 1 auto;
   min-width: 0;
+  max-width: none;
 }
 
-/* 更多端点: a grey text button tucked after the API-protocol title — the host's
-   own link affordance, and deliberately smaller than the title so it reads as
-   an aside rather than a field of its own. */
+/* 更多端点: a small grey link riding the API 地址 label line itself, right after
+   the label text (user item 4). The official label is an inline-flex box, so the
+   link simply joins its children and the host's own 10px gap spaces it from the
+   words; the row it reveals still opens directly under the field group. */
 .bre-endpoint-toggle {
-  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
   padding: 0;
   border: none;
   background: none;
   color: var(--dsw-alias-label-secondary, #6b7280);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   line-height: 1;
   cursor: pointer;
 }
 
-.bre-endpoint-toggle:hover { color: var(--dsw-alias-label-primary, #0f1115); text-decoration: underline; }
+.bre-endpoint-toggle:hover { color: var(--dsw-alias-label-primary, #0f1115); text-decoration: none; }
+
+/* The disclosure mark is DRAWN, not typed: two 1.5px strokes make the thin
+   chevron of the reference, and it turns over when the row opens instead of
+   being swapped for a second glyph (user item 2). */
+.bre-endpoint-toggle::after {
+  content: '';
+  width: 5px;
+  height: 5px;
+  margin-left: 4px;
+  margin-top: -2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 140ms ease, margin-top 140ms ease;
+}
+
+.bre-endpoint-toggle[aria-expanded='true']::after {
+  margin-top: 2px;
+  transform: rotate(225deg);
+}
 
 .bre-endpoint-toggle:focus-visible {
   outline: none;

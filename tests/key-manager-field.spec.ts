@@ -47,8 +47,10 @@ function stubClient(): KeyManagerClient {
     replace: async () => EMPTY,
     remove: async () => EMPTY,
     setScope: async () => EMPTY,
+    setEnabled: async () => EMPTY,
     setProtocol: async () => EMPTY,
     setEndpoints: async () => EMPTY,
+    applyMerged: async () => EMPTY,
     reveal: async () => undefined,
   }
 }
@@ -291,9 +293,15 @@ describe('the key list contract with the stylesheet', () => {
     expect(STYLES).toContain('border: 0.5px solid var(--dsw-alias-border-l2, #d5d7dd);')
   })
 
-  it('marks the default key with a filled badge instead of a per-row enable radio', () => {
-    expect(STYLES).toContain('.bre-keys-default {')
-    expect(STYLES).toContain('.bre-keys-scope-label {')
+  it('opens every row with a circular enable check instead of a default badge', () => {
+    expect(STYLES).toContain('.bre-keys-toggle {')
+    expect(STYLES).toContain('.bre-keys-toggle.is-on {')
+    expect(STYLES).toContain('.bre-keys-row.is-off .bre-keys-alias,')
+    // The scope summary rides on its own action button now, so the old label rule
+    // is gone and the picker's own chevron rule stands in its place.
+    expect(STYLES).not.toContain('.bre-keys-scope-label {')
+    expect(STYLES).toContain('.bre-keys-protocol-caret {')
+    expect(STYLES).not.toContain('.bre-keys-default {')
     expect(STYLES).not.toContain('.bre-keys-enable {')
     expect(STYLES).not.toContain('.bre-keys-enabled {')
   })

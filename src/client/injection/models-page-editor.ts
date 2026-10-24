@@ -2775,6 +2775,10 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     void state.describePromise.then(join => {
       seatEmptyCatalog(root, deps, state, join, seatLabels)
     }).catch(error => {
+      // Same invariant as the folded read below: a rejected describe must be
+      // forgotten, or every later scan `??=`-reuses the rejection and the seat
+      // never appears (while the error log repeats forever).
+      state.describePromise = undefined
       console.error(`[bre] empty-catalog seat failed: ${error instanceof Error ? error.message : String(error)}`)
     })
     return
@@ -2883,10 +2887,19 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         for (const id of ids) {
           if (!prior.has(id)) continue
           stageEffortsInto(state, route, id, undefined)
+          // Withdraw from BOTH snapshots: the id must not survive inside
+          // `missing` (which becomes the next scan's `prior`), or an intent
+          // staged again after the withdrawal is retired after missing just
+          // ONE scan instead of two.
           prior.delete(id)
+          ids.delete(id)
         }
       }
       state.missedScans = missing
+    } else {
+      // Nothing staged: the withdrawal bookkeeping protects nothing, and a
+      // stale snapshot would mis-age the next wave of staged intents.
+      state.missedScans = new Map()
     }
 
     // The action row belongs to the CARD, not to an expanded model disclosure.
@@ -3052,8 +3065,13 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     })
   }
   // A rejected describe must not permanently disable the injector: clear the
-  // folded promise so the next scan retries the read.
+  // folded promise so the next scan retries the read. `run` itself is sync DOM
+  // work — a throw inside it rejects the DERIVED promise, so the tail catch
+  // reports it with context instead of leaving a silent unhandled rejection
+  // over a half-mounted round (the next scan repairs the DOM).
   void state.describePromise.then(run, () => {
     state.describePromise = undefined
+  }).catch(error => {
+    console.error(`[bre] editor reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
   })
 }
