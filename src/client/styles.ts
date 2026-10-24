@@ -11,9 +11,12 @@ export const STYLES = `
    placed into the official row disclosure's repeat(auto-fit, minmax(160px,1fr))
    grid (context window and max tokens take two cells), so the span belongs
    here: on the editor itself it would target the wrapper's block box and be
-   ignored, squeezing the block into one cell. */
+   ignored, squeezing the block into one cell. The min-width floors the grid
+   item's auto minimum at 0 for the same reason: a one-line hint inside must
+   clip at the disclosure's edge, not price the host grid wider than it is. */
 .bre-effort-slot {
   grid-column: 1 / -1;
+  min-width: 0;
 }
 /* The slot wrapper is a plain column: the master thinking switch sits in it,
    directly above the card it gates. */
@@ -23,27 +26,39 @@ export const STYLES = `
   gap: 8px;
   margin: 8px 0 4px;
 }
-/* The 思考强度 card proper — rendered only while the master switch is on. */
+/* The 思考强度 card proper — rendered only while the master switch is on.
+   The redesign's 去装饰 rule for a nested card: one hairline on the card's own
+   stroke, no fill of its own — grouping is the border's job, not a second
+   grey panel stacked inside the host card. */
 .bre-effort-card {
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
   border: 0.5px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-2);
+  border-radius: var(--dsw-radius-md, 12px);
+  background: transparent;
   box-sizing: border-box;
 }
-.bre-effort-head {
+/* The editor's one-line head: switch + title, the declared state, and the
+   applied suggestion's provenance pill. */
+.bre-effort-top {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.bre-effort-state {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
 }
 .bre-effort-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--dsw-alias-label-secondary);
+  /* The section title reads as the card's own heading: primary ink at the
+     design's 13/500, not a grey caption — it names the row, the hints under
+     it carry the explanation. */
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
 }
 .bre-link-button {
   background: none;
@@ -83,31 +98,207 @@ export const STYLES = `
   background: var(--dsw-alias-interactive-bg-hover, #2631480f);
   color: var(--dsw-alias-label-secondary, #374151);
 }
-.bre-effort-grid {
-  /* Exactly two equal columns mirroring the official capacity pair the editor
-     sits under; an odd row count leaves the last cell in the left column,
-     so the left side carries the extra level. */
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 16px;
+/* The level ladder is a row of toggle pills: the armed ones carry the accent
+   tint alone (选中的档位高亮即可，无需对勾), the rest stay quiet outlines. One
+   click is one declaration. The pills are TIGHT — seven levels must sit on one
+   line in the row disclosure (a wrapped ladder with an orphaned last pill reads
+   as two ladders); the wire spellings live folded behind the link beneath. */
+.bre-pillrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
 }
-.bre-effort-row {
-  display: grid;
-  grid-template-columns: 20px 76px minmax(0, 1fr);
+.bre-lvl {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  height: 25px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l3, #0000001f);
+  background: transparent;
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.bre-lvl:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
+}
+.bre-lvl:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #4d6bfe);
+}
+.bre-lvl:disabled { opacity: 0.55; cursor: default; }
+.bre-lvl.is-on {
+  border-color: transparent;
+  background: var(--dsw-alias-brand-primary-muted, #eef2ff);
+  color: var(--dsw-alias-brand-primary, #3b82f6);
+  font-weight: 500;
+}
+/* The slider's head, written above the track (进度条上方：思考等级 + 当前等级):
+   the section name, then the level under the thumb. The value's colour is the
+   INLINE ramp hue of that stop — the same hue the thumb and the name under the
+   active stop wear — so the head follows a drag preview live. */
+.bre-effort-slider-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.bre-effort-slider-head-label {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+.bre-effort-slider-head-value {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  /* A pre-style fallback only: the component always writes the active stop's
+     ramp hue inline. */
+  color: var(--dsw-alias-label-primary);
+}
+/* The level slider: the composer menu's reasoning-level footer. A long ladder
+   wrapped its capsule row inside the popover (思考等级选择换成进度条样式); a
+   track is fixed-length whatever the ladder's size, the stop names written
+   below it, every stop on the cool→hot gradient ramp — the hue itself reads
+   as the effort's intensity (进度条渐变色，不同的等级不同的颜色). */
+.bre-effort-slider {
+  position: relative;
+  height: 18px;
+  cursor: pointer;
+  touch-action: none;
+}
+.bre-effort-slider::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 4px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: var(--dsw-alias-fill-tertiary, #ebeef2);
+}
+.bre-effort-slider:focus-visible {
+  outline: none;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #4d6bfe);
+}
+.bre-effort-slider-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 4px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  /* The gradient and the reveal are written INLINE: the fill spans the whole
+     track with its stops in track coordinates, and a clip-path opens it to the
+     thumb — a width-shrunk gradient would compress its hues as the level
+     moves. This solid brand colour is only the never-seen pre-style fallback. */
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  pointer-events: none;
+}
+.bre-effort-slider-thumb {
+  position: absolute;
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  /* The thumb's own colour is the inline ramp hue of the stop under it; the
+     brand colour here is only the fallback. */
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  box-shadow: 0 0 0 2px var(--dsw-alias-bg-primary, #fff);
+  pointer-events: none;
+}
+/* The stops, written under the track: first left-aligned, last right-aligned,
+   the middle ones centred on their stop, so the row never wraps. */
+.bre-effort-slider-labels {
+  position: relative;
+  height: 16px;
+  margin-top: 2px;
+}
+.bre-effort-slider-label {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  white-space: nowrap;
+}
+.bre-effort-slider-label.is-first { transform: none; }
+.bre-effort-slider-label.is-last { transform: translateX(-100%); }
+.bre-effort-slider-label.is-on {
+  color: var(--dsw-alias-brand-primary, #4d6bfe);
+  font-weight: 500;
+}
+/* A section: its label row (label, hint, trailing action) and its body. */
+.bre-effort-sec { display: flex; flex-direction: column; }
+.bre-effort-labelrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.bre-effort-label {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+.bre-effort-labelhint {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bre-effort-adapt { margin-left: auto; flex: none; }
+/* The quiet link that unfolds the armed levels' wire spellings. It sits right
+   under the decision pills, sized like the label hints — the spelling row is
+   an editor's aside, not a form row of its own. */
+.bre-effort-wiretoggle {
+  align-self: flex-start;
+  margin: 2px 0 0 -6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+/* The wire spellings, compact: label + small input pairs that
+   read as the bytes row under the decision row. */
+.bre-wire-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 4px;
+}
+.bre-wire-item {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
 }
-.bre-effort-row input[type='checkbox'] {
-  /* Bigger than the browser default (~13px): a tap/point target that does
-     not require precision, in the theme accent when checked. */
-  width: 18px;
-  height: 18px;
-  margin: 0;
-  accent-color: var(--dsw-alias-brand-primary);
-  cursor: pointer;
+.bre-wire-name {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
 }
-.bre-effort-level { color: var(--dsw-alias-label-tertiary); }
+/* The sections BELOW the ladder stack full-width: the default-effort slider
+   needs the whole row's length (a squeezed half-column is what wrapped its
+   pills and its hint), and the modality pills read fine on their own line. */
+.bre-effort-cols {
+  display: grid;
+  /* The 0 floor stands the track's auto minimum down: the default-effort hint
+     is one nowrap line whose min-content width would otherwise price the track
+     past the disclosure's width — overflow, with the ellipsis never engaged. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
 .bre-effort-wire {
   box-sizing: border-box;
   min-width: 0;
@@ -123,6 +314,7 @@ export const STYLES = `
 .bre-effort-wire:focus {
   outline: none;
   border-color: var(--dsw-alias-brand-primary);
+  box-shadow: 0 0 0 3px var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .14));
 }
 .bre-effort-empty { min-height: 24px; }
 .bre-effort-actions {
@@ -144,30 +336,53 @@ export const STYLES = `
 .bre-effort-message.bre-error { color: #c62828; }
 .bre-effort-message.bre-info { color: var(--dsw-alias-link); }
 .bre-effort-note { font-size: 11px; margin: 0; color: var(--dsw-alias-label-tertiary); }
-/* ---- Input-modality section ---- */
-.bre-modality {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+/* The one-line variant: the default-effort hint under the pick's form row. The
+   row disclosure is narrow, and a wrapped explanation read as a broken layout
+   (说明文字也换行了); the headers pane keeps its own wrapping notes. */
+.bre-effort-note-oneline {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.bre-modality-row {
-  display: flex;
+/* The default-effort dropdown: sized by its longest option, matching the wire
+   inputs' quiet box. It sits BESIDE the row's label (选择框贴近“默认思考强度”) —
+   the row is a form row, not a two-ended header, so no auto margin pushes the
+   pick to the disclosure's far edge. */
+.bre-effort-select {
+  flex: none;
+  height: 28px;
+  min-width: 128px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l3, #0000001f);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-primary, #fff);
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.bre-effort-select:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #4d6bfe);
+}
+.bre-effort-select:disabled { opacity: 0.55; cursor: default; }
+/* The master thinking switch, which lives OUTSIDE the card it gates: with it
+   off that card is not rendered at all, so nothing here has to be hidden. */
+.bre-thinking-switch {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  margin: 0;
+  cursor: pointer;
 }
-.bre-modality-row input[type='checkbox'] {
-  width: 18px;
-  height: 18px;
+.bre-thinking-switch input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
   margin: 0;
   accent-color: var(--dsw-alias-brand-primary);
   cursor: pointer;
 }
-.bre-modality-clear { margin-left: auto; }
-.bre-modality-note { font-size: 11px; margin: 0; color: var(--dsw-alias-label-tertiary); }
-/* The master thinking switch, which lives OUTSIDE the card it gates: with it
-   off that card is not rendered at all, so nothing here has to be hidden. */
-.bre-thinking-switch { margin: 0; }
 .bre-select, .bre-text-input {
   box-sizing: border-box;
   width: 100%;
@@ -186,6 +401,9 @@ export const STYLES = `
 .bre-select:focus, .bre-text-input:focus {
   outline: none;
   border-color: var(--dsw-alias-brand-primary);
+  /* The redesign's focus token: brand border over a soft brand halo, so the
+     focused field reads at a glance without a hard outline. */
+  box-shadow: 0 0 0 3px var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .14));
 }
 .bre-select:disabled, .bre-text-input:disabled { opacity: 0.6; cursor: default; }
 .bre-select {
@@ -209,13 +427,14 @@ export const STYLES = `
   gap: 3px;
 }
 .bre-reference {
+  /* The capacity reference is a footnote, not a block: no dashed box, no
+     padding of its own — it hangs under the section as quiet tertiary text
+     and never reads as a second panel inside the card. */
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 4px 14px;
-  padding: 6px 8px;
-  border: 1px dashed var(--dsw-alias-border-l3);
-  border-radius: 6px;
+  padding: 2px 0 0;
   font-size: 11px;
   color: var(--dsw-alias-label-tertiary);
 }
@@ -263,12 +482,162 @@ export const STYLES = `
   white-space: nowrap;
 }
 
-/* ---- Model / reasoning-level rows ----
-   Presentation follows dsh-tauri-model-config's settings rows
-   (src/client/models/styles.ts: .zGbnIq_rowCard / .zGbnIq_rowHead /
-   .zGbnIq_iconButton): hairline separators between rows and a list opening
-   under the row it belongs to. Re-prefixed bre- and routed through the tokens
-   this file already uses. */
+/* ---- Model switcher body ----
+   One quiet head names the current model and its level; the provider and model
+   columns are ALWAYS visible (no drill-in row); a resident search box sits
+   above the columns; the reasoning level is switched in place as a segmented
+   footer. No panel ever opens or closes, so the body's height is settled at
+   mount and the commit paths carry no re-measure dance. */
+.bre-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* The head: the row label on the left, the current model pushed right (name in
+   primary ink, the provider muted behind it) and the level pill at the far
+   right — the pill is the same brand tint every "selected" surface wears. */
+.bre-menu-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 0 2px;
+}
+.bre-menu-cur {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  margin-left: auto;
+}
+.bre-menu-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+.bre-menu-prov {
+  flex: none;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+.bre-pill {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .12));
+  color: var(--dsw-alias-brand-primary, #4d6bfe);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+/* The resident search. Deliberately its OWN class family (not the official
+   pane's .bre-search-input-*): the replica and the official search box share a
+   menu, and every probe that looks for the official box must not find the
+   replica's. The rules mirror the official box's look one to one. */
+.bre-menu-search { padding-bottom: 2px; }
+.bre-menu-search-box {
+  display: flex;
+  align-items: center;
+  position: relative;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.06));
+  border: 0.5px solid var(--dsw-alias-border-l4, rgba(255, 255, 255, 0.12));
+  color: var(--dsw-alias-label-primary);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.bre-menu-search-box:focus-within {
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+  box-shadow: 0 0 0 3px var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .14));
+}
+.bre-menu-search-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  pointer-events: none;
+}
+.bre-menu-search-icon svg { width: 14px; height: 14px; }
+.bre-menu-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+}
+.bre-menu-search-input::placeholder {
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  opacity: 0.85;
+}
+.bre-menu-search-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.bre-menu-search-clear:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.1));
+  color: var(--dsw-alias-label-primary);
+}
+.bre-menu-search-clear svg { width: 12px; height: 12px; }
+/* The provider cell's model count, where the drill chevron used to sit: the
+   columns are always open, so the number is the only fact a chevron added. */
+.bre-provider-count {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+/* While the search holds a query the model column lists matches across every
+   provider; the muted prefix says which one each row belongs to. */
+.bre-option-origin { color: var(--dsw-alias-label-tertiary); }
+/* The footer: the reasoning level switched IN PLACE — a head naming the section
+   and the current level (进度条上方：思考等级 + 当前等级) above the gradient
+   track, the stop names written below it. The track and the names span the full
+   width, so each name sits under its own stop whatever the ladder's size. */
+.bre-menu-foot {
+  display: flex;
+  flex-direction: column;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border-l4);
+}
+.bre-menu-slider {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.bre-menu-slider:focus-within { outline: none; }
 /* Layout only — it deliberately paints NO background, border, radius or
    overflow clip. The replica is mounted inside the OFFICIAL menu, and that
    shell already draws its own surface (MenuSurface: a [data-menu-material]
@@ -277,41 +646,6 @@ export const STYLES = `
    rounded by --dsw-radius-lg and outlined by --dsw-elevation-prominent).
    A second opaque card in here shows that official surface as a grey frame
    around it — two stacked surfaces where every other menu in the app has one. */
-.bre-card {
-  display: flex;
-  flex-direction: column;
-}
-.bre-row-control {
-  appearance: none;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 38px;
-  padding: 0 10px;
-  border: 0;
-  /* Matches the official menu cells (.u91W7W_cell / .u91W7W_option use
-     --dsw-radius-md, 8px here) and the .bre-option rows below, now that the
-     surface behind the rows is the menu's own and hover is no longer clipped
-     by a card. */
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background 120ms ease;
-}
-.bre-row-control:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(120, 125, 140, .09));
-}
-.bre-row-control.is-open { background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09)); }
-.bre-row-control:disabled { cursor: default; opacity: .6; }
-.bre-row-control:focus-visible {
-  outline: none;
-  box-shadow: inset 0 0 0 2px var(--dsw-alias-border-l3);
-}
 .bre-row-label {
   flex: none;
   font-size: 13px;
@@ -331,7 +665,6 @@ export const STYLES = `
   color: var(--dsw-alias-label-primary);
 }
 .bre-row-value.is-muted { font-weight: 400; color: var(--dsw-alias-label-tertiary); }
-.bre-divider { height: 1px; margin: 0 10px; background: var(--dsw-alias-border-l4); }
 .bre-panel {
   display: flex;
   flex-direction: column;
@@ -342,12 +675,17 @@ export const STYLES = `
 }
 /* Provider column + model column of the model list, side by side. The height is
    FIXED: switching provider must not resize the card, or every click would need
-   another same-frame re-place and any missed one shows as a jump. */
+   another same-frame re-place and any missed one shows as a jump. It is also
+   BUDGETED: head + search + panel + footer must not exceed the height the
+   official popover measured for the old two-row body, or the popover clips the
+   footer's last line (切换模型下方被截断). The slider head above the track
+   (.bre-effort-slider-head: 18px of text + 4px of margin) is paid for OUT of
+   this height, so the card's total is unchanged. */
 .bre-panel-models {
   flex-direction: row;
   align-items: stretch;
   gap: 0;
-  height: 240px;
+  height: 178px;
   max-height: none;
   overflow: hidden;
   padding: 4px 6px 8px;
@@ -416,7 +754,10 @@ export const STYLES = `
 .bre-option.is-active {
   color: var(--dsw-static-deepseek-500, #4d70ff);
   font-weight: 500;
-  background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09));
+  /* The selected row wears the accent's own tint, not a grey fill: the tint is
+     the one background that says "selected" (the redesign's single-accent
+     rule), and it keeps the row's name as the brightest thing on it. */
+  background: var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .1));
 }
 /* The open provider is the highlighted one; the provider of the CURRENT model
    keeps the accent so the column says where the selection lives. */
@@ -425,7 +766,6 @@ export const STYLES = `
   color: var(--dsw-static-deepseek-500, #4d70ff);
   font-weight: 500;
 }
-.bre-provider .bre-row-chevron { width: 14px; height: 14px; font-size: 14px; }
 /* Capability badges on a model row (image input / thinking). Muted so the name
    stays the brightest thing in the row; the badge's own title carries the copy. */
 .bre-option-tags {
@@ -438,7 +778,6 @@ export const STYLES = `
 .bre-option.is-active .bre-option-tags { color: var(--dsw-static-deepseek-500, #4d70ff); }
 .bre-tag { display: inline-flex; align-items: center; }
 .bre-tag-icon { display: block; width: 13px; height: 13px; }
-.bre-option-check { flex: none; width: 14px; height: 14px; }
 .bre-empty { padding: 6px 8px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
 /* ---- Truncated-label tooltip (custom, replaces the native title) ----
    A self-drawn bubble instead of the OS tooltip, which the page cannot style
@@ -493,20 +832,6 @@ body:not([data-ds-dark-theme]) .bre-tip {
   background: var(--dsw-alias-state-error-tertiary, rgba(220,55,70,.08));
   font-size: 11px;
 }
-.bre-row-chevron {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  font-size: 18px;
-  line-height: 1;
-  color: var(--dsw-alias-label-tertiary);
-  transform: rotate(0deg);
-  transition: transform 120ms ease;
-}
-.bre-row-chevron.is-open { transform: rotate(90deg); }
 /* ---- Models-page slider toggle (boxed setting item) ----
    Item form ported VERBATIM from upstream .re-setting-row; the surrounding
    box is the requested container (border only, transparent background). */
@@ -559,7 +884,7 @@ body:not([data-ds-dark-theme]) .bre-tip {
   outline: 2px solid var(--dsw-static-blue-400, #5d83ff);
   outline-offset: 2px;
 }
-.bre-slider-setting-switch.is-on { background: var(--dsw-alias-state-business-primary, #4f73ff); }
+.bre-slider-setting-switch.is-on { background: var(--dsw-alias-brand-primary, #4d6bfe); }
 .bre-slider-setting-switch-knob {
   position: absolute;
   top: 2px;
@@ -934,7 +1259,8 @@ body:not([data-ds-dark-theme]) .bre-tip {
   box-sizing: border-box;
 }
 .bre-headers-edit input.bre-text-input:focus {
-  border-color: var(--dsw-alias-label-tertiary, #81858c);
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+  box-shadow: 0 0 0 3px var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .14));
   outline: none;
 }
 .bre-headers-edit input.bre-text-input:disabled { opacity: 0.6; cursor: default; }
@@ -1267,12 +1593,17 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    marks the card: a card the pass could not take over (the DeepSeek account
    editor) keeps that mount visible for its request-header section, and must not
    grow a bar that switches nothing. */
+/* The tab bar. The old segmented track (grey rail + lifted white pill) is
+   retired for the underline form the redesign settles on: a quiet text row over
+   one hairline, the active tab named by a brand bar under its own text — one
+   emphasis, no second surface to stack on the card's. */
 .bre-editor-tabs {
   display: none;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 10px;
-  background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09));
+  gap: 20px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, #0000001a);
 }
 
 /* Only a taken-over card shows the bar. */
@@ -1311,35 +1642,54 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 
 .bre-editor-tab {
-  flex: 1 1 0;
+  flex: 0 1 auto;
   min-width: 0;
-  height: 28px;
-  padding: 0 10px;
+  height: 32px;
+  padding: 0 2px;
   border: none;
-  border-radius: 8px;
+  border-radius: 0;
   background: transparent;
   color: var(--dsw-alias-label-secondary, #61666b);
   font: inherit;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 400;
   line-height: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
-  transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+  position: relative;
+  transition: color 140ms ease;
 }
 
 .bre-editor-tab:hover { color: var(--dsw-alias-label-primary, #0f1115); }
 
-/* The selected segment lifts out of the track: the page's own surface colour
-   plus the card's own hairline, the same elevation the host uses for raised
-   controls. Hover on a selected tab stays put — it is already where you are. */
+/* The selected tab is named by the bar under its own text, not by a filled
+   pill: the indicator occupies the bar's own hairline, so no second surface
+   and no extra height. Hover on a selected tab stays put — it is already
+   where you are. */
+.bre-editor-tab::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 140ms ease;
+}
+
 .bre-editor-tab[aria-selected='true'],
 .bre-editor-tab[aria-selected='true']:hover {
-  background: var(--dsw-alias-bg-layer-1, #fff);
+  background: transparent;
   color: var(--dsw-alias-label-primary, #0f1115);
-  box-shadow: 0 1px 2px #0000001a, 0 0 0 1px var(--dsw-alias-border-l2, #0000001a);
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.bre-editor-tab[aria-selected='true']::after {
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
 }
 
 .bre-editor-tab:focus-visible {
@@ -1359,6 +1709,44 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-tabbed:not([data-bre-tab='models']) [data-bre-region='models'],
 .bre-tabbed:not([data-bre-tab='advanced']) [data-bre-region='advanced'] {
   display: none !important;
+}
+
+/* The provider pane's form reads as the redesign's two-column grid: the label
+   takes a fixed leading column, the control fills the rest. Promoting the
+   host label's children with display:contents keeps the label-input
+   association (the label element stays the control's parent in the DOM) while
+   letting the span and the control land in their own columns. Scoped to the
+   taken-over provider pane and the host's measured field shape, so a kernel
+   that changed its markup simply keeps its own stacked layout. The endpoint
+   field opts out: its family chip + title row is its own shape (the design's
+   endpoint row), and its title carries the 更多端点 toggle besides. */
+.bre-tabbed[data-bre-tab='provider'] [data-bre-editor-body] .field:not([data-bre-endpoint-field]) {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+}
+.bre-tabbed[data-bre-tab='provider'] [data-bre-editor-body] .field:not([data-bre-endpoint-field]) > label {
+  display: contents;
+}
+/* The input sits BESIDE its label — the same two-column shape on every card,
+   create or edit (新增供应商的 api 密钥字段与修改卡不一致). A field with no
+   label of its own (the provider id on the create card) spans the form instead
+   of squeezing into the label column. The endpoint field's input keeps its own
+   grid's second column — the same specificity race, won back explicitly. */
+.bre-tabbed[data-bre-tab='provider'] [data-bre-editor-body] .field > input { grid-column: 2; }
+.bre-tabbed[data-bre-tab='provider'] [data-bre-editor-body] .field:not(:has(> label)) > input { grid-column: 1 / -1; }
+.bre-tabbed[data-bre-tab='provider'] [data-bre-editor-body] [data-bre-endpoint-field] > input { grid-column: 2; }
+/* The extra address rows need no indent of their own: their chip is the same
+   fixed 96px prefix the field's chip takes, so the row's input already sits in
+   the field input's column (see .bre-endpoint-family above). */
+/* The card's commit row reads as the footer the design gives every card: one
+   hairline above, the pair right-aligned beneath it, on every tab that shows
+   the card's own fields. */
+.bre-tabbed [data-bre-editor-body] [class*='editorActions'] {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--dsw-alias-border-l2, #0000001a);
 }
 
 /* The advanced tab: the official body — fields, model list — steps aside for the
@@ -1672,7 +2060,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   margin: 0;
   padding: 0;
   border: 0.5px solid var(--dsw-alias-border-l2, #d5d7dd);
-  border-radius: 8px;
+  border-radius: var(--dsw-radius-md, 12px);
   list-style: none;
   overflow: hidden;
 }
@@ -1685,14 +2073,21 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   gap: 8px;
   min-width: 0;
   padding: 9px 10px;
+  /* The hovered row lifts a shade, the way the redesign's list rows do — the
+     container clips the corners, so the fill stays inside the ruled box. */
+  transition: background 120ms ease;
 }
 
-/* The switch at the head of every key row: an empty grey circle while the key
-   is switched off, a green circle with a tick inside once it is switched into
-   use. Off is a pause, not a deletion — the label, scope and protocol stay —
-   so the bare ring reads as the row's state, not as an error. With several
-   keys coexisting there is no "default" badge: which key signs a model is the
-   scope's decision. */
+.bre-keys-row:hover { background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .07)); }
+
+/* The switch at the head of every key row: a ring with a check inside it. While
+   the key is switched into use the WHOLE icon is the brand blue — ring and glyph
+   together; while it is benched it is a bare grey ring with nothing drawn in it.
+   Off is a pause, not a deletion — the label, scope and protocol stay. With
+   several keys coexisting there is no "default" badge: which key signs a model
+   is the scope's decision. The one state that cannot be clicked is the last
+   enabled key: the host would refuse the switch-off, so the control stands down
+   instead (the disabled shell keeps the lit look — the key IS selected). */
 .bre-keys-toggle {
   flex: 0 0 auto;
   display: inline-flex;
@@ -1704,46 +2099,54 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   border: 0;
   border-radius: 999px;
   background: transparent;
-  color: var(--dsw-alias-label-tertiary, #9aa1ab);
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
-  transition: color 140ms ease, opacity 140ms ease;
+  transition: opacity 140ms ease;
 }
 
 .bre-keys-toggle:hover:not(:disabled),
-.bre-keys-toggle:focus-visible { color: var(--dsw-alias-label-secondary, #6b7280); }
+.bre-keys-toggle:focus-visible { opacity: 0.8; }
 
 .bre-keys-toggle:focus-visible {
   outline: none;
   box-shadow: inset 0 0 0 2px var(--dsw-alias-border-l3);
+  border-radius: 999px;
 }
 
 .bre-keys-toggle:disabled { cursor: default; }
 
-.bre-keys-toggle.is-on { color: var(--dsw-alias-state-success-primary, #22c55e); }
-
-.bre-keys-toggle.is-on:hover:not(:disabled),
-.bre-keys-toggle.is-on:focus-visible {
-  color: var(--dsw-alias-state-success-primary, #22c55e);
-  opacity: 0.85;
-}
-
-/* Ring and tick are two stacked glyphs in one 16px cell: the tick is absent
-   while off, so the circle stands alone rather than showing a faded check. */
 .bre-keys-toggle-mark {
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 16px;
   height: 16px;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--dsw-alias-label-tertiary, #9aa1ab);
+  color: transparent;
+  transition: box-shadow 140ms ease, color 140ms ease;
 }
 
-.bre-keys-toggle-mark > svg {
-  grid-area: 1 / 1;
-  display: block;
-  width: 16px;
-  height: 16px;
+.bre-keys-toggle-mark svg {
+  width: 10px;
+  height: 10px;
+  display: none;
 }
+
+/* The lit check is PINNED to the plugin's own blue rather than the host's brand
+   token: on the settings surface --dsw-alias-brand-primary can resolve dark —
+   and a var() fallback only covers a token that is unset, so a token defined
+   with a broken value leaves the tick inheriting the body's near-black ink. A
+   checked key must read blue wherever the list is painted, so the blue is not
+   negotiable with the surface. */
+.bre-keys-toggle.is-on .bre-keys-toggle-mark {
+  box-shadow: inset 0 0 0 1.5px #4d6bfe;
+  color: #4d6bfe;
+}
+
+.bre-keys-toggle.is-on .bre-keys-toggle-mark svg { display: block; }
 
 /* A switched-off key stays listed but reads as idle: its name and preview dim,
    while the actions keep their full strength so the row stays workable. */
@@ -1792,7 +2195,9 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    Revealing is opacity alone; a pointer that cannot hover simply always sees
    them, because a hidden action there would be an unreachable one. The model
    scope rides on its own button here (its label is the count), so there is no
-   separate summary text beside the key any more. */
+   separate summary text beside the key any more. The tray parks at the right
+   edge: no status word is painted on a row any more (状态都移除——东西多了，
+   别名被省略), so the right edge is the tray's alone. */
 .bre-keys-actions {
   display: inline-flex;
   flex: 0 0 auto;
@@ -2021,7 +2426,10 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   pointer-events: none;
 }
 
-.bre-keys-protocol:hover .bre-keys-protocol-label { text-decoration: underline; }
+/* Hover is a shade, not an underline: the picker reads as a control (every
+   other quiet control in the row lifts on hover), and an underline made it
+   read as a link to somewhere else. */
+.bre-keys-protocol:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08)); }
 
 /* An open menu is a pressed control: while its list is up, the trigger keeps the
    tray's colour instead of going back to quiet grey. */
@@ -2099,20 +2507,28 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
 }
 
-/* The choice in force is a grey pillow with a tick, exactly like the app's own
-   single-choice menus; its title sits a hair heavier so it reads as the answer. */
-.bre-protocol-option[aria-selected='true'] {
-  background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09));
-}
-
+/* The choice in force is named the way the redesign names every selection:
+   the accent lives in the TITLE and the tick, and the row keeps the menu's
+   own surface — the grey pillow made the answer look pressed rather than
+   current. The tick rides the right edge (order + auto margin — the DOM
+   keeps the mark before the text), so the text column starts flush. */
 .bre-protocol-option-mark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
+  order: 2;
   width: 12px;
   height: 18px;
-  color: var(--dsw-alias-label-primary, #0f1115);
+  margin-left: auto;
+  margin-top: 2px;
+  color: var(--dsw-alias-brand-primary, #4d6bfe);
+}
+
+.bre-protocol-option[aria-selected='true'] { background: transparent; }
+
+.bre-protocol-option[aria-selected='true']:hover {
+  background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09));
 }
 
 .bre-protocol-option-text {
@@ -2139,7 +2555,10 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   line-height: 18px;
 }
 
-.bre-protocol-option[aria-selected='true'] .bre-protocol-option-title { font-weight: 600; }
+.bre-protocol-option[aria-selected='true'] .bre-protocol-option-title {
+  color: var(--dsw-alias-brand-primary, #4d6bfe);
+  font-weight: 500;
+}
 
 .bre-protocol-option-hint {
   color: var(--dsw-alias-label-secondary, #61666b);
@@ -2209,13 +2628,22 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 
 /* The provider card's address tag: the protocol family the base URL serves.
-   Quiet enough to read as a field prefix, never as a control. The min-width is a
-   shared prefix column: both the card's address row and the 更多端点 row start
-   their inputs at the same offset, and a wider family name still grows it. */
+   A hairline pill, the redesign's quiet badge: centred text inside a 999
+   capsule, never a control. The width is FIXED at the form's label column:
+   OpenAI, Anthropic and Gemini chips then share one 96px prefix column, so
+   the field's input and every 更多端点 row's input start at the same x —
+   a min-width column would drift with each family's name length. */
 .bre-endpoint-family {
   flex: 0 0 auto;
-  min-width: 64px;
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 96px;
+  height: 22px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l3, #0000001f);
+  font-size: 11px;
   color: var(--dsw-alias-label-secondary, #6b7280);
   white-space: nowrap;
 }
@@ -2224,13 +2652,17 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    field is a column flex box (title, then control), so a tag inserted before the
    control would get a line of its own; a marked field becomes a two-column grid
    instead — the title keeps the full width, the tag takes the first column and
-   the input the second. The first column is max-content so a wider family name
-   is never clipped. */
+   the input the second. The first column is the SAME 96px the rest of the form
+   labels take, so every input on the card starts at one vertical line. */
 [data-bre-endpoint-field] {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-columns: 96px minmax(0, 1fr);
   align-items: center;
   column-gap: 8px;
+  /* One rhythm for the whole address block: the field's own lines AND the
+     更多端点 rows inside it sit a fixed 8px apart, so the three address
+     inputs read as one evenly spaced stack (API 地址三个输入框间距不一样). */
+  row-gap: 8px;
 }
 
 [data-bre-endpoint-field] > [data-bre-endpoint-title] { grid-column: 1 / -1; }
@@ -2242,16 +2674,22 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   width: 100%;
 }
 
-/* The injected second address row. Collapsed until 更多端点 is pressed, so the
-   card keeps its one-address shape until a second endpoint is actually wanted.
-   The [hidden] rule is not redundant: a class rule that sets display beats the
-   user agent's [hidden] rule, so without it the row would be on screen from the
-   moment it is injected. */
+/* The injected second address rows. They are GRID ITEMS of the address field
+   (the container is transparent to layout), so each row spans both columns and
+   inherits the field's own row-gap — the uniform spacing the three address
+   lines share. Collapsed until 更多端点 is pressed. The [hidden] rule is not
+   redundant: the display rule below beats the user agent's [hidden] rule, so
+   without this companion the rows would be on screen from the moment they are
+   injected. */
+[data-bre-endpoint-rows] { display: contents; }
+
+[data-bre-endpoint-rows][hidden] { display: none; }
+
 .bre-endpoint-row {
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 8px;
 }
 
 .bre-endpoint-row[hidden] { display: none; }
@@ -2273,7 +2711,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-endpoint-toggle {
   display: inline-flex;
   align-items: center;
-  margin: 0;
+  margin: 0 0 0 6px;
   padding: 0;
   border: none;
   background: none;
@@ -2346,8 +2784,10 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 
 .bre-keys-chip:disabled { opacity: 0.55; cursor: default; }
 
+/* A selected chip takes the accent tint and a tick; the outline steps aside —
+   the tint IS the border, and a second one doubled the weight. */
 .bre-keys-chip.is-selected {
-  border-color: var(--dsw-alias-brand-primary, #3b82f6);
+  border-color: transparent;
   background: var(--dsw-alias-brand-primary-muted, #eef2ff);
   color: var(--dsw-alias-brand-primary, #3b82f6);
 }

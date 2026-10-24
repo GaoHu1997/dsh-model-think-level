@@ -5,10 +5,14 @@
  * everything arrives through a plain props face, so it stays testable in
  * isolation. The draft/intent rules live in the client/effort module.
  *
- * Suggestion feedback is ZONED: provenance + confidence form their own line;
- * capacity references render as a separate read-only block explicitly marked
- * "never auto-filled" -- the official capacity inputs above stay untouched.
- * The apply/reset actions sit at the very bottom and own every section.
+ * The redesign's shape: one head line (the master switch, the "declared N ·
+ * default X" state, and the applied suggestion's provenance pill), the level
+ * ladder as a row of toggle pills with the armed levels' wire spellings in a
+ * compact row beneath, and the default pick and input modality as pill rows in
+ * two columns. Capacity references render as a footnote, and a row mounted by
+ * the injector also echoes them into the official capacity inputs above
+ * (fill-only; a value the user typed keeps its place). The apply/reset actions
+ * sit at the very bottom and own every section.
  *
  * @module dsh-model-think-level/EffortEditor
  */
@@ -207,6 +211,13 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   const [suggested, setSuggested] = useState<ReasoningEfforts | false | undefined>(undefined)
   const [suggestedSource, setSuggestedSource] = useState('')
   const [suggestedConfidence, setSuggestedConfidence] = useState<'high' | 'medium' | 'low'>('low')
+  // The wire-spelling row starts FOLDED when every armed level carries its
+  // conventional spelling (the id itself, '' for off): prefilled spellings
+  // under the decision pills are noise (模型思考等级也混乱了). Any spelling
+  // that differs opens the row — a customization must stay in sight.
+  const [wireOpen, setWireOpen] = useState(() =>
+    LEVEL_ORDER.some(level =>
+      draft[level].on && draft[level].wire.trim() !== (level === 'off' ? '' : level)))
   // The compat block the applied suggestion carries, kept in a REF on purpose:
   // it describes the wire format, not the level set, so level/image tweaks must
   // NOT clear it -- markDirty() resets the user-facing draft context, and a
@@ -471,6 +482,14 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     setSuggestedInputSource(parts.inputSource)
     setReferenceContext(parts.contextWindow)
     setReferenceMaxTokens(parts.maxTokens)
+    // The capacities also reach the row's own official inputs (fill-only, so a
+    // number the user typed keeps its place): the official form's draft holds
+    // them and its own Save persists them — the same single-writer rule the
+    // modality echo follows, which is why they never ride the document write.
+    // A suggestion carrying none is not worth a visit to the row's disclosure.
+    if (parts.contextWindow !== undefined || parts.maxTokens !== undefined) {
+      api.fillCapacities?.(parts.contextWindow, parts.maxTokens)
+    }
     setMessage({
       kind: 'info',
       text: t('appliedHint', { source: parts.source, confidence: t('confidence_' + parts.confidence) }),
@@ -550,210 +569,256 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
 
   const disabled = readOnly || busy
 
+  // The one-line state, in the redesign's "declared N · default X" form: what
+  // the draft says right now, readable without opening anything.
+  const stateText = !thinking
+    ? t('thinkingModeOff')
+    : armedLevels.length === 0
+      ? t('stateUndeclared')
+      : t('stateDeclared', {
+        count: armedLevels.length,
+        default: defaultEffort === '' ? t('defaultEffortUnset') : t('level_' + defaultEffort),
+      })
+
+  // The default pick's value domain: the armed levels, plus a pick pushed from
+  // outside the draft (a hand-edited document) that names a level the draft no
+  // longer declares — rendered anyway, so the real state shows instead of
+  // silently dropping the pick.
+  const pickLevels = defaultEffort !== '' && !armedLevels.includes(defaultEffort as (typeof LEVEL_ORDER)[number])
+    ? [...armedLevels, defaultEffort as (typeof LEVEL_ORDER)[number]]
+    : armedLevels
+
   return (
     <div className="bre-effort-editor" data-plugin={PLUGIN_ID}>
-      {/* The master switch lives OUTSIDE the effort card on purpose: with it
-          off there is no ladder to configure, so the card below is not rendered
-          at all — one row is everything an un-thinking model shows. */}
-      <label className="bre-modality-row bre-thinking-switch">
-        <input
-          type="checkbox"
-          checked={thinking}
-          disabled={disabled}
-          aria-label={t('thinkingMode') + ' ' + String(index + 1)}
-          onChange={(event) => { patchThinking(event.target.checked) }}
-        />
-        <span className="bre-effort-level">{t('thinkingMode')}</span>
-        {thinking ? null : <span className="bre-effort-note">{t('thinkingModeOff')}</span>}
-      </label>
+      {/* The one-line head: the master switch, the state it implies, and the
+          applied suggestion's provenance pill. With the switch off there is no
+          ladder to configure, so the card below is not rendered at all — one
+          row is everything an un-thinking model shows. */}
+      <div className="bre-effort-top">
+        <label className="bre-thinking-switch">
+          <input
+            type="checkbox"
+            checked={thinking}
+            disabled={disabled}
+            aria-label={t('thinkingMode') + ' ' + String(index + 1)}
+            onChange={(event) => { patchThinking(event.target.checked) }}
+          />
+          <span className="bre-effort-title">{t('thinkingMode')}</span>
+        </label>
+        <span className="bre-effort-state">{stateText}</span>
+        {suggested === undefined ? null : (
+          <span className="bre-pill bre-effort-suggest" role="status">
+            {t('appliedHint', { source: suggestedSource, confidence: t('confidence_' + suggestedConfidence) })}
+          </span>
+        )}
+      </div>
       {thinking ? (
         <div className="bre-effort-card">
-      <div className="bre-effort-head">
-        <span className="bre-effort-title">{t('reasoningEffort')}</span>
-        <button
-          type="button"
-          className="bre-link-button"
-          disabled={disabled}
-          onClick={() => { void autoAdapt() }}
-        >
-          {t('autoAdapt')}
-        </button>
-      </div>
-      <div className="bre-effort-grid">
-        {LEVEL_ORDER.map(level => {
-          const cell = draft[level]
-          return (
-            <label key={level} className="bre-effort-row">
-              <input
-                type="checkbox"
-                checked={cell.on}
-                disabled={disabled}
-                aria-label={t('level_' + level) + ' ' + String(index + 1)}
-                onChange={(event) => { patchLevel(level, event.target.checked) }}
-              />
-              <span className="bre-effort-level">{t('level_' + level)}</span>
-              {/* Every armed level takes a wire input, off included: a
-                  non-null off spelling is what some formats send to close
-                  thinking (OpenAI's none spelling, or the deepseek/zai
-                  explicit disabled object); an empty one sends nothing. */}
-              {cell.on
-                ? (
-                  <input
-                    type="text"
-                    className="bre-effort-wire"
-                    value={cell.wire}
-                    disabled={disabled}
-                    placeholder={t('wirePlaceholder')}
-                    aria-label={t('level_' + level) + ' ' + t('wireValue')}
-                    onChange={(event) => { patchWire(level, event.target.value) }}
-                  />
-                )
-                : <span className="bre-effort-empty" />}
-            </label>
-          )
-        })}
-      </div>
-      {armedLevels.length > 0 ? (
-        <div className="bre-modality">
-          <span className="bre-effort-title">{t('defaultEffortLabel')}</span>
-          <label className="bre-modality-row">
-            <select
-              className="bre-select"
-              disabled={disabled}
-              aria-label={t('defaultEffortLabel') + ' ' + String(index + 1)}
-              value={defaultEffort}
-              onChange={(event) => { patchDefaultEffort(event.target.value) }}
-            >
-              <option value="">{t('defaultEffortUnset')}</option>
-              {/* A pick pushed from outside the draft (a hand-edited
-                  document) can name a level this draft no longer declares:
-                  render it anyway, so the select shows the real state
-                  instead of silently blanking to the first option. */}
-              {(defaultEffort !== '' && !armedLevels.includes(defaultEffort as (typeof LEVEL_ORDER)[number])
-                ? [...armedLevels, defaultEffort as (typeof LEVEL_ORDER)[number]]
-                : armedLevels
-              ).map(level => (
-                <option key={level} value={level}>{t('level_' + level)}</option>
-              ))}
-            </select>
-            {defaultEffort !== '' ? (
+          <div className="bre-effort-sec">
+            <div className="bre-effort-labelrow">
+              <span className="bre-effort-label">{t('levelsLabel')}</span>
+              <em className="bre-effort-labelhint">{t('levelsHint')}</em>
               <button
                 type="button"
-                className="bre-link-button bre-modality-clear"
+                className="bre-link-button bre-effort-adapt"
                 disabled={disabled}
-                onClick={() => { patchDefaultEffort('') }}
+                onClick={() => { void autoAdapt() }}
               >
-                {t('clearDefaultEffort')}
+                {t('autoAdapt')}
               </button>
-            ) : null}
-          </label>
-          <p className="bre-modality-note">{t('defaultEffortHint')}</p>
-        </div>
-      ) : null}
-      {/* The official page owns input types from 0.1.6-alpha.2 on (its
-          ModelInputTypes control was sniffed in this row's disclosure): the
-          official editor is the single surface then, so this section stands
-          down. Older kernels keep it. */}
-      {officialInputTypes ? null : (
-        <div className="bre-modality">
-          <span className="bre-effort-title">{t('inputModality')}</span>
-          <label className="bre-modality-row">
-            <input
-              type="checkbox"
-              checked={modality.declared && modality.image}
-              disabled={disabled}
-              aria-label={t('modalityImage') + ' ' + String(index + 1)}
-              onChange={(event) => { patchImage(event.target.checked) }}
-            />
-            <span className="bre-effort-level">{t('modalityImage')}</span>
-            {modality.declared
-              ? (
-                <button
-                  type="button"
-                  className="bre-link-button bre-modality-clear"
-                  disabled={disabled}
-                  onClick={clearModality}
-                >
-                  {t('clearDeclaration')}
-                </button>
-              )
-              : null}
-          </label>
-          {!modality.declared ? <p className="bre-modality-note">{t('modalityInherit')}</p> : null}
-        </div>
-      )}
-      {staged ? <p className="bre-effort-note">{t('stagedHint')}</p> : null}
-      {initialEfforts === false ? <p className="bre-effort-note">{t('reasoningDisabled')}</p> : null}
-      {wireRisk === undefined
-        ? null
-        : <p className="bre-effort-note">{t(wireRisk === 'thinking-disabled' ? 'defaultRiskDisabled' : 'defaultRiskQwen')}</p>}
-      {/* Unsetting says what it does: the save path below turns an
-          all-off draft over a stored declaration into the durable unset
-          marker, i.e. bare provider-default requests (the relay-compat
-          mode of issue #2). Never-declared rows map to keep, so the hint
-          stays hidden there exactly as the write does. */}
-      {buildIntent(draft) === undefined && initialEfforts !== undefined
-        ? <p className="bre-effort-note">{t('bareHint')}</p> : null}
-      {suggested !== undefined ? (
-        <div className="bre-suggestion">
-          <p className="bre-effort-note">
-            {t('appliedHint', { source: suggestedSource, confidence: t('confidence_' + suggestedConfidence) })}
-          </p>
-          {suggestedInputSource === undefined
-            ? null
-            : (
-              <p className="bre-effort-note">
-                {suggestedInputSource === 'endpoint'
-                  ? t('inputHintEndpoint')
-                  : suggestedInputSource === 'knowledge'
-                    ? t('inputHintKnowledge')
-                    : t('inputHintHeuristic')}
-              </p>
+            </div>
+            <div className="bre-pillrow" role="group" aria-label={t('levelsLabel')}>
+              {LEVEL_ORDER.map(level => {
+                const cell = draft[level]
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    className={cell.on ? 'bre-lvl is-on' : 'bre-lvl'}
+                    disabled={disabled}
+                    aria-pressed={cell.on}
+                    aria-label={t('level_' + level) + ' ' + String(index + 1)}
+                    title={t('level_' + level)}
+                    onClick={() => { patchLevel(level, !cell.on) }}
+                  >
+                    {t('level_' + level)}
+                  </button>
+                )
+              })}
+            </div>
+            {/* Every armed level takes a wire input, off included: a non-null
+                off spelling is what some formats send to close thinking (the
+                OpenAI none spelling, or the deepseek/zai explicit disabled
+                object); an empty one sends nothing. Conventional spellings are
+                folded behind the link — the pills are the decision, the wire
+                row is the bytes, and the bytes only interest an editor who
+                changed them. */}
+            {armedLevels.length === 0 ? null : (
+              <button
+                type="button"
+                className="bre-link-button bre-effort-wiretoggle"
+                disabled={disabled}
+                aria-expanded={wireOpen}
+                onClick={() => { setWireOpen(!wireOpen) }}
+              >
+                {wireOpen ? t('wireHide') : t('wireShow')}
+              </button>
             )}
-          {referenceContext === undefined && referenceMaxTokens === undefined
-            ? null
-            : (
-              <div className="bre-reference">
-                <span className="bre-reference-title">{t('referenceTitle')}</span>
-                <span className="bre-reference-values">
-                  {referenceContext === undefined ? null : (
-                    <span>{t('contextWindowLabel')} <b>{COUNT.format(referenceContext)}</b></span>
-                  )}
-                  {referenceMaxTokens === undefined ? null : (
-                    <span>{t('maxTokensLabel')} <b>{COUNT.format(referenceMaxTokens)}</b></span>
-                  )}
-                </span>
+            {armedLevels.length === 0 || !wireOpen ? null : (
+              <div className="bre-wire-row">
+                {armedLevels.map(level => (
+                  <label key={level} className="bre-wire-item">
+                    <span className="bre-wire-name">{t('level_' + level)}</span>
+                    <input
+                      type="text"
+                      className="bre-effort-wire"
+                      value={draft[level].wire}
+                      disabled={disabled}
+                      placeholder={t('wirePlaceholder')}
+                      aria-label={t('level_' + level) + ' ' + t('wireValue')}
+                      onChange={(event) => { patchWire(level, event.target.value) }}
+                    />
+                  </label>
+                ))}
               </div>
             )}
-        </div>
-      ) : null}
-      {message === undefined ? null : (
-        <p className={'bre-effort-message bre-' + message.kind} role={message.kind === 'error' ? 'alert' : 'status'}>
-          {message.text}
-        </p>
-      )}
-      {!changed
-        ? null
-        : (
-          <p className="bre-effort-message bre-info" role="status">
-            {t('pendingSave')}
-          </p>
-        )}
-      {!changed ? null : <p className="bre-effort-note">{t('pendingHint')}</p>}
-      {/* No commit button since C2: the row's edits land with the official
-          card's own Save (issue #7), so the only action left is discarding
-          them. A card-level commit would ride the frozen revision baseline
-          that made that Save fail in the first place. */}
-      <div className="bre-effort-actions">
-        <button
-          type="button"
-          className="bre-secondary-button"
-          disabled={disabled || !changed}
-          onClick={reset}
-        >
-          {t('reset')}
-        </button>
-      </div>
+          </div>
+          <div className="bre-effort-cols">
+            {armedLevels.length === 0 ? null : (
+              <div className="bre-effort-sec">
+                {/* One form row: the title names it on the left, the pick
+                    answers on the right. The default-effort pick is a DROPDOWN:
+                    one line however long the ladder, and the leading option is
+                    the memory chain itself (跟随记忆), so clearing the pick is
+                    an ordinary selection instead of a hidden gesture. */}
+                <div className="bre-effort-labelrow">
+                  <span className="bre-effort-label">{t('defaultEffortLabel')}</span>
+                  <select
+                    className="bre-effort-select"
+                    value={defaultEffort}
+                    disabled={disabled}
+                    aria-label={t('defaultEffortLabel')}
+                    onChange={(event) => { patchDefaultEffort(event.target.value) }}
+                  >
+                    <option value="">{t('followMemory')}</option>
+                    {pickLevels.map(level => (
+                      <option key={level} value={level}>{t('level_' + level)}</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="bre-effort-note bre-effort-note-oneline">{t('defaultEffortHint')}</p>
+              </div>
+            )}
+            {/* The official page owns input types from 0.1.6-alpha.2 on (its
+                ModelInputTypes control was sniffed in this row's disclosure):
+                the official editor is the single surface then, so this section
+                stands down. Older kernels keep it. */}
+            {officialInputTypes ? null : (
+              <div className="bre-effort-sec">
+                <div className="bre-effort-labelrow">
+                  <span className="bre-effort-label">{t('inputModality')}</span>
+                </div>
+                <div className="bre-pillrow" role="group" aria-label={t('inputModality')}>
+                  {/* Text is the declaration's floor: a declared row always
+                      carries it, so the pill toggles DECLARED — clicking it
+                      when undeclared declares text-only, clicking it when
+                      declared clears the declaration entirely. */}
+                  <button
+                    type="button"
+                    className={modality.declared ? 'bre-lvl is-on' : 'bre-lvl'}
+                    disabled={disabled}
+                    aria-pressed={modality.declared}
+                    aria-label={t('modalityText') + ' ' + String(index + 1)}
+                    title={t('modalityText')}
+                    onClick={() => { if (modality.declared) clearModality(); else patchImage(false) }}
+                  >
+                    {t('modalityText')}
+                  </button>
+                  <button
+                    type="button"
+                    className={modality.declared && modality.image ? 'bre-lvl is-on' : 'bre-lvl'}
+                    disabled={disabled}
+                    aria-pressed={modality.declared && modality.image}
+                    aria-label={t('modalityImage') + ' ' + String(index + 1)}
+                    title={t('modalityImage')}
+                    onClick={() => { patchImage(!(modality.declared && modality.image)) }}
+                  >
+                    {t('modalityImage')}
+                  </button>
+                </div>
+                {!modality.declared ? <p className="bre-effort-note">{t('modalityInherit')}</p> : null}
+              </div>
+            )}
+          </div>
+          {staged ? <p className="bre-effort-note">{t('stagedHint')}</p> : null}
+          {initialEfforts === false ? <p className="bre-effort-note">{t('reasoningDisabled')}</p> : null}
+          {wireRisk === undefined
+            ? null
+            : <p className="bre-effort-note">{t(wireRisk === 'thinking-disabled' ? 'defaultRiskDisabled' : 'defaultRiskQwen')}</p>}
+          {/* Unsetting says what it does: the save path below turns an
+              all-off draft over a stored declaration into the durable unset
+              marker, i.e. bare provider-default requests (the relay-compat
+              mode of issue #2). Never-declared rows map to keep, so the hint
+              stays hidden there exactly as the write does. */}
+          {buildIntent(draft) === undefined && initialEfforts !== undefined
+            ? <p className="bre-effort-note">{t('bareHint')}</p> : null}
+          {suggested === undefined ? null : (
+            <div className="bre-suggestion">
+              {suggestedInputSource === undefined
+                ? null
+                : (
+                  <p className="bre-effort-note">
+                    {suggestedInputSource === 'endpoint'
+                      ? t('inputHintEndpoint')
+                      : suggestedInputSource === 'knowledge'
+                        ? t('inputHintKnowledge')
+                        : t('inputHintHeuristic')}
+                  </p>
+                )}
+              {referenceContext === undefined && referenceMaxTokens === undefined
+                ? null
+                : (
+                  <div className="bre-reference">
+                    <span className="bre-reference-title">{t('referenceTitle')}</span>
+                    <span className="bre-reference-values">
+                      {referenceContext === undefined ? null : (
+                        <span>{t('contextWindowLabel')} <b>{COUNT.format(referenceContext)}</b></span>
+                      )}
+                      {referenceMaxTokens === undefined ? null : (
+                        <span>{t('maxTokensLabel')} <b>{COUNT.format(referenceMaxTokens)}</b></span>
+                      )}
+                    </span>
+                  </div>
+                )}
+            </div>
+          )}
+          {message === undefined ? null : (
+            <p className={'bre-effort-message bre-' + message.kind} role={message.kind === 'error' ? 'alert' : 'status'}>
+              {message.text}
+            </p>
+          )}
+          {!changed
+            ? null
+            : (
+              <p className="bre-effort-message bre-info" role="status">
+                {t('pendingSave')}
+              </p>
+            )}
+          {!changed ? null : <p className="bre-effort-note">{t('pendingHint')}</p>}
+          {/* No commit button since C2: the row's edits land with the official
+              card's own Save (issue #7), so the only action left is discarding
+              them. A card-level commit would ride the frozen revision baseline
+              that made that Save fail in the first place. */}
+          <div className="bre-effort-actions">
+            <button
+              type="button"
+              className="bre-secondary-button"
+              disabled={disabled || !changed}
+              onClick={reset}
+            >
+              {t('reset')}
+            </button>
+          </div>
         </div>
       ) : null}
     </div>

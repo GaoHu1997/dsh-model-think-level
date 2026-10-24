@@ -64,12 +64,25 @@ export interface KeyRow {
    * the rest of the route (e.g. one Anthropic key on an OpenAI route).
    */
   readonly protocol?: RouteProtocol
+  /**
+   * The key's cooldown, when it is resting after a failure: how long until it
+   * is a normal candidate again, and how many consecutive failures produced
+   * the period. Absent means the key is a normal candidate right now — the
+   * state the row's status dot paints as healthy.
+   */
+  readonly rest?: {
+    /** Milliseconds until the key is a normal candidate again (>= 0). */
+    readonly remainingMs: number
+    /** Consecutive failures that produced this period. */
+    readonly failures: number
+  }
 }
 
 /** A protocol family's base URL as the host stores it (empty means unset). */
 export interface KeyEndpoints {
   readonly openai: string | null
   readonly anthropic: string | null
+  readonly gemini: string | null
 }
 
 /** A successful answer: the whole list, in the host's order. */
@@ -125,8 +138,12 @@ export interface KeyManagerClient {
   setEnabled(route: string, ref: string, enabled: boolean): Promise<KeyAnswer>
   /** Pin one key's wire protocol (undefined clears it back to the route's own). */
   setProtocol(route: string, ref: string, protocol: RouteProtocol | undefined): Promise<KeyAnswer>
-  /** Set one protocol family's base URL (undefined/empty clears that side). */
-  setEndpoints(route: string, openai: string | undefined, anthropic: string | undefined): Promise<KeyAnswer>
+  /**
+   * Set the protocol families' base URLs (undefined/empty clears that side).
+   * The whole set travels together — the host stores it as one replacement —
+   * so callers merge with what the store holds first.
+   */
+  setEndpoints(route: string, openai: string | undefined, anthropic: string | undefined, gemini: string | undefined): Promise<KeyAnswer>
   /**
    * Append the models the keys advertise but the provider does not declare yet
    * to the provider's own model list — one click, never an automatic write.
@@ -166,6 +183,9 @@ function rowOf(value: unknown): KeyRow | undefined {
   const masked = value['masked']
   const models = modelsOf(value['models'])
   const protocol = value['protocol']
+  const rest = value['rest']
+  const remainingMs = isRecord(rest) && typeof rest['remainingMs'] === 'number' ? rest['remainingMs'] : undefined
+  const failures = isRecord(rest) && typeof rest['failures'] === 'number' ? rest['failures'] : undefined
   return {
     ref,
     ...(typeof alias === 'string' && alias.length > 0 ? { alias } : {}),
@@ -174,6 +194,9 @@ function rowOf(value: unknown): KeyRow | undefined {
     ...(typeof masked === 'string' && masked.length > 0 ? { masked } : {}),
     ...(models === undefined ? {} : { models }),
     ...(isRouteProtocol(protocol) ? { protocol } : {}),
+    ...(remainingMs !== undefined && remainingMs >= 0 && failures !== undefined
+      ? { rest: { remainingMs, failures } }
+      : {}),
   }
 }
 
@@ -193,6 +216,7 @@ function stateOf(body: Record<string, unknown>): KeyState | undefined {
   const endpoints = body['endpoints']
   const openai = isRecord(endpoints) && typeof endpoints['openai'] === 'string' ? endpoints['openai'] : null
   const anthropic = isRecord(endpoints) && typeof endpoints['anthropic'] === 'string' ? endpoints['anthropic'] : null
+  const gemini = isRecord(endpoints) && typeof endpoints['gemini'] === 'string' ? endpoints['gemini'] : null
   return {
     ok: true,
     route: typeof route === 'string' ? route : '',
@@ -200,7 +224,7 @@ function stateOf(body: Record<string, unknown>): KeyState | undefined {
     ...(routeModels === undefined ? {} : { models: routeModels }),
     ...(mergedModels === undefined ? {} : { mergedModels }),
     ...(unmergedModels === undefined || unmergedModels.length === 0 ? {} : { unmergedModels }),
-    endpoints: { openai, anthropic },
+    endpoints: { openai, anthropic, gemini },
   }
 }
 
@@ -260,8 +284,8 @@ export const httpKeyManagerClient: KeyManagerClient = {
   setEnabled: (route, ref, enabled) => request(route, { op: 'enable', ref, enabled }),
   setProtocol: (route, ref, protocol) =>
     request(route, { op: 'protocol', ref, ...(protocol === undefined ? {} : { protocol }) }),
-  setEndpoints: (route, openai, anthropic) =>
-    request(route, { op: 'endpoints', openai: openai ?? '', anthropic: anthropic ?? '' }),
+  setEndpoints: (route, openai, anthropic, gemini) =>
+    request(route, { op: 'endpoints', openai: openai ?? '', anthropic: anthropic ?? '', gemini: gemini ?? '' }),
   applyMerged: route => request(route, { op: 'applyMerged' }),
   async reveal(route, ref) {
     try {

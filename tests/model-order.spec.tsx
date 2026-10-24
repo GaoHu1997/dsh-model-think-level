@@ -53,7 +53,10 @@ const LABELS: HostLabels = {
   apply: ['Apply'],
   cancel: ['Cancel'],
   editProvider: ['Edit {provider}'],
+
   inputImage: ['Image'],
+  contextWindow: ['Context window'],
+  maxOutput: ['Max output'],
 }
 
 /** The drag module's dependencies with a translator that echoes its key. */
@@ -365,9 +368,6 @@ describe('composer model column', () => {
         directory: composerFixture(),
         t: (key: string) => key,
       }))
-    })
-    await act(async () => {
-      ;(container.querySelector('.bre-row-control') as HTMLElement).click()
     })
     return {
       root,

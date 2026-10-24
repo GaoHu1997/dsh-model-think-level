@@ -320,12 +320,14 @@ export function withKeyModels(
  *
  * This is the per-key protocol switch: a key pinned to `anthropic-messages`
  * signs requests routed through the Anthropic API and that key's endpoint, even
- * when the route's own `api` is an OpenAI one. Passing `undefined` restores
- * "any protocol" (the key keeps the route's default). A no-op when unlisted.
+ * when the route's own `api` is an OpenAI one. Passing `undefined` restores the
+ * AUTOMATIC wire: each request speaks the protocol the model's own family names
+ * where the provider addressed that family, and the route's default otherwise.
+ * A no-op when the reference is not listed.
  * @param document - the current document.
  * @param route - the provider route key.
  * @param ref - the credential reference.
- * @param protocol - the protocol to pin, or undefined for "any".
+ * @param protocol - the protocol to pin, or undefined for "automatic".
  */
 export function withKeyProtocol(
   document: KeyIndexDocument,

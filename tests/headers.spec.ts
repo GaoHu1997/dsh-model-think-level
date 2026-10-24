@@ -606,6 +606,47 @@ describe('multi-key request signing and failover', () => {
     expect(sent).toHaveLength(0)
   })
 
+  it('aggregates a single key\'s listing when it carries other families\' addresses', async () => {
+    // One key, one route, but the route holds an Anthropic-family address the
+    // key may dispatch on: the plain GET would report only the route's own
+    // protocol's models, so the merge runs for one key too.
+    const source: OverlaySource = {
+      current: buildUserAgentIndex({ relay: { api: 'openai-completions', baseURL: 'https://relay.example.com/v1' } }),
+      keys: async () => [{
+        ref: 'A',
+        value: 'sk-a',
+        endpoints: { anthropic: 'https://anth.example.com/v1' },
+      }],
+    }
+    let asked: readonly string[] | undefined
+    source.modelListing = async ({ keys }) => {
+      asked = keys.map(key => key.ref)
+      return new Response(JSON.stringify({ data: [{ id: 'glm-4' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    install(source)
+
+    const response = await globalThis.fetch('https://relay.example.com/v1/models')
+
+    expect(asked).toEqual(['A'])
+    expect(await response.json()).toEqual({ data: [{ id: 'glm-4' }] })
+    expect(sent).toHaveLength(0)
+  })
+
+  it('keeps a lone key with no extra address on the plain listing path', async () => {
+    const source = routeWithKeys([{ ref: 'A', value: 'sk-a' }])
+    source.modelListing = vi.fn(async () => new Response('{}', { status: 200 }))
+    install(source)
+
+    await globalThis.fetch('https://relay.example.com/v1/models')
+
+    expect(source.modelListing).not.toHaveBeenCalled()
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-a')
+  })
+
   it('keeps non-listing requests on the regular failover path', async () => {
     const source = routeWithKeys([
       { ref: 'A', value: 'sk-a' },

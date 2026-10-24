@@ -17,6 +17,7 @@ Thumbs.db
 
 # Local tooling state
 .reasonix/
+.zcode/
 
 # Deploy backups: lib/ snapshots taken before swapping the installed bundle
 # (timestamped lib-YYYYMMDD-HHMMSS/ directories) — local evidence, never shipped.

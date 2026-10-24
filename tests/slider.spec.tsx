@@ -1,15 +1,15 @@
 /**
  * ComposerSlider unit tests: level resolution against the directory snapshot,
- * the two replicated rows (provider → model picker + reasoning-level list), the
- * commit path (optimistic select with rollback) and the capability badges —
- * without the DOM injector.
+ * the replicated body (head + resident search + always-visible columns + the
+ * in-place level footer), the commit path (optimistic select with rollback) and
+ * the capability badges — without the DOM injector.
  */
 
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ComposerSlider, effectiveEffortIndex, sliderLevels } from '../src/client/ComposerSlider.js'
+import { ComposerSlider, effectiveEffortIndex, effortRampColor, sliderLevels } from '../src/client/ComposerSlider.js'
 import type { ModelDirectoryLike, ModelDirectoryStateLike } from '../src/client/types.js'
 
 /**
@@ -92,17 +92,7 @@ function fixture(state?: Partial<ModelDirectoryStateLike>): {
   }
 }
 
-/** Extra props a case wants on the body. */
-interface MountOptions {
-  onLayoutChange?: () => void
-}
-
-async function mount(directory: ModelDirectoryLike, options: MountOptions = {}): Promise<{ root: ReturnType<typeof createRoot>; container: HTMLElement }> {
-  return mountIn(directory, options)
-}
-
-/** Mount inside a fake official menu so the commit's focus handoff has a target. */
-async function mountIn(directory: ModelDirectoryLike, options: MountOptions = {}): Promise<{ root: ReturnType<typeof createRoot>; container: HTMLElement; menu: HTMLElement }> {
+async function mount(directory: ModelDirectoryLike): Promise<{ root: ReturnType<typeof createRoot>; container: HTMLElement; menu: HTMLElement }> {
   const menu = document.createElement('div')
   menu.setAttribute('role', 'menu')
   document.body.appendChild(menu)
@@ -112,32 +102,29 @@ async function mountIn(directory: ModelDirectoryLike, options: MountOptions = {}
   root.render(createElement(ComposerSlider, {
     directory,
     t: (key: string) => key,
-    onLayoutChange: options.onLayoutChange,
   }))
   // createRoot renders are scheduled; give the initial commit a tick.
   await new Promise(resolve => setTimeout(resolve, 0))
   return { root, container, menu }
 }
 
-/** The two always-visible row controls, in DOM order (model, then level). */
-function rows(container: HTMLElement): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll<HTMLButtonElement>('.bre-row-control'))
-}
-
-/** The visible value of one row. */
-function rowValue(container: HTMLElement, index: number): string | undefined {
-  return rows(container)[index]?.querySelector('.bre-row-value')?.textContent ?? undefined
-}
-
-/** Fire a real click, which is what the rows and the options listen for. */
+/** Fire a real click, which is what the cells and the segments listen for. */
 function click(el: Element | null | undefined): void {
   if (el === null || el === undefined) throw new Error('nothing to click')
   ;(el as HTMLElement).click()
 }
 
-/** The level list's options, in declaration order. */
-function levelOptions(container: HTMLElement): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll<HTMLButtonElement>('.bre-panel .bre-option'))
+/** The head's current-model line and its level pill. */
+function headName(container: HTMLElement): string | undefined {
+  return container.querySelector('.bre-menu-name')?.textContent ?? undefined
+}
+
+function headProvider(container: HTMLElement): string | undefined {
+  return container.querySelector('.bre-menu-prov')?.textContent ?? undefined
+}
+
+function headPill(container: HTMLElement): string | undefined {
+  return container.querySelector('.bre-menu-head .bre-pill')?.textContent ?? undefined
 }
 
 /** The model column's options, in provider order. */
@@ -145,16 +132,66 @@ function modelOptions(container: HTMLElement): HTMLButtonElement[] {
   return Array.from(container.querySelectorAll<HTMLButtonElement>('.bre-provider-models .bre-option'))
 }
 
-/** The option whose visible name is `name`. */
+/** The footer's level slider — the level pick is a draggable track, not a
+ *  capsule row. */
+function footSlider(container: HTMLElement): HTMLElement {
+  const hit = container.querySelector<HTMLElement>('.bre-menu-foot .bre-effort-slider')
+  if (hit === null) throw new Error('no footer slider')
+  return hit
+}
+
+/** The stop names written under the footer's slider track, in order. */
+function levelNames(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('.bre-menu-foot .bre-effort-slider-label'))
+    .map(label => label.textContent ?? '')
+}
+
+/** The name of the stop the slider rests on (drag preview or committed). */
+function activeLevelName(container: HTMLElement): string {
+  return footSlider(container).getAttribute('aria-valuetext') ?? ''
+}
+
+/** The level value written in the footer's head, above the track. */
+function footHeadValue(container: HTMLElement): HTMLElement | null {
+  return container.querySelector<HTMLElement>('.bre-menu-foot .bre-effort-slider-head-value')
+}
+
+/** Drop the slider's thumb on the named stop: a rect the handler can read, and
+ *  a pointer press + release at that stop's position — one gesture, one commit. */
+function pickLevel(container: HTMLElement, name: string): void {
+  const labels = levelNames(container)
+  const at = labels.indexOf(name)
+  if (at < 0) throw new Error(`no level stop "${name}"`)
+  const track = footSlider(container)
+  const rect = { x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 18, width: 100, height: 18, toJSON: () => ({}) } as DOMRect
+  const spy = vi.spyOn(track, 'getBoundingClientRect').mockReturnValue(rect)
+  const x = labels.length > 1 ? (at / (labels.length - 1)) * 100 : 0
+  try {
+    track.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: x, clientY: 9 }))
+    track.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, cancelable: true, clientX: x, clientY: 9 }))
+  } finally {
+    spy.mockRestore()
+  }
+}
+
+/** The option/segment whose visible name is `name`. */
+function named<T extends Element>(list: T[], name: string): T | undefined {
+  return list.find(el => (el.querySelector('.bre-option-name')?.textContent ?? el.textContent) === name)
+}
+
+/** The model option whose visible name is `name` (searched rows carry their provider). */
 function optionNamed(list: HTMLButtonElement[], name: string): HTMLButtonElement | undefined {
   return list.find(el => el.querySelector('.bre-option-name')?.textContent === name)
 }
 
-/** Open the level list and return its options once they exist. */
-async function openLevels(container: HTMLElement): Promise<HTMLButtonElement[]> {
-  click(rows(container)[1])
-  await vi.waitFor(() => expect(container.querySelector('.bre-panel')).not.toBeNull())
-  return levelOptions(container)
+/** Type into the resident search box. */
+async function search(container: HTMLElement, text: string): Promise<void> {
+  const input = container.querySelector<HTMLInputElement>('.bre-menu-search .bre-menu-search-input')
+  if (input === null) throw new Error('no search box')
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+  setter?.call(input, text)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  await new Promise(resolve => setTimeout(resolve, 0))
 }
 
 beforeEach(() => {
@@ -175,19 +212,16 @@ describe('effectiveEffortIndex', () => {
   })
 })
 
-describe('ComposerSlider rows', () => {
-  it('renders a model row and a reasoning-level row, resting on the session level', async () => {
+describe('ComposerSlider body', () => {
+  it('names the current model in the head and rests on the session level', async () => {
     const { directory } = fixture()
     const { root, container } = await mount(directory)
-    const controls = rows(container)
-    expect(controls).toHaveLength(2)
-    expect(controls[0]?.querySelector('.bre-row-label')?.textContent).toBe('modelRowLabel')
-    expect(controls[1]?.querySelector('.bre-row-label')?.textContent).toBe('effortRowLabel')
-    // The model row names the current model; the level row follows the
-    // mount-sync effect onto the session's medium. Passive effects flush
-    // asynchronously, so wait for the rest position instead of racing it.
-    expect(controls[0]?.querySelector('.bre-row-value')?.textContent).toBe('Aliyun · Qwen Max')
-    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Medium'))
+    expect(container.querySelector('.bre-menu-head .bre-row-label')?.textContent).toBe('modelRowLabel')
+    expect(headName(container)).toBe('Qwen Max')
+    expect(headProvider(container)).toBe('Aliyun')
+    // The level pill follows the mount-sync effect onto the session's medium.
+    // Passive effects flush asynchronously, so wait for the rest position.
+    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
     // The radiation slider is gone: nothing renders a range input or a track.
     expect(container.querySelector('input[type="range"]')).toBeNull()
     expect(container.querySelector('.bre-effort-track')).toBeNull()
@@ -195,35 +229,16 @@ describe('ComposerSlider rows', () => {
     root.unmount()
   })
 
-  it('turns the level row inert when the model exposes fewer than two levels', async () => {
-    const one = fixture({
-      current: { provider: 'aliyun', model: 'qwen-lite' },
-      groups: onlyModel({ id: 'qwen-lite', name: 'Qwen Lite', reasoning: { efforts: [{ id: 'off', name: 'Off' }] } }),
-    })
-    const { root, container } = await mount(one.directory)
-    const controls = rows(container)
-    expect(controls).toHaveLength(2)
-    expect(controls[1]?.disabled).toBe(true)
-    expect(rowValue(container, 1)).toBe('sliderNoLevels')
-    // A row with nothing to list opens nothing (a disabled button fires no click).
-    click(controls[1])
-    expect(container.querySelector('.bre-panel')).toBeNull()
-    root.unmount()
-  })
-})
-
-describe('ComposerSlider model picker', () => {
-  it('opens as a provider column beside that provider\'s models', async () => {
+  it('keeps the provider column and the model column always visible', async () => {
     const { directory, selectSpy } = fixture()
     const { root, container } = await mount(directory)
-    click(rows(container)[0])
-    await vi.waitFor(() => expect(container.querySelector('.bre-panel-models')).not.toBeNull())
     const providers = Array.from(container.querySelectorAll<HTMLButtonElement>('.bre-provider'))
     expect(providers.map(el => el.querySelector('.bre-option-name')?.textContent)).toEqual(['Aliyun'])
     expect(providers[0]?.classList.contains('is-open')).toBe(true)
     // The current model's provider keeps the accent, so the column says where
-    // the selection lives.
+    // the selection lives. The count sits where the drill chevron used to.
     expect(providers[0]?.classList.contains('is-current')).toBe(true)
+    expect(providers[0]?.querySelector('.bre-provider-count')?.textContent).toBe('2')
     expect(modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent)).toEqual(['Qwen Max', 'Qwen Plus'])
     // Clicking a provider only re-fills the right column; it never selects.
     click(providers[0])
@@ -231,11 +246,96 @@ describe('ComposerSlider model picker', () => {
     root.unmount()
   })
 
+  it('shows the no-levels line instead of segments when the model cannot reason', async () => {
+    const one = fixture({
+      current: { provider: 'aliyun', model: 'qwen-lite' },
+      groups: onlyModel({ id: 'qwen-lite', name: 'Qwen Lite', reasoning: { efforts: [{ id: 'off', name: 'Off' }] } }),
+    })
+    const { root, container } = await mount(one.directory)
+    expect(container.querySelector('.bre-menu-foot .bre-effort-slider')).toBeNull()
+    expect(container.querySelector('.bre-menu-foot .bre-effort-slider-head')).toBeNull()
+    expect(container.querySelector('.bre-menu-foot')?.textContent).toContain('sliderNoLevels')
+    expect(container.querySelector('.bre-menu-head .bre-pill')).toBeNull()
+    root.unmount()
+  })
+
+  it('paints the footer as a gradient slider under a head naming the current level', async () => {
+    const { root, container } = await mount(fixture().directory)
+    // The head above the track names the section and carries the level under
+    // the thumb (进度条上方：思考等级 + 当前等级), wearing that stop's hue.
+    expect(container.querySelector('.bre-menu-foot .bre-effort-slider-head-label')?.textContent).toBe('effortRowLabel')
+    const headValue = footHeadValue(container)
+    expect(headValue).not.toBeNull()
+    const fill = container.querySelector<HTMLElement>('.bre-effort-slider-fill')
+    const thumb = container.querySelector<HTMLElement>('.bre-effort-slider-thumb')
+    expect(fill).not.toBeNull()
+    expect(thumb).not.toBeNull()
+    // The gradient carries every stop's ramp hue in track coordinates; the
+    // session rests on medium (stop 2 of 5 → 50%), so the reveal opens the
+    // gradient's left half to the thumb.
+    const hues = LADDER.map((_, at) => effortRampColor(at / (LADDER.length - 1)))
+    await vi.waitFor(() => expect(thumb?.style.background).toBe(hues[2]))
+    // The head's value settles onto the session's level, in that stop's hue.
+    await vi.waitFor(() => expect(headValue?.textContent).toBe('Medium'))
+    expect(headValue?.style.color).toBe(hues[2])
+    for (const hue of hues) expect(fill?.style.background).toContain(hue)
+    expect(fill?.style.background).toContain('linear-gradient')
+    expect(fill?.style.clipPath).toBe('inset(0 50% 0 0)')
+    // The name under the active stop wears the same hue, so the colour alone
+    // names the level.
+    expect(container.querySelector<HTMLElement>('.bre-effort-slider-label.is-on')?.style.color).toBe(hues[2])
+    root.unmount()
+  })
+})
+
+describe('ComposerSlider search', () => {
+  it('lists matches across every provider and names each by its provider', async () => {
+    const two = fixture({
+      groups: ([
+        {
+          id: 'aliyun',
+          name: 'Aliyun',
+          models: [
+            { id: 'qwen-max', name: 'Qwen Max', reasoning: { efforts: LADDER } },
+            { id: 'qwen-plus', name: 'Qwen Plus', reasoning: { efforts: LADDER.slice(0, 4) } },
+          ],
+        },
+        { id: 'other', name: 'Other', models: [{ id: 'qwen-lite', name: 'Qwen Lite', reasoning: { efforts: LADDER } }] },
+      ] as unknown) as Groups,
+    })
+    const { root, container } = await mount(two.directory)
+    await search(container, 'qwen')
+    const names = modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent)
+    // Matches come from BOTH providers, each named by its own, in provider order.
+    expect(names).toEqual(['Aliyun · Qwen Max', 'Aliyun · Qwen Plus', 'Other · Qwen Lite'])
+    // The search matches ids too, not only display names.
+    await search(container, 'lite')
+    expect(modelOptions(container)).toHaveLength(1)
+    await search(container, 'zzz')
+    expect(container.querySelector('.bre-provider-models')?.textContent).toContain('modelSearchNoMatches')
+    root.unmount()
+  })
+
+  it('commits a searched model and returns the columns to the per-provider view', async () => {
+    const { directory, selectSpy } = fixture()
+    const { root, container } = await mount(directory)
+    await search(container, 'plus')
+    click(optionNamed(modelOptions(container), 'Aliyun · Qwen Plus'))
+    // No reasoningEffort on a model switch: the level resets with the model and
+    // the effort-memory wiretap restores the one remembered for it.
+    await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-plus' }))
+    expect(selectSpy.mock.calls[0]?.[0]).not.toHaveProperty('reasoningEffort')
+    // The popover never closes; the search is answered and the head follows.
+    await vi.waitFor(() => expect(headName(container)).toBe('Qwen Plus'))
+    expect(modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent)).toEqual(['Qwen Max', 'Qwen Plus'])
+    root.unmount()
+  })
+})
+
+describe('ComposerSlider model picker', () => {
   it('marks the current model by colour alone, never with a tick beside the badges', async () => {
     const { directory } = fixture()
     const { root, container } = await mount(directory)
-    click(rows(container)[0])
-    await vi.waitFor(() => expect(container.querySelector('.bre-panel-models')).not.toBeNull())
     const active = container.querySelectorAll('.bre-provider-models .bre-option.is-active')
     expect(active).toHaveLength(1)
     expect(active[0]?.querySelector('.bre-option-name')?.textContent).toBe('Qwen Max')
@@ -243,29 +343,21 @@ describe('ComposerSlider model picker', () => {
     root.unmount()
   })
 
-  it('switches model without an effort and collapses only the list', async () => {
+  it('switches model without an effort and keeps the popover open', async () => {
     const { directory, selectSpy } = fixture()
     const { root, container } = await mount(directory)
-    click(rows(container)[0])
-    await vi.waitFor(() => expect(container.querySelector('.bre-panel-models')).not.toBeNull())
     click(optionNamed(modelOptions(container), 'Qwen Plus'))
-    // No reasoningEffort on a model switch: the level resets with the model and
-    // the effort-memory wiretap restores the one remembered for it.
     await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-plus' }))
     expect(selectSpy.mock.calls[0]?.[0]).not.toHaveProperty('reasoningEffort')
-    // The list closes, but the popover body stays: the level row is still there
-    // to be picked next.
-    await vi.waitFor(() => expect(container.querySelector('.bre-panel-models')).toBeNull())
-    expect(rows(container)).toHaveLength(2)
-    await vi.waitFor(() => expect(rowValue(container, 0)).toBe('Aliyun · Qwen Plus'))
+    // The columns stay; only the head and the selection move.
+    await vi.waitFor(() => expect(headName(container)).toBe('Qwen Plus'))
+    expect(container.querySelector('.bre-panel-models')).not.toBeNull()
     root.unmount()
   })
 
   it('badges a model with vision and thinking icons only when it declares them', async () => {
     const { directory } = fixture()
     const { root, container } = await mount(directory)
-    click(rows(container)[0])
-    await vi.waitFor(() => expect(container.querySelector('.bre-panel-models')).not.toBeNull())
     const badges = (name: string): (string | null)[] => {
       const option = optionNamed(modelOptions(container), name)
       return Array.from(option?.querySelectorAll('.bre-tag') ?? []).map(el => el.getAttribute('title'))
@@ -286,7 +378,6 @@ describe('ComposerSlider model picker', () => {
     })
     const { root, container } = await mount(directory)
     try {
-      click(rows(container)[0])
       await vi.waitFor(() => expect(modelOptions(container)).toHaveLength(1))
       expect(modelOptions(container)[0]?.querySelector('[title="tagVision"]')).toBeNull()
       update({
@@ -323,8 +414,6 @@ describe('ComposerSlider model picker', () => {
       }),
     })
     const { root, container } = await mount(directory)
-    click(rows(container)[0])
-    await vi.waitFor(() => expect(container.querySelector('.bre-panel-models')).not.toBeNull())
     const option = optionNamed(modelOptions(container), 'GLM-5.3-FlashX')
     expect(Array.from(option?.querySelectorAll('.bre-tag') ?? []).map(el => el.getAttribute('title'))).toEqual(['tagVision', 'tagThinking'])
     root.unmount()
@@ -332,45 +421,44 @@ describe('ComposerSlider model picker', () => {
 })
 
 describe('ComposerSlider commit', () => {
-  it('lists the current model\'s levels and commits one through directory.select', async () => {
+  it('lists the current model\'s levels as slider stops and commits one through directory.select', async () => {
     const { directory, selectSpy } = fixture()
     const { root, container } = await mount(directory)
-    const options = await openLevels(container)
-    expect(options.map(el => el.querySelector('.bre-option-name')?.textContent)).toEqual(['Off', 'Low', 'Medium', 'High', 'Max'])
-    const current = options.find(el => el.classList.contains('is-active'))
-    expect(current?.querySelector('.bre-option-name')?.textContent).toBe('Medium')
-    expect(current?.querySelector('.bre-option-check')).not.toBeNull()
-    click(optionNamed(options, 'High'))
+    expect(levelNames(container)).toEqual(['Off', 'Low', 'Medium', 'High', 'Max'])
+    expect(activeLevelName(container)).toBe('Medium')
+    pickLevel(container, 'High')
     await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'high' }))
-    await vi.waitFor(() => expect(container.querySelector('.bre-panel')).toBeNull())
-    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('High'))
+    // The thumb moves to the committed level; the footer's head and the head's
+    // pill both follow it.
+    await vi.waitFor(() => expect(activeLevelName(container)).toBe('High'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('High'))
+    await vi.waitFor(() => expect(headPill(container)).toBe('High'))
     root.unmount()
   })
 
   it('ignores a repick of the level already committed', async () => {
     const { directory, selectSpy } = fixture()
     const { root, container } = await mount(directory)
-    const options = await openLevels(container)
-    click(optionNamed(options, 'Medium'))
+    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    pickLevel(container, 'Medium')
     await vi.waitFor(() => expect(selectSpy).not.toHaveBeenCalled())
     root.unmount()
   })
 
-  it('commits a level the row only PREDICTED on the first use of a model', async () => {
+  it('commits a level the footer only PREDICTED on the first use of a model', async () => {
     // A model switch lands with no effort, and `effectiveEffortIndex` fills the
-    // row from the adapter default so the body is not blank. The seat trigger
+    // footer from the adapter default so the body is not blank. The seat trigger
     // still reads Default, so the displayed level is a PREDICTION, not a
     // commitment: re-picking it must submit instead of being swallowed (the
     // reported "pick another level or Medium never applies").
     const { directory, selectSpy } = fixture({ current: { provider: 'aliyun', model: 'qwen-max' } })
     const { root, container } = await mount(directory)
     expect(directory.store.getSnapshot().current?.reasoningEffort).toBeUndefined()
-    // The adapter default (medium) is what the row predicts before any pick.
-    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Medium'))
-    const options = await openLevels(container)
-    click(optionNamed(options, 'Medium'))
+    // The adapter default (medium) is what the footer predicts before any pick.
+    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    pickLevel(container, 'Medium')
     await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'medium' }))
-    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Medium'))
+    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
     root.unmount()
   })
 
@@ -382,9 +470,8 @@ describe('ComposerSlider commit', () => {
       groups: onlyModel({ id: 'qwen-plus', name: 'Qwen Plus', reasoning: { efforts: LADDER.slice(0, 4) } }),
     })
     const { root, container } = await mount(directory)
-    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Low'))
-    const options = await openLevels(container)
-    click(optionNamed(options, 'Low'))
+    await vi.waitFor(() => expect(headPill(container)).toBe('Low'))
+    pickLevel(container, 'Low')
     await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-plus', reasoningEffort: 'low' }))
     root.unmount()
   })
@@ -392,8 +479,8 @@ describe('ComposerSlider commit', () => {
   it('rolls back to the committed level when the select rejects', async () => {
     const { directory, selectSpy, update } = fixture()
     // Faithful to the real ModelDirectory: a refused selection surfaces on the
-    // store (status/error) and rethrows — the row rests on the committed level
-    // while the store's error line shows.
+    // store (status/error) and rethrows — the footer rests on the committed
+    // level while the store's error line shows.
     selectSpy.mockImplementationOnce(async () => {
       update({
         ...directory.store.getSnapshot(),
@@ -403,11 +490,11 @@ describe('ComposerSlider commit', () => {
       throw new Error('refused')
     })
     const { root, container } = await mount(directory)
-    const options = await openLevels(container)
-    click(optionNamed(options, 'High'))
+    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    pickLevel(container, 'High')
     await vi.waitFor(() => {
       expect(container.querySelector('.bre-model-error')?.textContent).toContain('refused')
-      expect(rowValue(container, 1)).toBe('Medium')
+      expect(headPill(container)).toBe('Medium')
     })
     root.unmount()
   })
@@ -416,7 +503,7 @@ describe('ComposerSlider commit', () => {
     // 0.1.6-alpha.2 RESOLVES {ok:false} on refusal instead of throwing. This
     // fixture's committed selection carries no explicit effort, so the
     // post-await store read cannot recover the rollback on its own: without
-    // normalizing the refusal the row stays on the failed level.
+    // normalizing the refusal the footer stays on the failed level.
     const { directory, selectSpy, update } = fixture({ current: { provider: 'aliyun', model: 'qwen-max' } })
     selectSpy.mockImplementationOnce(async () => {
       update({ ...directory.store.getSnapshot(), status: 'error', error: 'session/invalid: no such effort' })
@@ -424,27 +511,26 @@ describe('ComposerSlider commit', () => {
     })
     const { root, container } = await mount(directory)
     // The adapter default (medium) is the rest position before any pick.
-    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Medium'))
-    const options = await openLevels(container)
-    click(optionNamed(options, 'High'))
+    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    pickLevel(container, 'High')
     await vi.waitFor(() => {
       expect(container.querySelector('.bre-model-error')?.textContent).toContain('no such effort')
-      expect(rowValue(container, 1)).toBe('Medium')
+      expect(headPill(container)).toBe('Medium')
     })
     root.unmount()
   })
 
-  it('hands focus to the menu as the clicked option is unmounted (issue #13)', async () => {
-    // The official shell closes the menu when a blur leaves the card: collapsing
-    // the list unmounts the focused option, which would drop focus onto <body>.
-    // The commit must move focus onto the menu element itself in the same task
-    // — the handoff the pane switch performs — so the menu stays open.
+  it('hands focus to the menu as the clicked segment commits (issue #13)', async () => {
+    // The official shell closes the menu when a blur leaves the card: the
+    // commit disables the busy controls, and a focused disabled node would drop
+    // focus onto <body>. The commit must move focus onto the menu element
+    // itself in the same task, so the menu stays open.
     const { directory, selectSpy } = fixture()
-    const { root, container, menu } = await mountIn(directory)
-    const options = await openLevels(container)
-    click(optionNamed(options, 'High'))
+    const { root, container, menu } = await mount(directory)
+    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    pickLevel(container, 'High')
     // Synchronous: the handoff runs in the commit's sync section, before the
-    // first await, so the unmounted option never owns the focus.
+    // first await, so the disabled segment never owns the focus.
     expect(document.activeElement).toBe(menu)
     expect(selectSpy).toHaveBeenCalled()
     root.unmount()
@@ -458,34 +544,11 @@ describe('ComposerSlider commit', () => {
     const { directory, selectSpy } = fixture()
     const loadSpy = directory.load as ReturnType<typeof vi.fn>
     const { root, container } = await mount(directory)
-    await vi.waitFor(() => expect(rowValue(container, 1)).toBe('Medium'))
+    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
     loadSpy.mockClear()
-    const options = await openLevels(container)
-    click(optionNamed(options, 'High'))
+    pickLevel(container, 'High')
     await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'high' }))
     expect(loadSpy).not.toHaveBeenCalled()
-    root.unmount()
-  })
-})
-
-describe('ComposerSlider layout handoff', () => {
-  it('asks the host to re-place the card whenever a list opens or closes', async () => {
-    // The official card only re-measures on a window resize, so the body has to
-    // request one whenever its height changes — and in the same frame, or the
-    // list is painted once at the stale position.
-    const { directory } = fixture()
-    const onLayoutChange = vi.fn()
-    const { root, container } = await mount(directory, { onLayoutChange })
-    expect(onLayoutChange).not.toHaveBeenCalled()
-    click(rows(container)[0])
-    expect(onLayoutChange).toHaveBeenCalledTimes(1)
-    click(rows(container)[0])
-    expect(onLayoutChange).toHaveBeenCalledTimes(2)
-    // Committing a level collapses the list, which is another height change.
-    await vi.waitFor(() => expect(container.querySelector('.bre-panel')).toBeNull())
-    const options = await openLevels(container)
-    click(optionNamed(options, 'High'))
-    expect(onLayoutChange).toHaveBeenCalledTimes(4)
     root.unmount()
   })
 })

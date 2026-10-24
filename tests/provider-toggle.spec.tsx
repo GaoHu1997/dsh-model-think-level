@@ -47,7 +47,10 @@ const LABELS: HostLabels = {
   apply: ['Apply'],
   cancel: ['Cancel'],
   editProvider: ['Edit {provider}'],
+
   inputImage: ['Image'],
+  contextWindow: ['Context window'],
+  maxOutput: ['Max output'],
 }
 
 /** The toggle module's dependencies with a translator that echoes its key. */
@@ -335,9 +338,6 @@ describe('composer provider column', () => {
     await act(async () => {
       root.render(createElement(ComposerSlider, { directory: composerFixture(), t: (key: string) => key }))
     })
-    await act(async () => {
-      ;(container.querySelector('.bre-row-control') as HTMLElement).click()
-    })
     return {
       root,
       names: () => Array.from(container.querySelectorAll('.bre-provider'))
@@ -363,7 +363,7 @@ describe('composer provider column', () => {
     await act(async () => { setProviderEnabled('aliyun', false) })
     // The current model keeps its own name: the switch governs the LIST, not
     // the model the session runs on.
-    expect(document.body.querySelector('.bre-row-value')?.textContent).toContain('Qwen Max')
+    expect(document.body.querySelector('.bre-menu-name')?.textContent).toContain('Qwen Max')
     await act(async () => { root.unmount() })
   })
 })

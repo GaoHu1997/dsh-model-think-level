@@ -30,9 +30,11 @@ import type { ReactNode } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { setClass } from './dom.js'
 import { CreateCardPane } from './create-card-pane.js'
+import { enhanceCreateKeySeat, resetCreateKeySeat, teardownCreateKeySeats } from './create-key-seat.js'
 import { revealKeyField, resetKeyField, KEY_FIELD_CLASS } from './key-reveal.js'
 import { mountReact, unmountReact, type ForeignMount } from './mount.js'
 import type { StagedHeadersState } from './staged-headers.js'
+import type { StagedKeysState } from './staged-keys.js'
 import type { RemoteApi } from '../types.js'
 
 /** The plugin's mount at the top of the custom form. The tab bar — and, under
@@ -69,6 +71,9 @@ export interface AddCardDeps {
   routeIdLabels: () => readonly string[]
   /** The session's deferred-header ledger (see `staged-headers`). */
   staged: StagedHeadersState
+  /** The session's deferred-key ledger (see `staged-keys`): the drafts the
+   * custom form's key list stages, waiting for the route this card declares. */
+  stagedKeys: StagedKeysState
   /** The plugin's locale-refresh seam, so the pane's copy follows a language
    * switch exactly as the seats the official slot mounts do. */
   refreshed: (children: () => ReactNode) => ReactNode
@@ -109,9 +114,18 @@ export function reconcileAddCards(root: HTMLElement, deps: AddCardDeps, state: A
       open.add(card)
     } catch (error) {
       // One unprocessable card must not cost the page its others, and must not
-      // leave a half-dressed form behind: the mount goes and the switch comes
-      // back, which is the official card exactly as it was.
+      // leave a half-dressed form behind: the mount goes, the switch comes
+      // back, and the key lists stand down with it, which is the official card
+      // exactly as it was.
       dropHost(card, state)
+      for (const field of keyFieldsOf(card)) {
+        try {
+          resetCreateKeySeat(field)
+        } catch {
+          // The card is already being rolled back; a seat that would not reset
+          // is swept by the teardown instead.
+        }
+      }
       setPickerHidden(card, false)
       console.warn('[bre] add provider card: left the official form in place:', error)
     }
@@ -148,11 +162,16 @@ function applyAddCard(card: HTMLElement, deps: AddCardDeps, state: AddCardState)
   // User item 7: the add-provider form's API-key field is dressed exactly like
   // the edit-provider form's — same field wrapper, same masked input padding,
   // same reveal eye. There is no route yet, so the eye is a plain mask toggle
-  // (it never asks the host for a stored key) and the key list is not mounted:
-  // keys belong to a route that exists. The whole card is walked, not just the
-  // visible half, because which half the official page puts the key field in is
-  // the host's business; a hidden panel's field is simply dressed out of sight.
+  // (it never asks the host for a stored key). The whole card is walked, not
+  // just the visible half, because which half the official page puts the key
+  // field in is the host's business; a hidden panel's field is simply dressed
+  // out of sight.
   dressKeyFields(card, deps)
+  // The key FIELD is dressed card-wide, but the key LIST — the draft list the
+  // edit card's key manager mirrors — seats only the custom form's field: the
+  // card keeps its other half mounted, and a second seat there would stage a
+  // second, empty draft list against the same route the visible one holds.
+  seatKeyFields(custom, deps)
   // Hidden only once the custom form is really up: a card whose custom half is
   // disabled must keep the switch that explains why.
   setPickerHidden(card, true)
@@ -163,6 +182,27 @@ function applyAddCard(card: HTMLElement, deps: AddCardDeps, state: AddCardState)
 const FIELD_SELECTOR = '.field, label'
 
 /**
+ * The API-key fields of a form, derived from the INPUTS rather than a wrapper
+ * class: the reveal pass spells a key input as a masked one (or, once it has
+ * dressed the field, a marked one), and the official create form does not agree
+ * on a wrapper class the way the edit card's `.field` does — a seat that keyed
+ * on the wrapper found nothing on the live card, and the key field kept its
+ * official single-input look beside a takeover that plainly worked. The field
+ * is the input's nearest `.field`/`label` ancestor, or simply its parent.
+ */
+function keyFieldsOf(scope: HTMLElement): HTMLElement[] {
+  const fields: HTMLElement[] = []
+  const marked = scope.querySelectorAll<HTMLInputElement>(
+    'input[type="password"], input[data-bre-key-input]',
+  )
+  for (const input of Array.from(marked)) {
+    const field = input.closest<HTMLElement>(FIELD_SELECTOR) ?? input.parentElement
+    if (field !== null && !fields.includes(field)) fields.push(field)
+  }
+  return fields
+}
+
+/**
  * Give every API-key field in the card the edit card's dressing.
  *
  * The create card is not one of the editor cards the tab takeover walks (it only
@@ -171,13 +211,41 @@ const FIELD_SELECTOR = '.field, label'
  * the plugin's managed field one card above.
  */
 function dressKeyFields(scope: HTMLElement, deps: AddCardDeps): void {
-  for (const field of Array.from(scope.querySelectorAll<HTMLElement>(FIELD_SELECTOR))) {
+  for (const field of keyFieldsOf(scope)) {
     try {
       revealKeyField(field, { t: deps.t })
     } catch (error) {
       // A form the official page restructured mid-scan is not worth a card: the
       // eye is an affordance, and the field it decorates still works without it.
       console.warn('[bre] add provider card: could not dress a key field:', error)
+    }
+  }
+}
+
+/**
+ * Give the custom form's key field the edit card's draft key list.
+ *
+ * The list runs over an in-memory store (there is no route to read), and its
+ * drafts wait in the session ledger until this card's own 保存 declares the
+ * provider they belong to — see `staged-keys`. A field with no key input is
+ * reset, so a card the page restructured sheds any list whose field is gone.
+ */
+function seatKeyFields(scope: HTMLElement, deps: AddCardDeps): void {
+  for (const field of keyFieldsOf(scope)) {
+    try {
+      enhanceCreateKeySeat(field, {
+        t: deps.t,
+        api: deps.api,
+        routeIdLabels: deps.routeIdLabels,
+        staged: deps.stagedKeys,
+        refreshed: deps.refreshed,
+      })
+    } catch (error) {
+      // The list is an affordance the official form works without: a field it
+      // could not seat keeps the official input (the managed mark goes with
+      // the reset the enhancer never reached, so the box stays usable).
+      resetCreateKeySeat(field)
+      console.warn('[bre] add provider card: could not mount the key list:', error)
     }
   }
 }
@@ -297,4 +365,7 @@ export function teardownAddCards(state: AddCardState): void {
   for (const field of Array.from(document.querySelectorAll<HTMLElement>(`.${KEY_FIELD_CLASS}`))) {
     resetKeyField(field)
   }
+  // And the draft key lists with it: their hosts are this module's own DOM, and
+  // the fields they managed must get the official input back.
+  teardownCreateKeySeats()
 }

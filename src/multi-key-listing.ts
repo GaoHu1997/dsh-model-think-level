@@ -13,12 +13,16 @@
  * Two rules are inherited from the gateway practice this mirrors (magpie's
  * `fetchPerKey`):
  * - a model advertised by several keys is ONE model, listing every key that
- *   serves it; the first key's order wins, so the catalogue reads in the order
- *   the provider presents it;
+ *   serves it;
  * - a key whose listing could not be read this time keeps the models it was
  *   last seen serving, instead of making them disappear from the catalogue
  *   (those models are reported as `retained`, so a caller can say the scope is
  *   stale rather than fresh).
+ *
+ * The catalogue reads in one natural id order (`numeric` collation, so a model
+ * family keeps version order), not in the order the keys were asked: a
+ * catalogue assembled key by key would read as one key's list with the next
+ * key's extras appended, scattering one letter across both ends.
  *
  * Probing is the caller's job: {@link collectKeyListings} only bounds how many
  * probes run at once and merges what comes back, so the panel, the `discover`
@@ -32,6 +36,13 @@ import type { KeyProbeResult } from './key-probe.js'
 /** How many probes run at once unless the caller says otherwise. */
 export const DEFAULT_PROBE_CONCURRENCY = 4
 
+/**
+ * How model ids read in the merged catalogue. `numeric` keeps a family in
+ * version order (`glm-4.5` before `glm-4.6`), and `en` pins the alphabet so the
+ * order does not drift with the host's locale.
+ */
+const MODEL_ORDER = new Intl.Collator('en', { numeric: true, sensitivity: 'base' })
+
 /** One model in the merged catalogue and the keys that advertised it. */
 export interface MergedModel {
   readonly id: string
@@ -41,7 +52,7 @@ export interface MergedModel {
 
 /** A route's whole catalogue, merged across the keys that were asked. */
 export interface MergedListing {
-  /** The models, first-advertised order, each naming its keys. */
+  /** The models, in natural id order, each naming its keys. */
   readonly models: readonly MergedModel[]
   /** Just the ids, in the same order (what a picker or a patch needs). */
   readonly ids: readonly string[]
@@ -119,6 +130,7 @@ export function mergeKeyListings(
     add(result.ref, known)
   }
 
+  order.sort(MODEL_ORDER.compare)
   const models = order.map(id => ({ id, keys: keysByModel.get(id) ?? [] }))
   return {
     models,
@@ -150,10 +162,11 @@ export interface CollectKeyListingsOptions<Key> {
 /**
  * Probe every key with bounded concurrency, then merge the answers.
  *
- * Kept in key order regardless of which probe finished first: a catalogue is
- * shaped by the keys' preference order, not by network luck. A probe that
- * throws contributes nothing for its key (the caller's own probe decides what
- * "no answer" means); the remaining probes still run.
+ * Kept in key order regardless of which probe finished first: the per-key
+ * bookkeeping reads in the keys' preference order, not by network luck. (The
+ * catalogue itself reads in id order — see {@link mergeKeyListings}.) A probe
+ * that throws contributes nothing for its key (the caller's own probe decides
+ * what "no answer" means); the remaining probes still run.
  * @param options - the keys, how to probe one, and the concurrency bound.
  * @returns the results in key order, plus the merged catalogue.
  */

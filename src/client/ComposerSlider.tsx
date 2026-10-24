@@ -1,25 +1,23 @@
 /**
- * The replicated composer popover body: a "model" row and a "reasoning level"
- * row, both driven from the official model directory.
+ * The replicated composer popover body: the model switcher and the reasoning
+ * level, both driven from the official model directory.
  *
- * Presentation follows `dsh-tauri-model-config`: one bordered card, a chevron
- * that rotates as its panel opens, and a selectable list rendered under the row
- * it belongs to. The model list is a provider column with the models of the
- * selected provider beside it. The radiation slider this module shipped with
- * upstream is gone — it was reported as ugly and the reference plugin has none.
+ * Presentation follows the plugin's UI redesign: one quiet head naming the
+ * current model and its level, the provider column and the models of the
+ * selection beside it ALWAYS visible (no drill-in row), a resident search box
+ * above the columns, and the reasoning level switched IN PLACE as a segmented
+ * footer — no second-level panel anywhere, so the body's height never changes
+ * after the mount and the commit paths carry no re-measure dance.
  *
- * Four invariants are load-bearing and must survive any edit:
+ * Load-bearing invariants that must survive any edit:
  *   - the body is mounted INSIDE the official model menu, and the shell closes
  *     that menu on any blur that leaves the card, so every commit hands focus to
  *     the menu BEFORE the busy state disables the control that was clicked
  *     (issue #13's snap-shut);
  *   - the levels always come from the model the directory currently reports,
  *     never from a cached label, so a model switch re-reads the ladder;
- *   - picking a model must NOT close the popover: the reasoning level below is
- *     still unpicked, so the list collapses and the rows stay;
- *   - a panel and the card's re-measure must land in the SAME frame (see
- *     {@link ComposerSlider}'s `togglePanel`), or the panel is painted once at
- *     the stale position and the menu visibly jumps.
+ *   - picking a model must NOT close the popover: the level footer is still
+ *     there to be picked next.
  *
  * @module dsh-model-think-level/client/ComposerSlider
  */
@@ -31,7 +29,6 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react'
-import { flushSync } from 'react-dom'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import { inferModalitiesFromName, matchKnowledgeBase } from '../knowledge.js'
@@ -104,17 +101,7 @@ export interface ComposerSliderProps {
   configuredInputs?: ConfiguredInputs
   /** Localized copy (the plugin's bound translator). */
   t: Translator
-  /**
-   * Re-measure hook. The official card measures itself from its own layout
-   * effect (`[open, pane, state]`) and only re-runs on a window `resize`, so a
-   * body that grows here must ask the injector to re-place it — in the same
-   * frame, never from a deferred task.
-   */
-  onLayoutChange?: () => void
 }
-
-/** Which row has its list open. At most one at a time. */
-type Panel = 'model' | 'effort' | null
 
 /** A model row of one provider group, as the directory exposes it. */
 interface ModelChoiceLike {
@@ -135,15 +122,6 @@ function modelsOf(group: DirectoryGroupLike): readonly ModelChoiceLike[] {
 export function providerLabelOf(group: DirectoryGroupLike): string {
   const named = group as unknown as { name?: string; label?: string; title?: string }
   return named.name ?? named.label ?? named.title ?? group.id
-}
-
-/** The chevron marking a row as drilling into a list; rotates while open. */
-function chevron(open: boolean): ReactNode {
-  return createElement(
-    'span',
-    { className: 'bre-row-chevron' + (open ? ' is-open' : ''), 'aria-hidden': true },
-    '›',
-  )
 }
 
 /**
@@ -192,6 +170,22 @@ function useTruncatedTip(): {
 /** The mouse-enter face the DOM hands a React handler (the only field we read). */
 type EnterEvent = { currentTarget: HTMLElement }
 
+/** The pointer gestures the footer's slider listens for (jsdom dispatches bare
+ *  MouseEvents under these types, so only what the handlers read is named). */
+type PointerEventLike = {
+  currentTarget: HTMLElement & {
+    setPointerCapture?: (pointerId: number) => void
+    releasePointerCapture?: (pointerId: number) => void
+    hasPointerCapture?: (pointerId: number) => boolean
+  }
+  pointerId: number
+  clientX: number
+  preventDefault: () => void
+}
+
+/** The keys the slider answers; same shape discipline as {@link PointerEventLike}. */
+type KeyboardEventLike = { key: string; preventDefault: () => void }
+
 /**
  * Render the tip bubble on <body> (fixed positioning escapes the menu's
  * overflow clip and stacking context), under the truncated span and aligned to
@@ -217,28 +211,6 @@ function TruncatedTip({ state }: { state: TruncatedTipState }): ReactNode {
       state.text,
     ),
     document.body,
-  )
-}
-
-/** The check marking the current entry of an open list. */
-function checkIcon(): ReactNode {
-  return createElement(
-    'svg',
-    {
-      className: 'bre-option-check',
-      width: 14,
-      height: 14,
-      viewBox: '0 0 16 16',
-      fill: 'none',
-      'aria-hidden': true,
-    },
-    createElement('path', {
-      d: 'M3.5 8.5l3 3 6-7',
-      stroke: 'currentColor',
-      strokeWidth: 1.6,
-      strokeLinecap: 'round',
-      strokeLinejoin: 'round',
-    }),
   )
 }
 
@@ -312,6 +284,34 @@ function thinkingIcon(label: string): ReactNode {
   )
 }
 
+/** The gradient's anchor hues, cool to hot: the ladder's own intensity scale,
+ *  so a stop's colour IS its position on this ramp (进度条渐变色，不同的等级
+ *  不同的颜色). */
+const EFFORT_RAMP = ['#22c55e', '#a3e635', '#eab308', '#f97316', '#ef4444']
+
+/** The anchors parsed to RGB once; the per-render work is a channel lerp. */
+const EFFORT_RAMP_RGB = EFFORT_RAMP.map(hex => [
+  parseInt(hex.slice(1, 3), 16),
+  parseInt(hex.slice(3, 5), 16),
+  parseInt(hex.slice(5, 7), 16),
+] as const)
+
+/**
+ * The ramp colour at `t` in 0..1 — the hue a ladder stop at that fraction of
+ * the track wears. Every stop of every ladder length lands on the same
+ * continuous cool→hot scale, so the colour alone reads as the effort's
+ * intensity whatever the ladder spells its levels.
+ */
+export function effortRampColor(t: number): string {
+  const at = Math.min(1, Math.max(0, t)) * (EFFORT_RAMP_RGB.length - 1)
+  const index = Math.min(EFFORT_RAMP_RGB.length - 2, Math.floor(at))
+  const from = EFFORT_RAMP_RGB[index]
+  const to = EFFORT_RAMP_RGB[index + 1]
+  const mix = at - index
+  const channel = (a: number, b: number): number => Math.round(a + (b - a) * mix)
+  return `rgb(${channel(from[0], to[0])}, ${channel(from[1], to[1])}, ${channel(from[2], to[2])})`
+}
+
 /** The capability badges of one model, or null when it declares neither. */
 function modelTags(model: ModelChoiceLike, t: Translator, configuredInput?: readonly string[]): ReactNode {
   const badges: ReactNode[] = []
@@ -341,13 +341,12 @@ interface SelectInput {
 }
 
 /**
- * Render the model row and the reasoning-level row. Both values come from the
- * store; the commit travels through {@link ModelDirectoryLike.select}
+ * Render the model switcher and the reasoning-level footer. Both values come
+ * from the store; the commit travels through {@link ModelDirectoryLike.select}
  * (optimistic, rolled back on refusal).
  */
 export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const { directory, t, configuredInputs } = props
-  const layoutChange = props.onLayoutChange
   const state = useSyncExternalStore(
     (notify: () => void) => directory.store.subscribe(notify),
     () => directory.store.getSnapshot(),
@@ -358,7 +357,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   )
   const levels = sliderLevels(state)
   const [effort, setEffort] = useState('')
-  const [panel, setPanel] = useState<Panel>(null)
+  const [query, setQuery] = useState('')
   const [openProvider, setOpenProvider] = useState<string | null>(null)
   const [committing, setCommitting] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
@@ -396,9 +395,9 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const group = state.groups.find(candidate => candidate.id === current?.provider)
   const model = group?.models.find(candidate => candidate.id === current?.model)
   const modelName = model?.name ?? (current === null ? t('triggerFallback') : current.model)
-  const modelLabel = current === null
-    ? modelName
-    : providerLabelOf(group ?? ({ id: current.provider } as DirectoryGroupLike)) + ' · ' + modelName
+  const providerName = current === null
+    ? ''
+    : providerLabelOf(group ?? ({ id: current.provider } as DirectoryGroupLike))
   const effortLabel = levels.find(level => level.id === effort)?.name ?? t('effortDefault')
 
   // The provider order set on the Models settings page, where the rows are
@@ -408,8 +407,8 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const preferredOrder = useSyncExternalStore(subscribeProviderOrder, providerOrder)
 
   // The providers switched off on the Models settings page. Hiding one here is
-  // the whole point of the switch, and the trigger decoration still keeps the
-  // current provider visible so the selected model remains unambiguous.
+  // the whole point of the switch, and the head still keeps the current
+  // provider visible so the selected model remains unambiguous.
   const disabled = useSyncExternalStore(subscribeDisabledProviders, disabledProviders)
 
   // The model order set inside each provider's editor on the settings page: the
@@ -428,34 +427,32 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     : (current !== null && providerIds.includes(current.provider)
       ? current.provider
       : providerIds[0] ?? null)
-  const shownModels = shownProvider === null
-    ? []
-    : orderModelEntries(
-      modelsOf(state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike),
-      modelOrderByProvider[shownProvider] ?? [],
-    )
+
+  // The resident search: a non-empty query searches EVERY provider's models and
+  // the right column lists the matches flat, each named by its provider; an
+  // empty one restores the per-provider column. Matching is a case-insensitive
+  // substring over the display name and the id, the same two strings the
+  // official pane's search filters.
+  const needle = query.trim().toLowerCase()
+  const searching = needle !== ''
+  const matches: Array<{ provider: string; choice: ModelChoiceLike }> = searching
+    ? providerIds.flatMap(provider => orderModelEntries(
+        modelsOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike),
+        modelOrderByProvider[provider] ?? [],
+      )
+        .filter(choice => (choice.name ?? choice.id).toLowerCase().includes(needle)
+          || choice.id.toLowerCase().includes(needle))
+        .map(choice => ({ provider, choice })))
+    : []
+  const shownModels: Array<{ provider: string; choice: ModelChoiceLike }> = searching
+    ? matches
+    : (shownProvider === null
+      ? []
+      : orderModelEntries(
+        modelsOf(state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike),
+        modelOrderByProvider[shownProvider] ?? [],
+      ).map(choice => ({ provider: shownProvider as string, choice })))
   const activeKey = current === null ? '' : current.provider + '/' + current.model
-
-  /**
-   * Toggle a list. A panel changes the body's height, and the official card only
-   * re-measures on a window `resize`, so BOTH steps must land in one frame:
-   * commit the DOM synchronously, then let the injector re-place the card before
-   * the browser paints. Deferring the re-measure (the previous `setTimeout`)
-   * painted the panel once at the stale position — the flash that read as a
-   * different page.
-   */
-  const togglePanel = useCallback((next: Panel): void => {
-    if (panel === next) return
-    flushSync(() => { setPanel(next) })
-    layoutChange?.()
-  }, [layoutChange, panel])
-
-  /** Collapse whichever list is open, re-placing the card in the same frame. */
-  const collapsePanel = useCallback((): void => {
-    if (panel === null) return
-    flushSync(() => { setPanel(null) })
-    layoutChange?.()
-  }, [layoutChange, panel])
 
   /**
    * Hand focus to the menu before a control this body owns is disabled or
@@ -474,11 +471,12 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     menu.focus({ preventScroll: true })
   }, [])
 
-  /** Pick a model. Collapses the list; deliberately leaves the popover open. */
+  /** Pick a model. Deliberately leaves the popover open. */
   const chooseModel = useCallback(async (provider: string, id: string): Promise<void> => {
     if (committingRef.current) return
     const now = directory.store.getSnapshot().current
-    collapsePanel()
+    // A pick answers the search: the columns go back to the per-provider view.
+    if (searching) setQuery('')
     if (now !== null && now.provider === provider && now.model === id) return
     committingRef.current = true
     focusMenu()
@@ -496,26 +494,25 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
       committingRef.current = false
       setCommitting(false)
     }
-  }, [collapsePanel, directory, focusMenu, select])
+  }, [directory, focusMenu, searching, select])
 
-  /** Pick a reasoning level. Collapses the list; leaves the popover open. */
+  /** Pick a reasoning level. Leaves the popover open. */
   const chooseEffort = useCallback(async (next: string): Promise<void> => {
     if (committingRef.current) return
-    collapsePanel()
-    // The row's displayed level can be a PREDICTION rather than a commitment:
-    // `effectiveEffortIndex` falls back to the adapter default (or the middle of
-    // the ladder) when the session carries no effort, so the FIRST use of a
-    // model shows "Medium" while the seat trigger still reads Default. Guarding
-    // the repick on that displayed level swallowed the very click that would
-    // commit it, leaving the level unpickable until another one was chosen.
-    // Only the SESSION'S OWN effort is a settled level.
+    // The footer's displayed level can be a PREDICTION rather than a
+    // commitment: `effectiveEffortIndex` falls back to the adapter default (or
+    // the middle of the ladder) when the session carries no effort, so the
+    // FIRST use of a model shows "Medium" while the seat trigger still reads
+    // Default. Guarding the repick on that displayed level swallowed the very
+    // click that would commit it, leaving the level unpickable until another
+    // one was chosen. Only the SESSION'S OWN effort is a settled level.
     if (next === state.current?.reasoningEffort && state.status !== 'error') return
     committingRef.current = true
     const previous = committedRef.current
     focusMenu()
     setCommitting(true)
     setLocalError(null)
-    // Optimistic pick keeps the row responsive.
+    // Optimistic pick keeps the footer responsive.
     setEffort(next)
 
     try {
@@ -545,167 +542,349 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
       committingRef.current = false
       setCommitting(false)
     }
-  }, [collapsePanel, directory, focusMenu, levels, select, state.current, state.status, t])
+  }, [directory, focusMenu, levels, select, state.current, state.status, t])
 
-  /** The two rows; each opens its own list underneath. */
+  // The footer's level pick is a SLIDER, not a row of capsules: a long ladder
+  // (off…max is seven) wrapped its row inside the popover (思考等级选择换成进度
+  // 条样式), and a track is fixed-length whatever the ladder's size. Dragging
+  // only moves a PREVIEW stop; the commit fires on release, so one drag is one
+  // select() round-trip, exactly one capsule click used to be.
+  const effortTrackRef = useRef<HTMLDivElement | null>(null)
+  const effortDraggingRef = useRef(false)
+  const [dragStop, setDragStop] = useState<number | null>(null)
+  const effortIndex = Math.max(0, levels.findIndex(level => level.id === effort))
+  const shownStop = dragStop ?? effortIndex
+  const effortPct = levels.length > 1 ? (shownStop / (levels.length - 1)) * 100 : 0
+  const stopFromX = (clientX: number): number => {
+    const track = effortTrackRef.current
+    if (track === null || levels.length === 0) return effortIndex
+    const rect = track.getBoundingClientRect()
+    if (rect.width <= 0) return effortIndex
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
+    return Math.round(ratio * (levels.length - 1))
+  }
+  const onEffortPointerDown = (event: PointerEventLike): void => {
+    if (busy || !available) return
+    event.preventDefault()
+    effortDraggingRef.current = true
+    if (typeof event.currentTarget.setPointerCapture === 'function') {
+      try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* capture is best-effort */ }
+    }
+    setDragStop(stopFromX(event.clientX))
+  }
+  const onEffortPointerMove = (event: PointerEventLike): void => {
+    if (!effortDraggingRef.current || busy) return
+    setDragStop(stopFromX(event.clientX))
+  }
+  const onEffortPointerUp = (event: PointerEventLike): void => {
+    if (!effortDraggingRef.current) return
+    effortDraggingRef.current = false
+    if (typeof event.currentTarget.releasePointerCapture === 'function'
+      && event.currentTarget.hasPointerCapture?.(event.pointerId) === true) {
+      try { event.currentTarget.releasePointerCapture(event.pointerId) } catch { /* capture is best-effort */ }
+    }
+    const at = stopFromX(event.clientX)
+    setDragStop(null)
+    const next = levels[at]
+    if (next !== undefined) void chooseEffort(next.id)
+  }
+  const onEffortKeyDown = (event: KeyboardEventLike): void => {
+    if (busy || !available) return
+    let at: number | undefined
+    if (event.key === 'ArrowRight' || event.key === 'ArrowUp') at = Math.min(levels.length - 1, shownStop + 1)
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') at = Math.max(0, shownStop - 1)
+    else if (event.key === 'Home') at = 0
+    else if (event.key === 'End') at = levels.length - 1
+    if (at === undefined) return
+    event.preventDefault()
+    const next = levels[at]
+    if (next !== undefined) void chooseEffort(next.id)
+  }
+
+  /** The truncated-name tooltip wiring, shared by the head and the columns. */
   const { tip, onEnter, onLeave } = useTruncatedTip()
-  const rows: ReactNode[] = [
+
+  // One hue per declared stop, sampled along the cool→hot ramp. The fill
+  // carries the whole gradient in TRACK coordinates — full width, revealed to
+  // the thumb by clip-path — because a gradient on a width-clipped element
+  // would compress its hues as the level moves; the thumb and the name under
+  // the active stop wear the current hue, so the colour alone names the level.
+  const stopColors = levels.map((_, at) => effortRampColor(levels.length > 1 ? at / (levels.length - 1) : 0))
+  const trackGradient = `linear-gradient(to right, ${stopColors
+    .map((color, at) => `${color} ${(at / Math.max(1, levels.length - 1)) * 100}%`)
+    .join(', ')})`
+
+  // The head: the label, the current model and its provider pushed right, and
+  // the level pill at the far right — the body's own rest state, the same facts
+  // the trigger below carries, readable without opening anything.
+  const head = createElement(
+    'div',
+    { className: 'bre-menu-head' },
+    createElement('span', { className: 'bre-row-label' }, t('modelRowLabel')),
     createElement(
-      'button',
-      {
-        key: 'row:model',
-        type: 'button',
-        role: 'menuitem',
-        className: 'bre-row-control' + (panel === 'model' ? ' is-open' : ''),
-        disabled: busy,
-        'aria-expanded': panel === 'model',
-        onMouseLeave: onLeave,
-        onClick: () => { togglePanel(panel === 'model' ? null : 'model') },
-      },
-      createElement('span', { className: 'bre-row-label' }, t('modelRowLabel')),
+      'span',
+      { className: 'bre-menu-cur' },
       createElement(
         'span',
         {
-          className: 'bre-row-value',
-          // The full label for screen readers; sighted users get the custom
-          // tooltip (below) only when the one-line value actually truncates.
-          'aria-label': modelLabel,
-          onMouseEnter: (event: EnterEvent) => { onEnter(event, modelLabel) },
+          className: 'bre-menu-name',
+          'aria-label': current === null ? modelName : providerName + ' · ' + modelName,
+          onMouseEnter: (event: EnterEvent) => {
+            onEnter(event, current === null ? modelName : providerName + ' · ' + modelName)
+          },
+          onMouseLeave: onLeave,
         },
-        modelLabel,
+        modelName,
       ),
-      chevron(panel === 'model'),
+      providerName === '' ? null : createElement('span', { className: 'bre-menu-prov' }, providerName),
     ),
-    // Provider column + the models of the selected provider, side by side. The
-    // panel's height is FIXED (see .bre-panel-models): switching provider must
-    // not resize the card, or every provider click would need another re-place.
-    panel === 'model'
-      ? createElement(
-        'div',
-        { key: 'panel:model', className: 'bre-panel bre-panel-models' },
-        createElement(
-          'div',
-          { className: 'bre-providers', role: 'group', 'aria-label': t('modelRowLabel') },
-          ...providerIds.map(provider => createElement(
-            'button',
-            {
-              key: provider,
-              type: 'button',
-              className: 'bre-provider'
-                + (provider === shownProvider ? ' is-open' : '')
-                + (provider === current?.provider ? ' is-current' : ''),
-              disabled: busy,
-              'aria-expanded': provider === shownProvider,
-              onMouseLeave: onLeave,
-              onClick: () => { setOpenProvider(provider) },
-            },
-            createElement(
-              'span',
-              {
-                className: 'bre-option-name',
-                // The provider column truncates long labels with ellipsis; the
-                // custom tooltip keeps the full name readable without the
-                // native title bubble.
-                'aria-label': providerLabelOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike),
-                onMouseEnter: (event: EnterEvent) => {
-                  onEnter(event, providerLabelOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike))
-                },
-              },
-              providerLabelOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike),
-            ),
-            chevron(provider === shownProvider),
-          )),
-          ...(providerIds.length === 0
-            ? [createElement('div', { key: 'no-providers', className: 'bre-empty' }, t('sliderNoCurrent'))]
-            : []),
-        ),
-        createElement(
-          'div',
-          { className: 'bre-provider-models', role: 'group', 'aria-label': t('modelRowLabel') },
-          ...(shownModels.length === 0
-            ? [createElement('div', { key: 'no-models', className: 'bre-empty' }, t('sliderNoCurrent'))]
-            : shownModels.map(choice => {
-              const key = shownProvider + '/' + choice.id
-              const active = key === activeKey
-              return createElement(
-                'button',
-                {
-                  key,
-                  type: 'button',
-                  className: 'bre-option' + (active ? ' is-active' : ''),
-                  disabled: busy,
-                  'aria-pressed': active,
-                  onMouseLeave: onLeave,
-                  onClick: () => { void chooseModel(shownProvider as string, choice.id) },
-                },
-                createElement(
-                  'span',
-                  {
-                    className: 'bre-option-name',
-                    'aria-label': choice.name ?? choice.id,
-                    onMouseEnter: (event: EnterEvent) => { onEnter(event, choice.name ?? choice.id) },
-                  },
-                  choice.name ?? choice.id,
-                ),
-                // No tick on a model row: it would sit right beside the
-                // capability badges and read as one of them. The accent colour
-                // (plus the row tint in CSS) is the whole selection signal.
-                modelTags(choice, t, inputDeclarations.get(shownProvider as string)?.get(choice.id)),
-              )
-            })),
-        ),
-      )
-      : null,
-    createElement('div', { key: 'divider', className: 'bre-divider', 'aria-hidden': true }),
+    available ? createElement('span', { className: 'bre-pill' }, effortLabel) : null,
+  )
+
+  // The resident search box, the same shape the official pane's search wears.
+  const search = createElement(
+    'div',
+    { className: 'bre-menu-search' },
     createElement(
-      'button',
-      {
-        key: 'row:effort',
-        type: 'button',
-        role: 'menuitem',
-        className: 'bre-row-control' + (panel === 'effort' ? ' is-open' : ''),
-        disabled: busy || !available,
-        'aria-expanded': available ? panel === 'effort' : undefined,
-        onClick: () => { togglePanel(panel === 'effort' ? null : 'effort') },
-      },
-      createElement('span', { className: 'bre-row-label' }, t('effortRowLabel')),
+      'div',
+      { className: 'bre-menu-search-box' },
       createElement(
         'span',
-        { className: 'bre-row-value' + (available ? '' : ' is-muted') },
-        available ? effortLabel : t('sliderNoLevels'),
+        { className: 'bre-menu-search-icon', 'aria-hidden': true },
+        createElement(
+          'svg',
+          { viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: '1.5' },
+          createElement('circle', { cx: '7', cy: '7', r: '4.5' }),
+          createElement('path', { d: 'M10.5 10.5L14 14', strokeLinecap: 'round' }),
+        ),
       ),
-      available ? chevron(panel === 'effort') : null,
-    ),
-    panel === 'effort' && available
-      ? createElement(
-        'div',
-        {
-          key: 'panel:effort',
-          className: 'bre-panel',
-          role: 'group',
-          'aria-label': t('effortRowLabel'),
+      createElement('input', {
+        type: 'text',
+        className: 'bre-menu-search-input',
+        role: 'searchbox',
+        placeholder: t('modelSearchPlaceholder'),
+        'aria-label': t('modelSearchPlaceholder'),
+        value: query,
+        spellCheck: false,
+        autoComplete: 'off',
+        onChange: (event: { currentTarget: HTMLInputElement }) => {
+          setQuery(event.currentTarget.value)
         },
-        ...levels.map(level => createElement(
+      }),
+      query === ''
+        ? null
+        : createElement(
           'button',
           {
-            key: level.id,
             type: 'button',
-            className: 'bre-option' + (level.id === effort ? ' is-active' : ''),
-            disabled: busy,
-            'aria-pressed': level.id === effort,
-            onClick: () => { void chooseEffort(level.id) },
+            className: 'bre-menu-search-clear',
+            title: t('modelSearchClear'),
+            'aria-label': t('modelSearchClear'),
+            onClick: () => { setQuery('') },
           },
-          createElement('span', { className: 'bre-option-name' }, level.name),
-          level.id === effort ? checkIcon() : null,
-        )),
+          createElement(
+            'svg',
+            { viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: '1.5' },
+            createElement('path', { d: 'M4 4L12 12M12 4L4 12', strokeLinecap: 'round' }),
+          ),
+        ),
+    ),
+  )
+
+  // The provider column: one cell per provider, the count where the drill
+  // chevron used to be (the columns are always open; there is nothing to
+  // drill into). Clicking a provider narrows the right column and answers any
+  // active search.
+  const providerColumn = createElement(
+    'div',
+    { className: 'bre-providers', role: 'group', 'aria-label': t('modelRowLabel') },
+    ...providerIds.map(provider => {
+      const providerGroup = state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike
+      return createElement(
+        'button',
+        {
+          key: provider,
+          type: 'button',
+          className: 'bre-provider'
+            + (provider === shownProvider ? ' is-open' : '')
+            + (provider === current?.provider ? ' is-current' : ''),
+          disabled: busy,
+          'aria-expanded': provider === shownProvider,
+          onMouseLeave: onLeave,
+          onClick: () => { setOpenProvider(provider); setQuery('') },
+        },
+        createElement(
+          'span',
+          {
+            className: 'bre-option-name',
+            'aria-label': providerLabelOf(providerGroup),
+            onMouseEnter: (event: EnterEvent) => { onEnter(event, providerLabelOf(providerGroup)) },
+          },
+          providerLabelOf(providerGroup),
+        ),
+        createElement('span', { className: 'bre-provider-count' }, String(modelsOf(providerGroup).length)),
       )
-      : null,
-  ]
+    }),
+    ...(providerIds.length === 0
+      ? [createElement('div', { key: 'no-providers', className: 'bre-empty' }, t('sliderNoCurrent'))]
+      : []),
+  )
+
+  // The model column: the selected provider's models, or — while the search
+  // holds a query — the flat list of matches across every provider, each named
+  // by its provider. The height is FIXED either way (see .bre-panel-models), so
+  // neither typing nor a provider switch ever resizes the card.
+  const modelColumn = createElement(
+    'div',
+    { className: 'bre-provider-models', role: 'group', 'aria-label': t('modelRowLabel') },
+    ...(shownModels.length === 0
+      ? [createElement(
+        'div',
+        { key: 'no-models', className: 'bre-empty' },
+        searching ? t('modelSearchNoMatches') : t('sliderNoCurrent'),
+      )]
+      : shownModels.map(({ provider, choice }) => {
+        const key = provider + '/' + choice.id
+        const active = key === activeKey
+        const label = choice.name ?? choice.id
+        const fullLabel = searching
+          ? providerLabelOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike) + ' · ' + label
+          : label
+        return createElement(
+          'button',
+          {
+            key,
+            type: 'button',
+            className: 'bre-option' + (active ? ' is-active' : ''),
+            disabled: busy,
+            'aria-pressed': active,
+            onMouseLeave: onLeave,
+            onClick: () => { void chooseModel(provider, choice.id) },
+          },
+          createElement(
+            'span',
+            {
+              className: 'bre-option-name',
+              'aria-label': fullLabel,
+              onMouseEnter: (event: EnterEvent) => { onEnter(event, fullLabel) },
+            },
+            searching
+              ? createElement(
+                'span',
+                { className: 'bre-option-origin' },
+                providerLabelOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike) + ' · ',
+              )
+              : null,
+            label,
+          ),
+          // No tick on a model row: it would sit right beside the capability
+          // badges and read as one of them. The accent colour (plus the row
+          // tint in CSS) is the whole selection signal.
+          modelTags(choice, t, inputDeclarations.get(provider)?.get(choice.id)),
+        )
+      })),
+  )
+
+  // The footer: the level switched IN PLACE — a head naming the section and the
+  // level under the thumb (进度条上方：思考等级 + 当前等级), then the draggable
+  // slider whose stops are the declared levels, the committed one under the
+  // thumb, the names written below the track. Fixed-length whatever the
+  // ladder's size, so a seven-level ladder never wraps the popover's foot.
+  const footer = createElement(
+    'div',
+    { className: 'bre-menu-foot' },
+    available
+      ? createElement(
+        'div',
+        { className: 'bre-menu-slider' },
+        // The head echoes what the slider itself announces (its aria-label and
+        // valuetext), so it is hidden from assistive tech like the stop names
+        // below the track; the value follows the drag preview, not only the
+        // committed level, and wears the stop's hue like the thumb does.
+        createElement(
+          'div',
+          { className: 'bre-effort-slider-head', 'aria-hidden': true },
+          createElement('span', { className: 'bre-effort-slider-head-label' }, t('effortRowLabel')),
+          createElement(
+            'span',
+            {
+              className: 'bre-effort-slider-head-value',
+              style: { color: stopColors[Math.min(shownStop, stopColors.length - 1)] },
+            },
+            levels[shownStop]?.name ?? effortLabel,
+          ),
+        ),
+        createElement(
+          'div',
+          {
+            className: 'bre-effort-slider',
+            ref: effortTrackRef,
+            role: 'slider',
+            tabIndex: 0,
+            'aria-label': t('effortRowLabel'),
+            'aria-valuemin': 0,
+            'aria-valuemax': levels.length - 1,
+            'aria-valuenow': shownStop,
+            'aria-valuetext': levels[shownStop]?.name,
+            'aria-disabled': busy || undefined,
+            onPointerDown: onEffortPointerDown,
+            onPointerMove: onEffortPointerMove,
+            onPointerUp: onEffortPointerUp,
+            onPointerCancel: onEffortPointerUp,
+            onKeyDown: onEffortKeyDown,
+          },
+          createElement('span', {
+            className: 'bre-effort-slider-fill',
+            style: {
+              background: trackGradient,
+              clipPath: `inset(0 ${100 - effortPct}% 0 0)`,
+            },
+          }),
+          createElement('span', {
+            className: 'bre-effort-slider-thumb',
+            style: {
+              left: `${effortPct}%`,
+              background: stopColors[Math.min(shownStop, stopColors.length - 1)],
+            },
+          }),
+        ),
+        createElement(
+          'div',
+          { className: 'bre-effort-slider-labels', 'aria-hidden': true },
+          ...levels.map((level, at) => createElement(
+            'span',
+            {
+              key: level.id,
+              className: 'bre-effort-slider-label'
+                + (at === 0 ? ' is-first' : '')
+                + (at === levels.length - 1 ? ' is-last' : '')
+                + (at === shownStop ? ' is-on' : ''),
+              style: {
+                left: levels.length > 1 ? `${(at / (levels.length - 1)) * 100}%` : '0%',
+                ...(at === shownStop ? { color: stopColors[at] } : {}),
+              },
+            },
+            level.name,
+          )),
+        ),
+      )
+      : createElement('span', { className: 'bre-row-value is-muted' }, t('sliderNoLevels')),
+  )
 
   return createElement(
     'div',
     { className: 'bre-slider-body', ref: bodyRef },
-    createElement('div', { className: 'bre-card' }, ...rows),
+    createElement(
+      'div',
+      { className: 'bre-card' },
+      head,
+      search,
+      // The columns live in the fixed-height panel wrapper (.bre-panel-models):
+      // switching provider must not resize the card, and the search must not
+      // either — the list scrolls inside the same box whatever it shows.
+      createElement('div', { className: 'bre-panel bre-panel-models' }, providerColumn, modelColumn),
+      footer,
+    ),
     error === null
       ? null
       : createElement('div', { className: 'bre-model-error', role: 'status' }, error),

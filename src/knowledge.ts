@@ -120,11 +120,12 @@ export interface KnowledgeEntry {
    */
   input?: InputModalities
   /**
-   * Reference context window in tokens (display-only advice; the official
-   * capacity inputs are never auto-filled).
+   * Reference context window in tokens. Rendered as footnote advice, and a
+   * mounted row's official capacity input echoes it (fill-only) when a
+   * suggestion is applied.
    */
   contextWindow?: number
-  /** Reference max output tokens in tokens (display-only advice). */
+  /** Reference max output tokens in tokens (same echo rule as the context window). */
   maxTokens?: number
   /**
    * The vendor's own default level for the family, when its docs name one
@@ -189,9 +190,9 @@ export interface EffortSuggestion {
   input?: InputModalities
   /** Where the modality part came from -- its confidence rides this. */
   inputSource?: InputSource
-  /** Reference context window (display-only; never auto-filled anywhere). */
+  /** Reference context window; echoed into the row's official capacity input when one is mounted. */
   contextWindow?: number
-  /** Reference max output tokens (display-only). */
+  /** Reference max output tokens (same echo rule as the context window). */
   maxTokens?: number
   /** Whether a knowledge-base entry matched (vs protocol inference). */
   matched: boolean
@@ -1575,8 +1576,11 @@ export function inferProtocol(route: RouteFacts): string {
       // Malformed URL: fall through to the generic ladder.
     }
   }
-  // Former 'gemini' guessing removed: pi-ai has no gemini protocol, and
-  // Gemini gateways speak the OpenAI-compatible dialect.
+  // No route-level 'gemini' guessing: the harness adapter's registry offers
+  // only the three OpenAI/Anthropic wires, so a Gemini endpoint at route level
+  // still speaks the OpenAI-compatible dialect. Native Gemini
+  // ('google-generative-ai') is reached only through a per-key protocol pin
+  // (see key-refs.ts), which needs no route inference.
   return 'openai-completions'
 }
 

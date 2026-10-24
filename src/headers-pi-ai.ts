@@ -18,7 +18,7 @@
 
 import { isRecord } from './shared.js'
 import { selectOverride, type HeaderIndex, type HeaderOverride } from './headers-core.js'
-import { anthropicRequestBaseUrl } from './listing.js'
+import { anthropicRequestBaseUrl, geminiRequestBaseUrl } from './listing.js'
 import {
   classifyFailure,
   isHonoured,
@@ -30,7 +30,7 @@ import {
   WIRE_DISPATCH_HEADER,
   type KeyCandidate,
 } from './key-route-core.js'
-import type { RouteProtocol } from './key-refs.js'
+import { endpointFamilyOf, type RouteProtocol } from './key-refs.js'
 
 /**
  * The wire each (route, model) was last served on, learned from the request that
@@ -47,25 +47,43 @@ import type { RouteProtocol } from './key-refs.js'
  */
 const servedWire = new Map<string, RouteProtocol>()
 
-/** Models in use are few, but a long-lived host can still churn through ids. */
-const SERVED_WIRE_LIMIT = 256
+/**
+ * The wire each (route, model) last failed on before any content streamed.
+ *
+ * An automatic key picks its wire from the model id, and a relay may not serve
+ * that family at all (`/v1/messages` answering 404 for a key whose models all
+ * list under `/v1/chat/completions`). Without a memory, every request pays the
+ * rejected round trip again once the key's cooldown expires — and clearing the
+ * fact on a later success would only restart the cycle, since the automatic
+ * resolution would pick the family wire again. The refusal therefore persists
+ * for the model: the automatic resolution falls back to the route's own wire,
+ * the dispatch that always works, until the process restarts. Only a failure of
+ * an AUTOMATIC resolution is recorded — a pinned key's refusal blames that
+ * key's credential, not the family's wire — and a pin is never second-guessed
+ * by this memory.
+ */
+const failedWire = new Map<string, RouteProtocol>()
 
-/** Record the wire that served a model, dropping stale ids when the map grows. */
-function rememberServedWire(key: string, wire: RouteProtocol): void {
-  if (servedWire.size >= SERVED_WIRE_LIMIT) servedWire.clear()
-  servedWire.set(key, wire)
+/** Models in use are few, but a long-lived host can still churn through ids. */
+const WIRE_MEMORY_LIMIT = 256
+
+/** Record one wire fact for a model, dropping stale ids when the map grows. */
+function rememberWireFact(map: Map<string, RouteProtocol>, key: string, wire: RouteProtocol): void {
+  if (map.size >= WIRE_MEMORY_LIMIT) map.clear()
+  map.set(key, wire)
 }
 
 /**
- * Forget which wire served which model.
+ * Forget which wire served or failed which model.
  *
- * The memory is a process-wide optimisation: it may be dropped at any time
- * without changing an answer, only the number of rejected round trips it takes to
- * find one. Tests (and a host that swaps its provider configuration) call this to
- * start from a clean slate.
+ * The memories are process-wide optimisations: they may be dropped at any time
+ * without changing an answer, only the number of rejected round trips it takes
+ * to find one. Tests (and a host that swaps its provider configuration) call
+ * this to start from a clean slate.
  */
-export function resetServedWires(): void {
+export function resetWireMemories(): void {
   servedWire.clear()
+  failedWire.clear()
 }
 
 /**
@@ -180,6 +198,11 @@ function loadProtocol(protocol: RouteProtocol): Promise<ProtocolStreams> {
         return await import('@earendil-works/pi-ai/api/anthropic-messages') as unknown as ProtocolStreams
       case 'openai-responses':
         return await import('@earendil-works/pi-ai/api/openai-responses') as unknown as ProtocolStreams
+      case 'google-generative-ai':
+        // Not offered by the harness adapter's registry — only a key pin ever
+        // dispatches here, and a runtime older than the module rejects the
+        // import, which the failover loop benches like any refused key.
+        return await import('@earendil-works/pi-ai/api/google-generative-ai') as unknown as ProtocolStreams
       case 'openai-completions':
       default:
         return await import('@earendil-works/pi-ai/api/openai-completions') as unknown as ProtocolStreams
@@ -307,18 +330,33 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
         // A key may force its own protocol / endpoint AND a per-request apiKey.
         // When it does, re-dispatch straight to that protocol's streamSimple;
         // otherwise delegate to the route provider (still honouring the key).
-        const startAttempt = async (candidate: KeyCandidate): Promise<AsyncIterable<Record<string, unknown>>> => {
+        // `avoid` keeps the attempt's resolution in step with the plan's: an
+        // automatic key must not re-pick the wire the plan already skipped.
+        const startAttempt = async (candidate: KeyCandidate, avoid?: RouteProtocol): Promise<AsyncIterable<Record<string, unknown>>> => {
           const api = typeof modelObject['api'] === 'string' ? modelObject['api'] as RouteProtocol : 'openai-completions'
-          const protocol = wireOf(candidate, api)
+          const protocol = wireOf(candidate, api, modelId, avoid)
           // An endpoint only rides along when its family is the one this request
           // actually speaks; a pin the route could not honour keeps its own URL.
           const honoured = isHonoured(candidate, api)
+          // An automatic key carries its cross-family addresses in `endpoints`:
+          // the wire `wireOf` resolved names the family whose address to use.
+          // A same-family resolution (wire === api) keeps the route's own URL.
+          const autoEndpoint = honoured && candidate.protocol === undefined && protocol !== api
+            ? candidate.endpoints?.[endpointFamilyOf(protocol)]
+            : undefined
           const selectedBaseUrl = honoured && candidate.endpoint !== undefined
             ? candidate.endpoint
-            : modelObject['baseUrl'] as string
+            : autoEndpoint !== undefined
+              ? autoEndpoint
+              : modelObject['baseUrl'] as string
           const baseUrl = protocol === 'anthropic-messages'
             ? anthropicRequestBaseUrl(selectedBaseUrl)
-            : selectedBaseUrl
+            : protocol === 'google-generative-ai'
+              // The Google client takes baseUrl verbatim with no apiVersion, so
+              // the version segment must be in the path (a bare origin gains
+              // /v1beta; a spelled-out path is the gateway's own spelling).
+              ? geminiRequestBaseUrl(selectedBaseUrl)
+              : selectedBaseUrl
           const switched = protocol !== api || baseUrl !== modelObject['baseUrl']
           if (!switched) {
             return (streamSimple as UnknownFunction).call(target, model, context, {
@@ -364,28 +402,37 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
           const api = typeof modelObject['api'] === 'string' ? modelObject['api'] as RouteProtocol : 'openai-completions'
           const servedKey = `${route ?? ''}\u0000${modelId ?? ''}`
           // One decision, shared by both seams: fit for this model, the wire that
-          // served it last time, honour of each pin, the wire pool, and the keys
-          // that are cooling down — in that order of authority.
+          // served it last time, the wire that refused it last time, honour of
+          // each pin, the wire pool, and the keys that are cooling down — in that
+          // order of authority.
+          const avoidWire = failedWire.get(servedKey)
           const plan = planKeys(routeCandidates, {
             api,
             model: modelId,
             preferredWire: servedWire.get(servedKey),
+            avoidWire,
             isResting: candidate => keyRest.isResting(restKeyOf(route ?? '', candidate.ref), Date.now()),
           })
           // The plan is reproduced in `?diag=1`; it carries references and ranks,
           // never a key value.
           recordRoutePlan(route ?? '', plan, { model: modelId })
+          const wireOfAttempt = (candidate: KeyCandidate): RouteProtocol =>
+            plan.entries.find(entry => entry.candidate === candidate)?.wire ?? wireOf(candidate, api, modelId, avoidWire)
           let lastErrorEvent: Record<string, unknown> | undefined
           let lastError: unknown
           for (const candidate of plan.ordered) {
             const restKey = restKeyOf(route ?? '', candidate.ref)
             let stream: AsyncIterable<Record<string, unknown>>
             try {
-              stream = await startAttempt(candidate)
+              stream = await startAttempt(candidate, avoidWire)
             } catch (error) {
               // A synchronous setup failure (e.g. a missing client key) is a
-              // pre-content failure: bench the key and try the next one.
+              // pre-content failure: bench the key and try the next one. An
+              // AUTOMATIC resolution's wire is marked refused for this model, so
+              // the next request resolves elsewhere; a pin's failure blames the
+              // credential, not the wire.
               lastError = error
+              if (candidate.protocol === undefined) rememberWireFact(failedWire, servedKey, wireOfAttempt(candidate))
               keyRest.note(restKey, classifyFailure(undefined, error instanceof Error ? error.message : '') ?? 'refused')
               continue
             }
@@ -399,6 +446,7 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
                   // and remember why so the next request does not start here.
                   lastErrorEvent = event as Record<string, unknown>
                   failed = true
+                  if (candidate.protocol === undefined) rememberWireFact(failedWire, servedKey, wireOfAttempt(candidate))
                   keyRest.note(restKey, classifyFailure(undefined, errorTextOf(event as Record<string, unknown>)) ?? 'refused')
                   break
                 }
@@ -406,7 +454,9 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
                 keyRest.clear(restKey)
                 // This is the wire that actually serves the model; start here
                 // next time instead of paying the rejected round trip again.
-                rememberServedWire(servedKey, plan.entries.find(entry => entry.candidate === candidate)?.wire ?? wireOf(candidate, api))
+                // The refused-wire memory is deliberately kept: a wire that
+                // refused the model stays out of the automatic resolution.
+                rememberWireFact(servedWire, servedKey, wireOfAttempt(candidate))
               }
               yield event
             }

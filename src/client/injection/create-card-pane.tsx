@@ -206,16 +206,18 @@ function askBaseline(
  * not something this pane may assume: the read is by label (never by position),
  * so the card-wide scope can only ever find the SAME field the panel scope
  * would — the difference is that it still finds it when the host puts that field
- * outside the custom half.
+ * outside the custom half. Shared with the create card's key-list pane, which
+ * needs the same live id for the same reason.
  */
-function routeScopeOf(host: HTMLElement | null): HTMLElement | null {
+export function routeScopeOf(host: HTMLElement | null): HTMLElement | null {
   const panel = host?.parentElement
   if (panel === null || panel === undefined) return null
   return panel.parentElement?.closest<HTMLElement>('[class*="addCard"]') ?? panel
 }
 
-/** The provider id the card's form currently holds, read by the official label. */
-function readRoute(host: HTMLElement | null, routeIdLabels: () => readonly string[]): string {
+/** The provider id the card's form currently holds, read by the official label.
+ * Shared with the create card's key-list pane. */
+export function readRoute(host: HTMLElement | null, routeIdLabels: () => readonly string[]): string {
   const panel = host?.parentElement
   if (panel === null || panel === undefined) return ''
   const labels = routeIdLabels()

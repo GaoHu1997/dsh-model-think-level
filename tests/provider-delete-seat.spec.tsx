@@ -32,6 +32,8 @@ const LABELS: HostLabels = {
   cancel: ['Cancel'],
   editProvider: ['Edit {provider}'],
   inputImage: ['Image'],
+  contextWindow: ['Context window'],
+  maxOutput: ['Max output'],
 }
 
 /** The seat module's dependencies with a translator that echoes its key. */

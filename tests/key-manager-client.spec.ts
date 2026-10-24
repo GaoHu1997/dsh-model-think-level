@@ -56,6 +56,31 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe('the row status payload', () => {
+  it('carries a key cooldown through to the row, and drops a malformed one', async () => {
+    stubFetch({
+      body: {
+        ok: true,
+        route: 'ofox',
+        entries: [
+          { ref: 'K1', enabled: true, configured: true, masked: 'sk-1', rest: { remainingMs: 42000, failures: 2 } },
+          { ref: 'K2', enabled: true, configured: true, masked: 'sk-2', rest: { remainingMs: -5, failures: 1 } },
+          { ref: 'K3', enabled: true, configured: true, masked: 'sk-3', rest: { remainingMs: 'soon' } },
+        ],
+        endpoints: { openai: null, anthropic: null, gemini: null },
+      },
+    })
+    const answer = await httpKeyManagerClient.list('ofox')
+    expect(answer.ok).toBe(true)
+    if (!answer.ok) return
+    expect(answer.entries[0]?.rest).toEqual({ remainingMs: 42000, failures: 2 })
+    // A negative remaining time is not a state the panel can paint.
+    expect(answer.entries[1]?.rest).toBeUndefined()
+    // A non-numeric remaining time is the host telling nothing, not cooling.
+    expect(answer.entries[2]?.rest).toBeUndefined()
+  })
+})
+
 describe('list', () => {
   it('GETs the route with no caching and same-origin credentials', async () => {
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
@@ -65,7 +90,7 @@ describe('list', () => {
     expect(calls[0]?.url).toBe(`${KEY_INDEX_PATH}?route=ofox`)
     expect(optionsOf()).toMatchObject({ method: 'GET', cache: 'no-store', credentials: 'same-origin' })
     expect(optionsOf()['body']).toBeUndefined()
-    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null } })
+    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null, gemini: null } })
   })
 
   it('escapes the route it interpolates', async () => {
@@ -100,7 +125,7 @@ describe('list', () => {
         { ref: 'C', enabled: true, configured: null },
         { ref: 'D', enabled: true, configured: true },
       ],
-      endpoints: { openai: null, anthropic: null },
+      endpoints: { openai: null, anthropic: null, gemini: null },
     })
   })
 
@@ -127,7 +152,7 @@ describe('list', () => {
         { ref: 'C', enabled: true, configured: true },
         { ref: 'D', enabled: true, configured: true },
       ],
-      endpoints: { openai: null, anthropic: null },
+      endpoints: { openai: null, anthropic: null, gemini: null },
     })
   })
 
@@ -152,7 +177,7 @@ describe('list', () => {
         { ref: 'B', enabled: true, configured: true, models: [] },
         { ref: 'C', enabled: true, configured: true },
       ],
-      endpoints: { openai: null, anthropic: null },
+      endpoints: { openai: null, anthropic: null, gemini: null },
     })
   })
 
@@ -175,7 +200,7 @@ describe('list', () => {
       models: ['qwen-max'],
       mergedModels: ['qwen-max', 'glm-4'],
       unmergedModels: ['glm-4'],
-      endpoints: { openai: null, anthropic: null },
+      endpoints: { openai: null, anthropic: null, gemini: null },
     })
   })
 
@@ -260,7 +285,7 @@ describe('replace', () => {
     expect(optionsOf()).toMatchObject({ method: 'POST', cache: 'no-store', credentials: 'same-origin' })
     expect(headersOf()['content-type']).toBe('application/json')
     expect(bodyOf()).toEqual({ op: 'value', ref: 'key-2', value: 'sk-live-secret' })
-    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null } })
+    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null, gemini: null } })
   })
 
   it('passes the host’s refusal through untouched', async () => {

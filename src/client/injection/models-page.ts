@@ -16,12 +16,13 @@
 
 import { createElement } from 'react'
 import type { ReactNode } from 'react'
+import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { PLUGIN_ID } from '../../constants.js'
 import { EffortEditor } from '../EffortEditor.tsx'
 import {
-  createScanState, flushOnTeardown, flushOnUnload, pinModelListCards, reconcile,
+  createScanState, flushOnTeardown, flushOnUnload, hideOfficialReasoning, pinModelListCards, reconcile,
   releaseModelListRepins, showOfficialReasoning, unwatchModelListOffsets, watchModelListOffsets,
   type HostLabels, type InjectorDeps, type ScanState,
 } from './models-page-editor.js'
@@ -42,6 +43,8 @@ import {
   type AddCardDeps,
 } from './add-card.js'
 import { createStagedHeadersState, flushStagedRequestHeaders } from './staged-headers.js'
+import { createStagedKeysState, flushStagedKeys } from './staged-keys.js'
+import { httpKeyManagerClient } from '../key-manager-client.js'
 import {
   createProviderOrderState,
   reconcileProviderOrder,
@@ -112,6 +115,12 @@ const HOST_LABEL_KEYS = {
   // The official input-types control's image choice. Its sibling (`Text`) is
   // never matched: the box this plugin prints a verdict on is the image one.
   inputImage: ['modelInputImage', 'Image'],
+  // The disclosure's capacity inputs. Each carries TWO dictionary candidates —
+  // the host line has named these fields differently across versions — and both
+  // languages' copy as anchors, because the match runs against the wrapping
+  // label's text (the inputs themselves carry no aria-label on the DSH host).
+  contextWindow: ['modelContextWindow', 'contextWindow', 'Context window', '上下文窗口'],
+  maxOutput: ['modelMaxOutput', 'maxOutput', 'maxTokens', 'Max output', '最大输出'],
 } as const satisfies Record<keyof HostLabels, readonly [string, string, ...string[]]>
 
 /** What the Models-page injection needs from its host. */
@@ -167,10 +176,21 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
    */
   const labels = (): HostLabels => {
     const translate = ctx.locale.bind(HOST_MODELS_NS) as (key: string) => string
-    const resolve = ([key, ...fallbacks]: readonly [string, string, ...string[]]): readonly string[] => {
-      const value = translate(key)
-      // A host with no such namespace makes translate() echo the key back.
-      return value === key || value.trim() === '' ? fallbacks : [value, ...fallbacks]
+    // Every entry is tried as a dictionary key, in order — the capacity fields
+    // below carry TWO candidate keys apiece, because the host line has named
+    // them differently across versions. Whatever resolves is pinned first, and
+    // every entry stays as a copy anchor, so a host that ships no such
+    // namespace (or none of the keys) still matches by its rendered English /
+    // Chinese copy. A host without the namespace echoes every key back, which
+    // is what keeps this the "no dictionary" fallback of old.
+    const resolve = (entries: readonly string[]): readonly string[] => {
+      const resolved: string[] = []
+      for (const entry of entries) {
+        const value = translate(entry)
+        if (value !== entry && value.trim() !== '' && !resolved.includes(value)) resolved.push(value)
+      }
+      if (resolved.length === 0) return entries
+      return [...resolved, ...entries.filter(entry => !resolved.includes(entry))]
     }
     return {
       capacity: resolve(HOST_LABEL_KEYS.capacity),
@@ -183,6 +203,8 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       cancel: resolve(HOST_LABEL_KEYS.cancel),
       editProvider: resolve(HOST_LABEL_KEYS.editProvider),
       inputImage: resolve(HOST_LABEL_KEYS.inputImage),
+      contextWindow: resolve(HOST_LABEL_KEYS.contextWindow),
+      maxOutput: resolve(HOST_LABEL_KEYS.maxOutput),
     }
   }
 
@@ -223,11 +245,16 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   // write, and it is also the proof the write is allowed.
   const addCardState = createAddCardState()
   const stagedHeadersState = createStagedHeadersState()
+  // The same contract for the card's key list: drafts staged against a route
+  // the card has not declared yet, landed by the drain below the moment the
+  // create commits.
+  const stagedKeysState = createStagedKeysState()
   const addCardDeps: AddCardDeps = {
     t,
     api,
     routeIdLabels: () => labels().routeId,
     staged: stagedHeadersState,
+    stagedKeys: stagedKeysState,
     // Same seam the injector mounts its editors through: the pane's copy has to
     // follow a language switch, and a foreign root only hears about one through
     // the locale refresh wrapper.
@@ -237,6 +264,24 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   let retryTimer: number | undefined
   let observer: MutationObserver | undefined
   let composerMutation: (() => void) | undefined
+
+  /**
+   * The early half of the reasoning-control takeover: every disclosure
+   * container a mutation burst ADDED has its official reasoning group hidden
+   * at once. Runs in the observer's microtask, so the group never reaches a
+   * paint; the scan re-asserts the same hide when it mounts the editor.
+   */
+  const earlyHideOfficialReasoning = (records: readonly MutationRecord[]): void => {
+    for (const record of records) {
+      for (const node of Array.from(record.addedNodes)) {
+        if (!(node instanceof HTMLElement)) continue
+        const containers = node.matches('[class*="modelAdvanced"]')
+          ? [node]
+          : Array.from(node.querySelectorAll<HTMLElement>('[class*="modelAdvanced"]'))
+        for (const container of containers) hideOfficialReasoning(container)
+      }
+    }
+  }
   // Set on dispose. An idle pass already in flight can still call onBackoff
   // after stopObserver cleared the timer; without this gate that would re-arm
   // a retry timer on a dead fiber, restarting the scan chain (and re-mounting
@@ -289,7 +334,13 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
           },
         ))
       }
-      renderEditor(props)
+      // The FIRST render is synchronous: the row was painted open this frame,
+      // and an async commit would leave the slot empty for a frame more —
+      // the "old page first, covered later" flash (展开模型详细配置先出现
+      // 之前的页面). The scan's hideOfficialReasoning has already stood the
+      // official control down in this same task, so a sync commit means the
+      // user's next paint shows the plugin editor and nothing else.
+      flushSync(() => { renderEditor(props) })
       return {
         unmount: () => {
           try {
@@ -387,13 +438,16 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // These passes are also run synchronously by the observer. Repeating them
       // here covers preference flips and retry scans that have no DOM mutation.
       safely('dom decorations', () => { reconcileDom() })
-      // LAST, and only here: the create card's held request headers drain on the
-      // scan that finds their route declared. This is the one scan with wire
-      // work already in it — the observer's synchronous pass must stay
-      // wire-free, and the drain is a settings write of its own. A draft whose
-      // card is already gone gets no further mutation to ride, so the scan keeps
-      // coming until the ledger is empty (the held grace window bounds that).
+      // LAST, and only here: the create card's held drafts drain on the scan
+      // that finds their route declared. This is the one scan with wire work
+      // already in it — the observer's synchronous pass must stay wire-free,
+      // and the drain is a settings write of its own. A draft whose card is
+      // already gone gets no further mutation to ride, so the scan keeps coming
+      // until both ledgers are empty (the held grace windows bound that).
       void flushStagedRequestHeaders(stagedHeadersState, api).then((waiting) => {
+        if (waiting > 0) scheduleRetry(DEFERRED_RETRY_MS)
+      })
+      void flushStagedKeys(stagedKeysState, api, httpKeyManagerClient).then((waiting) => {
         if (waiting > 0) scheduleRetry(DEFERRED_RETRY_MS)
       })
     }, SCAN_DEBOUNCE_MS)
@@ -454,6 +508,13 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     }
     observer = new MutationObserver((records) => {
       safely('models mutation', () => { onMutation(records) })
+      // Stand the official per-model reasoning control down in the SAME
+      // microtask the disclosure appears in, before the browser can paint the
+      // opened row: the debounced scan that also hides it runs frames later,
+      // and that gap is exactly the "old page first, covered later" flash
+      // (展开模型详细配置先出现之前的页面). Idempotent with the scan's own
+      // hide — same marker, same guard.
+      safely('early reasoning hide', () => { earlyHideOfficialReasoning(records) })
       schedule()
     })
     // `hidden` flips are observed too: the official create card switches its

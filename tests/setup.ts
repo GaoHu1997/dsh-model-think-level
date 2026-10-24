@@ -1,6 +1,6 @@
 import { beforeEach } from 'vitest'
 
-import { resetServedWires } from '../src/headers-pi-ai.js'
+import { resetWireMemories } from '../src/headers-pi-ai.js'
 import { keyRest, resetRoutePlans } from '../src/key-route-core.js'
 
 /**
@@ -20,13 +20,14 @@ if (typeof HTMLCanvasElement !== 'undefined') {
 
 /**
  * The key routing memories live for the length of a process, exactly as they do
- * in the host: a key that was charged a 401 stays benched, and a model that a
- * wire served once keeps preferring it. Tests must not inherit either fact from
- * a sibling test, so both are cleared before every test rather than relying on
- * each suite to use disjoint key refs.
+ * in the host: a key that was charged a 401 stays benched, a model that a wire
+ * served once keeps preferring it, and a wire that refused a model once is not
+ * picked for it again. Tests must not inherit any of these facts from a sibling
+ * test, so all are cleared before every test rather than relying on each suite
+ * to use disjoint key refs.
  */
 beforeEach(() => {
   keyRest.reset()
-  resetServedWires()
+  resetWireMemories()
   resetRoutePlans()
 })

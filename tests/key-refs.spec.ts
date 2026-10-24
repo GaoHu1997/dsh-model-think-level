@@ -131,8 +131,8 @@ describe('maskKeyValue', () => {
 })
 
 describe('protocols and endpoints', () => {
-  it('recognises exactly the three wire protocols the host can dispatch', () => {
-    expect(ROUTE_PROTOCOLS).toEqual(['anthropic-messages', 'openai-completions', 'openai-responses'])
+  it('recognises exactly the four wire protocols a key can pin (three route-level, plus native Gemini)', () => {
+    expect(ROUTE_PROTOCOLS).toEqual(['anthropic-messages', 'openai-completions', 'openai-responses', 'google-generative-ai'])
     for (const protocol of ROUTE_PROTOCOLS) expect(isRouteProtocol(protocol)).toBe(true)
     expect(isRouteProtocol('google')).toBe(false)
     expect(isRouteProtocol(undefined)).toBe(false)
@@ -143,10 +143,12 @@ describe('protocols and endpoints', () => {
     expect(endpointFamilyOf('anthropic-messages')).toBe('anthropic')
     expect(endpointFamilyOf('openai-completions')).toBe('openai')
     expect(endpointFamilyOf('openai-responses')).toBe('openai')
+    expect(endpointFamilyOf('google-generative-ai')).toBe('gemini')
   })
 
   it('normalises a pinned protocol, treating anything unknown as "any"', () => {
     expect(normalizeKeyProtocol('openai-responses')).toBe('openai-responses')
+    expect(normalizeKeyProtocol('google-generative-ai')).toBe('google-generative-ai')
     expect(normalizeKeyProtocol('carrier-pigeon')).toBeUndefined()
     expect(normalizeKeyProtocol('')).toBeUndefined()
     expect(normalizeKeyProtocol(undefined)).toBeUndefined()
@@ -164,12 +166,16 @@ describe('protocols and endpoints', () => {
       openai: 'https://a.example/v1',
       anthropic: 'https://b.example',
     })
+    expect(normalizeRouteEndpoints({ gemini: 'https://c.example/v1beta', anthropic: 'https://b.example' })).toEqual({
+      anthropic: 'https://b.example',
+      gemini: 'https://c.example/v1beta',
+    })
     // A non-URL side is dropped, not stored; the good side survives.
     expect(normalizeRouteEndpoints({ openai: 'ftp://nope', anthropic: 'https://b.example' })).toEqual({
       anthropic: 'https://b.example',
     })
     // Nothing usable collapses to undefined (no extra endpoints configured).
-    expect(normalizeRouteEndpoints({ openai: '', anthropic: '   ' })).toBeUndefined()
+    expect(normalizeRouteEndpoints({ openai: '', anthropic: '   ', gemini: 'nope' })).toBeUndefined()
     expect(normalizeRouteEndpoints(undefined)).toBeUndefined()
     expect(normalizeRouteEndpoints('nonsense')).toBeUndefined()
   })

@@ -36,7 +36,7 @@ const t = (key: string, params?: Record<string, string | number>): string => {
   return Object.entries(params).reduce((carried, [name, value]) => carried.replace(`{${name}}`, String(value)), text)
 }
 
-const EMPTY: KeyState = { ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null } }
+const EMPTY: KeyState = { ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null, gemini: null } }
 
 /** A transport that answers instantly with an empty list. */
 function stubClient(): KeyManagerClient {
@@ -295,7 +295,9 @@ describe('the key list contract with the stylesheet', () => {
 
   it('opens every row with a circular enable check instead of a default badge', () => {
     expect(STYLES).toContain('.bre-keys-toggle {')
-    expect(STYLES).toContain('.bre-keys-toggle.is-on {')
+    // The state is colour on a bare dot: the lit mark takes the brand, and no
+    // glyph is drawn inside it.
+    expect(STYLES).toContain('.bre-keys-toggle.is-on .bre-keys-toggle-mark {')
     expect(STYLES).toContain('.bre-keys-row.is-off .bre-keys-alias,')
     // The scope summary rides on its own action button now, so the old label rule
     // is gone and the picker's own chevron rule stands in its place.
@@ -304,6 +306,16 @@ describe('the key list contract with the stylesheet', () => {
     expect(STYLES).not.toContain('.bre-keys-default {')
     expect(STYLES).not.toContain('.bre-keys-enable {')
     expect(STYLES).not.toContain('.bre-keys-enabled {')
+  })
+
+  it('paints no row status at all — the tray owns the right edge', () => {
+    // No status word is painted on a row any more (状态都移除：东西多了，别名
+    // 被省略): the badge styles are gone entirely, and the auto margin that
+    // used to park the badge lives on the action tray now.
+    expect(STYLES).not.toContain('.bre-keys-state')
+    expect(STYLES).toContain('.bre-keys-actions {')
+    expect(STYLES).toContain('margin-left: auto;')
+    expect(STYLES).not.toContain('.bre-keys-actions.is-end')
   })
 
   it('offers a discover control for automatic model binding', () => {

@@ -2,13 +2,14 @@
  * Which endpoint a key's model listing is asked of.
  *
  * A key is not tied to one protocol: a route can answer on an OpenAI-family
- * address and an Anthropic-family one, and each key may pin a protocol of its
- * own. Probing every key against the route's default wire would therefore ask
- * half of them a question their credential cannot answer — an Anthropic-pinned
- * key returns `401` from an OpenAI gateway, and the panel would conclude the
- * key serves nothing. This module derives the *protocols a key can actually be
- * used with* from the same facts routing uses (the pin, the route's api, and the
- * stored endpoint pair), so a probe is only sent where a request would go.
+ * address, an Anthropic-family one and a Gemini-family one, and each key may
+ * pin a protocol of its own. Probing every key against the route's default
+ * wire would therefore ask half of them a question their credential cannot
+ * answer — an Anthropic-pinned key returns `401` from an OpenAI gateway, and
+ * the panel would conclude the key serves nothing. This module derives the
+ * *protocols a key can actually be used with* from the same facts routing uses
+ * (the pin, the route's api, and the stored endpoints), so a probe is only
+ * sent where a request would go.
  *
  * The rules mirror routing ({@link module:key-route-core}):
  * - a pin is honoured only when its family has an address; a cross-family pin
@@ -17,23 +18,25 @@
  *   why;
  * - a same-family pin (Responses vs Chat Completions) rides the route's own
  *   address: only the wire changes, so the listing is asked there;
- * - a key with no pin is probed on the route's wire, and additionally on the
- *   other family's address when the route configured one — that is the only way
- *   to learn that the key also reaches the models of the other family.
+ * - a key with no pin is AUTOMATIC (the request speaks the model family's own
+ *   wire where the provider addressed it), so it is probed on the route's wire
+ *   and additionally on every other family's address the route configured —
+ *   that is the only way to learn that the key also reaches the models of
+ *   those families.
  *
  * @module dsh-model-think-level/key-probe
  */
 
-import { endpointFamilyOf, type RouteEndpoints, type RouteProtocol } from './key-refs.js'
+import { endpointFamilyOf, ENDPOINT_FAMILIES, type EndpointFamily, type RouteEndpoints, type RouteProtocol } from './key-refs.js'
 import { LISTABLE_PROTOCOLS, displayUrl, listingEntries, probeListingUrl } from './listing.js'
 
-/** One address family a provider can expose. */
-export type EndpointFamily = 'openai' | 'anthropic'
+export type { EndpointFamily }
 
 /** The protocol a probe speaks on a family when it has no more specific pin. */
 export const FAMILY_PROTOCOL: Readonly<Record<EndpointFamily, RouteProtocol>> = {
   openai: 'openai-completions',
   anthropic: 'anthropic-messages',
+  gemini: 'google-generative-ai',
 }
 
 /** The listing request one key should be sent. */
@@ -64,7 +67,7 @@ export interface ProbeIntent {
 
 /** The wire a route profile names, or undefined when it names none this plugin can speak. */
 function knownWire(api: unknown): RouteProtocol | undefined {
-  return api === 'anthropic-messages' || api === 'openai-completions' || api === 'openai-responses'
+  return api === 'anthropic-messages' || api === 'openai-completions' || api === 'openai-responses' || api === 'google-generative-ai'
     ? api
     : undefined
 }
@@ -123,14 +126,20 @@ export function probePlanFor(intent: ProbeIntent): ProbePlan {
 
   if (wire !== undefined && family !== undefined) {
     if (baseURL !== undefined) push({ api: wire, baseURL, family })
-    const otherFamily: EndpointFamily = family === 'openai' ? 'anthropic' : 'openai'
-    const otherBase = address(intent.endpoints?.[otherFamily])
-    if (otherBase !== undefined) push({ api: FAMILY_PROTOCOL[otherFamily], baseURL: otherBase, family: otherFamily })
+    // A key with no pin serves every family the route addressed: each extra
+    // address is a wire routing could legally dispatch this key on, so each
+    // one is asked (a Gemini address is how a bare key proves it also reaches
+    // the models of that family).
+    for (const other of ENDPOINT_FAMILIES) {
+      if (other === family) continue
+      const otherBase = address(intent.endpoints?.[other])
+      if (otherBase !== undefined) push({ api: FAMILY_PROTOCOL[other], baseURL: otherBase, family: other })
+    }
     return { targets }
   }
 
   // Unknown route wire: ask only the families the provider explicitly addressed.
-  for (const configured of ['openai', 'anthropic'] as const) {
+  for (const configured of ENDPOINT_FAMILIES) {
     const configuredBase = address(intent.endpoints?.[configured])
     if (configuredBase !== undefined) push({ api: FAMILY_PROTOCOL[configured], baseURL: configuredBase, family: configured })
   }

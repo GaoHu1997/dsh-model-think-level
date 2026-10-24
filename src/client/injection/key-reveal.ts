@@ -201,8 +201,12 @@ function syncEye(eye: HTMLButtonElement, input: HTMLInputElement): void {
  * and the bubbling `input` event then lets the official component take the
  * value into its draft state — so a re-render keeps it instead of reverting to
  * the empty draft.
+ *
+ * The create card's key-list pane uses the same gesture to take a value the
+ * user had already typed out of the official box when the draft list takes
+ * the field over.
  */
-function writeInputValue(input: HTMLInputElement, value: string): void {
+export function writeInputValue(input: HTMLInputElement, value: string): void {
   const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
   if (descriptor?.set === undefined) input.value = value
   else descriptor.set.call(input, value)

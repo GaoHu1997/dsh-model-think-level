@@ -152,7 +152,10 @@ function makeDeps(overrides?: Partial<InjectorDeps>): InjectorDeps & {
       apply: ['Apply'],
       cancel: ['Cancel'],
       editProvider: ['Edit {provider}'],
+
       inputImage: ['Image'],
+      contextWindow: ['Context window'],
+      maxOutput: ['Max output'],
     }),
     mount,
     editors,
@@ -2218,6 +2221,82 @@ describe('the auto-adapt seat', () => {
     expect(staged?.efforts).toBeDefined()
     expect(staged?.input).toBeUndefined()
     expect(report).toEqual({ held: 1, unsuggested: 0 })
+  })
+
+  it('fills a collapsed row\'s official capacity inputs through the same single visit', async () => {
+    // The capacities a suggestion names are reference numbers the official
+    // disclosure's own inputs carry (上下文大小/最大输出). They render the card's
+    // DRAFT, so a document write could never show them before the card is saved
+    // and reopened — the same trap the image verdict has — and a visit per field
+    // would open one folded row twice. ONE visit fills both, and the fold the
+    // user owns is put back on the way out.
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    const entry = document.createElement('div')
+    entry.className = 'modelEntry'
+    entry.innerHTML = `<div class="modelRow">
+      <input aria-label="Model ID 3" value="gpt-4o-mini" />
+      <input aria-label="Display name 3" value="Draft Vision" />
+      <button aria-label="Capacities 3"></button>
+    </div>`
+    root.querySelector('.modelCatalog')!.append(entry)
+    const trigger = entry.querySelector<HTMLButtonElement>('button[aria-label="Capacities 3"]')!
+    let opened = 0
+    trigger.addEventListener('click', () => {
+      const open = entry.querySelector('.modelAdvanced')
+      if (open !== null) {
+        open.remove()
+        return
+      }
+      opened += 1
+      entry.insertAdjacentHTML('beforeend', `
+        <div class="modelAdvanced" style="display:block">
+          <label><span>Context window</span><input /></label>
+          <label><span>Max output</span><input /></label>
+        </div>`)
+    })
+
+    const report = await adaptEveryModel(state, deps, 'acme-gateway', [
+      { id: 'gpt-4o-mini', name: 'Draft Vision', row: entry },
+    ])
+
+    // One visit for BOTH fields — opening the row per field would unfold it
+    // twice, and the user's own fold is what stays at rest.
+    expect(opened).toBe(1)
+    expect(entry.querySelector('.modelAdvanced')).toBeNull()
+    // The numbers reached the card's draft: the fill is what the official Save
+    // then persists, and it never rides the plugin's document write.
+    expect(entry.querySelectorAll<HTMLInputElement>('.modelAdvanced input')).toHaveLength(0)
+    expect(report).toEqual({ held: 1, unsuggested: 0 })
+    const staged = state.pending.get('acme-gateway')?.get('gpt-4o-mini')
+    expect(staged?.efforts).toBeDefined()
+  })
+
+  it('leaves a capacity input the user already filled alone', async () => {
+    // Fill-only: the echo never overwrites a positive number. An input the user
+    // typed into is a decision, exactly like a stored ladder this walk refuses
+    // to replace.
+    const seeded = structuredClone(join)
+    const deps = makeDeps({ describeNamespace: async () => seeded })
+    const state = createScanState()
+    const root = buildModelsDom()
+    const entry = document.createElement('div')
+    entry.className = 'modelEntry'
+    entry.innerHTML = `<div class="modelRow">
+      <input aria-label="Model ID 3" value="qwen-max" />
+      <button aria-label="Capacities 3"></button>
+    </div>
+    <div class="modelAdvanced" style="display:block">
+      <label><span>Context window</span><input value="9999" /></label>
+      <label><span>Max output</span><input /></label>
+    </div>`
+    root.querySelector('.modelCatalog')!.append(entry)
+
+    await adaptEveryModel(state, deps, 'aliyun', [{ id: 'qwen-max', name: 'Qwen Max', row: entry }])
+
+    const inputs = entry.querySelectorAll<HTMLInputElement>('.modelAdvanced input')
+    expect(inputs[0]!.value).toBe('9999')
   })
 
   it('writes a missing vision flag when the row ships no control to tick', async () => {

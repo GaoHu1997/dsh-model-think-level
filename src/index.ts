@@ -44,6 +44,7 @@ import {
   normalizeKeyModels,
   normalizeKeyProtocol,
   normalizeRouteEndpoints,
+  type RouteEndpoints,
   type RouteProtocol,
 } from './key-refs.js'
 import {
@@ -60,7 +61,7 @@ import {
   withRouteEndpoints,
   withoutKeyEntry,
 } from './key-index.js'
-import { keysForModel, type KeyCandidate } from './key-route-core.js'
+import { keyRest, keysForModel, restKeyOf, type KeyCandidate } from './key-route-core.js'
 import { suggestEfforts } from './knowledge.js'
 import type { ReasoningEfforts } from './knowledge.js'
 import { resolveGuardEffort } from './guard.js'
@@ -76,7 +77,8 @@ import {
   type ListedModel,
 } from './listing.js'
 import { probeListing } from './discovery-merge.js'
-import { probeKeyModels, type KeyProbeResult } from './key-probe.js'
+import { FAMILY_PROTOCOL, probeKeyModels, type KeyProbeResult } from './key-probe.js'
+import type { EndpointFamily } from './key-refs.js'
 import { collectKeyListings, mergeKeyListings, type MergedListing } from './multi-key-listing.js'
 import { buildHeaderIndex, emptyIndex, type UserAgentIndex } from './headers-core.js'
 import { headerOverlayBypass, headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from './headers-fetch.js'
@@ -186,6 +188,12 @@ interface KeyEntryView {
   models?: readonly string[]
   /** The protocol this key pins, when it pins one (else the route's own). */
   protocol?: RouteProtocol
+  /**
+   * The key's cooldown, when it is resting after a failure: how long until it
+   * is a normal candidate again, and how many consecutive failures produced
+   * the period. Absent means the key is a normal candidate right now.
+   */
+  rest?: { readonly kind: string; readonly remainingMs: number; readonly failures: number }
 }
 
 /**
@@ -197,10 +205,17 @@ interface KeyEntryView {
 interface RouteKeyScope {
   readonly ref: string
   readonly models?: readonly string[]
-  /** The protocol this key pins, when it pins one (else the route's own). */
+  /** The protocol this key pins, when it pins one (else resolved per model). */
   readonly protocol?: RouteProtocol
   /** Base URL this key must use, resolved for its protocol family. */
   readonly endpoint?: string
+  /**
+   * The route's family addresses, carried by an UNPINNED key: its wire is
+   * resolved per model (`autoWireOf`), and a model whose family names one of
+   * these addresses is dispatched there. A pinned key does not need the map —
+   * its endpoint is already resolved above.
+   */
+  readonly endpoints?: RouteEndpoints
 }
 
 /** One route's profile inside a pi-ai section value, or undefined. */
@@ -257,11 +272,15 @@ function readRouteKeyScopes(
       if (entry.protocol !== undefined) {
         ;(scope as { protocol?: RouteProtocol }).protocol = entry.protocol
         // A key that pins a protocol also pins the endpoint of that family: the
-        // provider keeps ONE OpenAI URL and ONE Anthropic URL, and the key states
-        // which wire it speaks, so the matching URL must ride along.
+        // provider keeps one URL per family (OpenAI, Anthropic, Gemini), and the
+        // key states which wire it speaks, so the matching URL must ride along.
         const family = endpointFamilyOf(entry.protocol)
         const endpoint = endpoints?.[family]
         if (endpoint !== undefined) (scope as { endpoint?: string }).endpoint = endpoint
+      } else if (endpoints !== undefined) {
+        // An unpinned key is automatic: its wire is chosen per model from the
+        // families the provider addressed, so the whole map rides along.
+        ;(scope as { endpoints?: RouteEndpoints }).endpoints = endpoints
       }
       return scope
     })
@@ -269,7 +288,16 @@ function readRouteKeyScopes(
     // The seat joins only when the index has never listed it: a listed seat
     // speaks through its own entry, on or off — appending a switched-off seat
     // here would put the very key the user disabled back on the wire.
-    if (seat !== undefined && !listed.some(entry => entry.ref === seat)) ordered.push({ ref: seat })
+    if (seat !== undefined && !listed.some(entry => entry.ref === seat)) {
+      // The seat is an automatic key like any listed unpinned one: it resolves
+      // its wire per model family, so the route's family addresses ride along.
+      // Without them a single-key provider (the key never listed in the panel)
+      // would neither route to nor list the models of the families whose
+      // addresses the user configured.
+      const seatScope: RouteKeyScope = { ref: seat }
+      if (endpoints !== undefined) (seatScope as { endpoints?: RouteEndpoints }).endpoints = endpoints
+      ordered.push(seatScope)
+    }
     if (ordered.length > 0) scopes[route] = ordered
   }
   return scopes
@@ -839,6 +867,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       const resolved: KeyCandidate = { ref: candidate.ref, value, models: candidate.models }
       if (scope?.protocol !== undefined) (resolved as { protocol?: RouteProtocol }).protocol = scope.protocol
       if (scope?.endpoint !== undefined) (resolved as { endpoint?: string }).endpoint = scope.endpoint
+      // An unpinned key is automatic: it carries the family addresses its wire
+      // resolution (`wireOf`) may pick from, one per endpoint family.
+      if (scope?.endpoints !== undefined) (resolved as { endpoints?: KeyCandidate['endpoints'] }).endpoints = scope.endpoints
       candidates.push(resolved)
     }
     return candidates
@@ -859,34 +890,60 @@ export function apply(ctx: Context, config: Config = {}): void {
       keys,
       refOf: key => key.ref,
       probe: async key => {
-        const keyApi = key.protocol ?? api
-        const keyBaseURL = key.endpoint ?? baseURL
-        if (!LISTABLE_PROTOCOLS.has(keyApi) || keyBaseURL.length === 0) {
-          return { ref: key.ref, models: undefined, targets: [] }
+        // A pinned key is asked on its own wire; an automatic key is asked on
+        // every wire it could dispatch on — the route's wire, plus each
+        // cross-family address it carries — so the catalogue covers the models
+        // of all of them, the same union `probeKeyModels` records for the key
+        // panel. A same-family address is skipped: the route's own URL serves
+        // that family, and requests would never be dispatched elsewhere.
+        const targets: { api: RouteProtocol; baseURL: string }[] = key.protocol !== undefined
+          ? [{ api: key.protocol, baseURL: key.endpoint ?? baseURL }]
+          : [
+            { api, baseURL },
+            ...Object.entries(key.endpoints ?? {})
+              .filter(([family]) => family !== endpointFamilyOf(api))
+              .map(([family, url]) => ({ api: FAMILY_PROTOCOL[family as EndpointFamily], baseURL: url ?? '' })),
+          ]
+        const sendListing = (url: string, init: RequestInit): Promise<Response> => {
+          const requestHeaders = new Headers(headers)
+          requestHeaders.delete('authorization')
+          requestHeaders.delete('x-api-key')
+          requestHeaders.delete('x-goog-api-key')
+          new Headers(init.headers).forEach((value, name) => requestHeaders.set(name, value))
+          const requestSignal = signal == null
+            ? init.signal
+            : init.signal == null
+              ? signal
+              : AbortSignal.any([signal, init.signal])
+          return send(url, { ...init, headers: requestHeaders, signal: requestSignal })
         }
-        const listing = await probeListing({
-          baseURL: keyBaseURL,
-          api: keyApi,
-          apiKey: key.value,
-          headers: profile?.['headers'],
-          timeoutMs: resolved.probeTimeoutMs,
-          send: (url, init) => {
-            const requestHeaders = new Headers(headers)
-            requestHeaders.delete('authorization')
-            requestHeaders.delete('x-api-key')
-            new Headers(init.headers).forEach((value, name) => requestHeaders.set(name, value))
-            const requestSignal = signal == null
-              ? init.signal
-              : init.signal == null
-                ? signal
-                : AbortSignal.any([signal, init.signal])
-            return send(url, { ...init, headers: requestHeaders, signal: requestSignal })
-          },
-        })
-        if (listing !== undefined) recordsByRef.set(key.ref, listing)
+        const asked = new Set<string>()
+        const records: ListedModel[] = []
+        for (const target of targets) {
+          if (!LISTABLE_PROTOCOLS.has(target.api) || target.baseURL.length === 0) continue
+          const url = probeListingUrl(target.baseURL, target.api)
+          // A gateway that spells one listing under two protocols is asked once.
+          if (asked.has(url)) continue
+          asked.add(url)
+          const listing = await probeListing({
+            baseURL: target.baseURL,
+            api: target.api,
+            apiKey: key.value,
+            headers: profile?.['headers'],
+            timeoutMs: resolved.probeTimeoutMs,
+            send: sendListing,
+          })
+          if (listing === undefined) continue
+          for (const model of listing) {
+            if (records.some(existing => existing.id === model.id)) continue
+            records.push(model)
+          }
+        }
+        if (records.length === 0) return { ref: key.ref, models: undefined, targets: [] }
+        recordsByRef.set(key.ref, records)
         return {
           ref: key.ref,
-          models: listing?.map(model => model.id),
+          models: records.map(model => model.id),
           targets: [],
         }
       },
@@ -1297,6 +1354,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 // plugin has never listed it — the adapter still needs it.
                 if (seat !== undefined && !refs.includes(seat)) refs.push(seat)
                 const facts = await credentialFacts(credentials, refs)
+                const now = Date.now()
                 const entries: KeyEntryView[] = refs.map(ref => {
                   const fact = facts[ref]
                   const stored = listed.find(candidate => candidate.ref === ref)
@@ -1311,6 +1369,17 @@ export function apply(ctx: Context, config: Config = {}): void {
                   if (stored?.alias !== undefined) view.alias = stored.alias
                   if (stored?.models !== undefined) (view as { models?: readonly string[] }).models = stored.models
                   if (stored?.protocol !== undefined) (view as { protocol?: RouteProtocol }).protocol = stored.protocol
+                  // The cooldown memory is the one source of the 冷却 state the
+                  // row paints: a resting key reads "cooling for Ns" instead of
+                  // healthy, so the panel says why a key is not signing.
+                  const rest = keyRest.stateOf(restKeyOf(route, ref), now)
+                  if (rest !== undefined) {
+                    ;(view as { rest?: KeyEntryView['rest'] }).rest = {
+                      kind: rest.kind,
+                      remainingMs: Math.max(0, rest.until - now),
+                      failures: rest.failures,
+                    }
+                  }
                   return view
                 })
                 const endpoints = document.endpoints?.[route]
@@ -1344,6 +1413,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                   endpoints: {
                     openai: endpoints?.openai ?? null,
                     anthropic: endpoints?.anthropic ?? null,
+                    gemini: endpoints?.gemini ?? null,
                   },
                 }
               }
@@ -1438,8 +1508,10 @@ export function apply(ctx: Context, config: Config = {}): void {
                 )
               } else if (op === 'protocol') {
                 // Pin which wire protocol one key speaks (the per-key protocol
-                // picker). Absent/blank clears the pin, letting the key follow
-                // the route's own protocol again.
+                // picker). Absent/blank clears the pin, returning the key to the
+                // AUTOMATIC wire: each request speaks the protocol the model's
+                // own family names where the provider addressed it, and the
+                // route's own protocol otherwise.
                 const document = readKeyIndex(indexFile)
                 const known = ref !== undefined && (hasKeyEntry(document, route, ref) || ref === enabledNow())
                 if (ref === undefined || !known) {
@@ -1511,11 +1583,16 @@ export function apply(ctx: Context, config: Config = {}): void {
                   indexFile,
                 )
               } else if (op === 'endpoints') {
-                // The provider's two base URLs: one ChatGPT/OpenAI wire, one
-                // Anthropic wire. A key that pins a protocol uses the matching
-                // URL; both are optional and an empty value clears that side.
+                // The provider's base URLs, one per protocol family: the
+                // ChatGPT/OpenAI wire, the Anthropic wire and the Gemini one.
+                // A key that pins a protocol uses the matching URL; each is
+                // optional and an empty value clears that side.
                 const endpoints = isRecord(body)
-                  ? normalizeRouteEndpoints({ openai: body['openai'], anthropic: body['anthropic'] })
+                  ? normalizeRouteEndpoints({
+                    openai: body['openai'],
+                    anthropic: body['anthropic'],
+                    gemini: body['gemini'],
+                  })
                   : undefined
                 updateKeyIndex(document => withRouteEndpoints(document, route, endpoints), indexFile)
               } else if (op === 'discover') {

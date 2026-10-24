@@ -124,7 +124,27 @@ describe('applyKeyToHeaders', () => {
     expect(headers.get('authorization')).toBeNull()
   })
 
+  it('overwrites an x-goog-api-key in place, alone', () => {
+    const headers = new Headers({ 'x-goog-api-key': 'AIza-old' })
+    applyKeyToHeaders(headers, 'AIza-new')
+    expect(headers.get('x-goog-api-key')).toBe('AIza-new')
+    expect(headers.get('authorization')).toBeNull()
+    expect(headers.get('x-api-key')).toBeNull()
+  })
+
+  it('lets the google scheme outrank the other two when all ride along', () => {
+    const headers = new Headers({
+      authorization: 'Bearer old',
+      'x-api-key': 'old',
+      'x-goog-api-key': 'AIza-old',
+    })
+    applyKeyToHeaders(headers, 'AIza-new')
+    expect(headers.get('x-goog-api-key')).toBe('AIza-new')
+    expect(headers.get('authorization')).toBeNull()
+    expect(headers.get('x-api-key')).toBeNull()
+  })
+
   it('names the credential headers it manages', () => {
-    expect([...CREDENTIAL_HEADERS].sort()).toEqual(['authorization', 'x-api-key'])
+    expect([...CREDENTIAL_HEADERS].sort()).toEqual(['authorization', 'x-api-key', 'x-goog-api-key'])
   })
 })

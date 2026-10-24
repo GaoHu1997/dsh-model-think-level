@@ -114,6 +114,16 @@ export interface HostLabels {
    * {@link echoOfficialModality}.
    */
   inputImage: readonly string[]
+  /**
+   * The disclosure's context-window input ("Context window" / "上下文窗口").
+   * Matched against the input's own aria-label when it carries one, else
+   * against the text of the label wrapping it — the DSH host renders the field
+   * label-wrapped with no aria-label of its own. The first copy is what a
+   * suggestion's capacities echo into: see {@link echoOfficialCapacities}.
+   */
+  contextWindow: readonly string[]
+  /** The disclosure's max-output input ("Max output" / "最大输出"). */
+  maxOutput: readonly string[]
 }
 
 /** A row's identity as found on the page, resolved from the settings join. */
@@ -1262,7 +1272,95 @@ export function officialModalityIntent(
 }
 
 /**
- * Print an image verdict on the official input-types control of ONE row.
+ * The official capacity inputs of one row's disclosure (context window, max
+ * output), or whatever of them could be identified.
+ *
+ * Two anchors, most specific first, plus a positional floor:
+ *   1. an input whose own aria-label starts with the field's copy — the same
+ *      prefix match every other official control is found by;
+ *   2. an input whose WRAPPING LABEL's text carries the copy — the DSH host
+ *      renders these fields label-wrapped with no aria-label of their own;
+ *   3. the disclosure's remaining plain inputs in document order, first =
+ *      context window, second = max output. The floor only answers for a row
+ *      whose labels matched nothing (an unnamed host variant); the DSH
+ *      disclosure holds exactly these two inputs.
+ *
+ * The plugin's own editor sits inside the same disclosure, and a folded-row
+ * visit scopes the search to the whole row (head inputs included), so both are
+ * kept out of the candidate set: the editor by its `data-plugin` root, the row
+ * head's Model ID / Display name by their aria-labels.
+ */
+export interface OfficialCapacityInputs {
+  contextWindow?: HTMLInputElement
+  maxOutput?: HTMLInputElement
+}
+
+/** Whether one input answers to a field's copy (aria-label prefix or wrapping-label text). */
+function inputLabelledBy(input: HTMLInputElement, labels: readonly string[]): boolean {
+  const aria = input.getAttribute('aria-label') ?? ''
+  if (labels.some(label => aria.startsWith(label))) return true
+  const text = input.closest('label')?.textContent?.trim() ?? ''
+  return text.length > 0 && labels.some(label => text.includes(label))
+}
+
+export function officialCapacityInputsOf(scope: HTMLElement, labels: HostLabels): OfficialCapacityInputs {
+  const named = [...labels.modelId, ...labels.modelName]
+  const candidates = Array.from(scope.querySelectorAll<HTMLInputElement>('input'))
+    .filter(input => input.type !== 'checkbox' && input.type !== 'radio')
+    .filter(input => input.closest('[data-plugin]') === null)
+    .filter(input => !named.some(label => (input.getAttribute('aria-label') ?? '').startsWith(label)))
+  const contextWindow = candidates.find(input => inputLabelledBy(input, labels.contextWindow))
+  const maxOutput = candidates.find(input => inputLabelledBy(input, labels.maxOutput))
+  if (contextWindow !== undefined && maxOutput !== undefined) return { contextWindow, maxOutput }
+  const unnamed = candidates.filter(input => input !== contextWindow && input !== maxOutput)
+  return {
+    contextWindow: contextWindow ?? unnamed[0],
+    maxOutput: maxOutput ?? (contextWindow !== undefined ? unnamed[0] : unnamed[1]),
+  }
+}
+
+/**
+ * Print a suggestion's reference capacities on the official inputs of one row.
+ *
+ * Like the modality echo, this edits the official form's own DRAFT — the inputs
+ * render the card's state, not the settings document, so writing the document
+ * could never show a value in them before the card is saved and reopened. The
+ * value goes through the native setter and a bubbled `input` event so React's
+ * controlled input carries it into the draft, and the card's own Save is what
+ * persists it. That is also why the capacities never ride the plugin's document
+ * write: two writers for one field would let a held write land after that Save
+ * and revert whatever the user chose in the meantime.
+ *
+ * FILL-ONLY: an input that already holds a positive number is a user decision
+ * and keeps its place — auto-adapt fills blanks, it does not overwrite.
+ * @returns which of the two fields actually landed a value.
+ */
+export function echoOfficialCapacities(
+  scope: HTMLElement,
+  labels: HostLabels,
+  values: { contextWindow?: number; maxTokens?: number },
+): { contextWindow: boolean; maxOutput: boolean } {
+  const inputs = officialCapacityInputsOf(scope, labels)
+  const fill = (input: HTMLInputElement | undefined, value: number | undefined): boolean => {
+    if (input === undefined || input.disabled) return false
+    if (value === undefined || !Number.isFinite(value) || value <= 0) return false
+    if (Number(input.value) > 0) return false
+    // React controls this input: assigning `value` directly would be undone by
+    // the next render, so the write goes through the prototype's setter and a
+    // bubbled input event — the change reaches the card's draft and stays.
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    setter?.call(input, String(value))
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    return true
+  }
+  return {
+    contextWindow: fill(inputs.contextWindow, values.contextWindow),
+    maxOutput: fill(inputs.maxOutput, values.maxTokens),
+  }
+}
+
+/**
+ * Print a verdict about images on the OFFICIAL input-types control of ONE row.
  *
  * The official fieldset exists for an OPENED row only, and the fold belongs to
  * the user: a bulk adapt that clicked rows open and left them that way unfolded
@@ -1304,6 +1402,45 @@ async function imprintModality(
   } finally {
     // Restore the fold the user owns, whether or not there was a box to tick,
     // and never leave a row this pass opened standing open.
+    trigger.click()
+  }
+}
+
+/**
+ * Visit ONE row's disclosure and run an action inside it: the verdicts a FOLDED
+ * row can only receive through its own official controls (the input-types
+ * checkbox, the capacity inputs) render the card's draft, so they have to be
+ * printed on the controls themselves — and the controls do not exist until the
+ * row is opened.
+ *
+ * A folded row is opened for exactly as long as the action needs and closed on
+ * the way out; both clicks land in the same task, so the browser never paints
+ * the opened row and what the user sees at rest is their own fold. An ALREADY
+ * open row — the mounted editor's own disclosure container, or a row the user
+ * unfolded — is acted on in place, with nothing to visit.
+ *
+ * `false` out means the disclosure could not be reached at all (no trigger, a
+ * disabled one, or a visit that never opened anything); whatever the action
+ * itself reports travels back otherwise.
+ */
+async function visitRowDisclosure<T>(
+  seat: HTMLElement,
+  labels: HostLabels,
+  settle: () => Promise<void>,
+  act: (scope: HTMLElement) => T,
+): Promise<T | false> {
+  if (seat.matches('[class*="modelAdvanced"]')) return act(seat)
+  const row = seat.closest<HTMLElement>('[class*="modelEntry"]') ?? seat
+  if (row.querySelector('[class*="modelAdvanced"]') !== null) return act(row)
+  const trigger = disclosureTriggerOf(row, labels.capacity)
+  if (trigger === undefined || trigger.disabled) return false
+  trigger.click()
+  if (row.querySelector('[class*="modelAdvanced"]') === null) await settle()
+  try {
+    return row.querySelector('[class*="modelAdvanced"]') !== null ? act(row) : false
+  } finally {
+    // Restore the fold the user owns, and never leave a row this pass opened
+    // standing open.
     trigger.click()
   }
 }
@@ -1596,6 +1733,34 @@ export async function adaptEveryModel(
       if (container === undefined) return false
       return imprintModality(container, deps.labels(), nextFrame)
     }
+    /**
+     * The same offer as {@link imprintFor}, made for BOTH halves a fresh
+     * suggestion carries — the image verdict and the reference capacities — in
+     * ONE disclosure visit ({@link visitRowDisclosure}), so a folded row is
+     * opened once, not once per field. The capacities are a fill-only courtesy
+     * ({@link echoOfficialCapacities}) and never part of the write; the
+     * modality half answers whether the official input-types control took the
+     * verdict over, which is what decides if the write still carries it.
+     */
+    const imprintRow = async (
+      modelId: string,
+      nextModality: { readonly image: boolean },
+      values: { contextWindow?: number; maxTokens?: number },
+    ): Promise<{ modality: boolean; capacities: boolean } | false> => {
+      const wantsModality = nextModality.image === true
+      const wantsCapacities = values.contextWindow !== undefined || values.maxTokens !== undefined
+      if (!wantsModality && !wantsCapacities) return false
+      const container = mountedContainers.get(modelId) ?? rowElements.get(modelId)
+      if (container === undefined) return false
+      const labels = deps.labels()
+      return visitRowDisclosure(container, labels, nextFrame, scope => {
+        const modality = wantsModality && officialInputTypesOf(scope) && echoOfficialModality(scope, true, labels.inputImage)
+        const landed = wantsCapacities
+          ? echoOfficialCapacities(scope, labels, values)
+          : { contextWindow: false, maxOutput: false }
+        return { modality, capacities: landed.contextWindow || landed.maxOutput }
+      })
+    }
     const api = createEditorApi(
       deps.api,
       describe,
@@ -1726,11 +1891,17 @@ export async function adaptEveryModel(
         : nextDefault === '' ? null : nextDefault
       // A row the document does not hold yet stages; a saved row holds.
       stagedRow = !docIds.has(modelId)
-      // The modality goes to the row's own official control first — folded row
-      // included, through the transient visit {@link imprintModality} makes — so
-      // the tick is in the card's draft the moment the click lands: the same
-      // offer the settled-ladder arm makes above.
-      const imprinted = await imprintFor(modelId, nextModality)
+      // The modality AND the capacities go to the row's own official controls
+      // first — folded row included, through ONE transient visit
+      // ({@link visitRowDisclosure}) that puts the fold back — so both are in
+      // the card's draft the moment the click lands. Neither rides the document
+      // write: those controls render the card's draft, and a held write landing
+      // after the Save would revert whatever the user changed in the meantime.
+      const imprint = await imprintRow(modelId, nextModality, {
+        ...(parts.contextWindow === undefined ? {} : { contextWindow: parts.contextWindow }),
+        ...(parts.maxTokens === undefined ? {} : { maxTokens: parts.maxTokens }),
+      })
+      const imprinted = imprint !== false && imprint.modality
       api.commit(route, modelId, pendingWriteOf({
         efforts: ladderIntent(nextThinking, buildIntent(draftFrom(parts.efforts)), initialEfforts),
         input: imprinted || sameModality(nextModality, initialInput) ? undefined : buildModalityIntent(nextModality),
@@ -3003,34 +3174,48 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         index,
         staged,
         officialInputTypes: officialInputTypesOf(container),
-        api: createEditorApi(
-          deps.api,
-          undefined,
-          (r, m, e, c, i, de) => {
-            stageEffortsInto(state, r, m, e, c, officialModalityIntent(container, i, labels.inputImage), de)
+        api: {
+          ...createEditorApi(
+            deps.api,
+            undefined,
+            (r, m, e, c, i, de) => {
+              stageEffortsInto(state, r, m, e, c, officialModalityIntent(container, i, labels.inputImage), de)
+            },
+            // This row is on screen: it ALWAYS holds the document. The card it
+            // lives in froze its revision baseline, so the intent is queued and
+            // the official card's own Save is what commits it (issue #7 / C2).
+            //
+            // Its MODALITY is the one part that control does not carry: this row
+            // ships the official input-types checkbox whenever `officialInputTypes`
+            // is set, and that box renders the card's draft, so the plugin offers
+            // the intent to the box itself and drops it from the write when the
+            // official form takes it. See {@link officialModalityIntent}.
+            (r, m, w) => {
+              queueWriteInto(state, r, m, { ...w, input: officialModalityIntent(container, w.input, labels.inputImage) })
+            },
+            // The editor's Reset drops wherever this row's intent landed.
+            r => { withdrawIntent(state, r, target.modelId) },
+            // Re-resolve the card's staged-ness at CALL time, not at mount time:
+            // the same DOM row moves between unsaved and saved as the user types
+            // a route id (or adds a model row), and the scan snapshot behind this
+            // closure lags that by up to one debounce window. The saved-model arm
+            // still reads the snapshot: the settings document only changes when a
+            // describe does.
+            () => (routeOfCard(target.card, providers, labels)?.staged ?? routeStaged) || !savedModelIds.has(target.modelId),
+          ),
+          // The capacities an applied suggestion carries are printed on this
+          // row's own official inputs — the disclosure this editor is mounted
+          // in holds them — so the numbers reach the form whose Save persists
+          // them. Fill-only ({@link echoOfficialCapacities}), and deliberately
+          // never part of the ledgers' document write: two writers for one
+          // field is the trap the modality echo above exists to avoid.
+          fillCapacities: (contextWindow, maxTokens) => {
+            echoOfficialCapacities(container, labels, {
+              ...(contextWindow === undefined ? {} : { contextWindow }),
+              ...(maxTokens === undefined ? {} : { maxTokens }),
+            })
           },
-          // This row is on screen: it ALWAYS holds the document. The card it
-          // lives in froze its revision baseline, so the intent is queued and
-          // the official card's own Save is what commits it (issue #7 / C2).
-          //
-          // Its MODALITY is the one part that control does not carry: this row
-          // ships the official input-types checkbox whenever `officialInputTypes`
-          // is set, and that box renders the card's draft, so the plugin offers
-          // the intent to the box itself and drops it from the write when the
-          // official form takes it. See {@link officialModalityIntent}.
-          (r, m, w) => {
-            queueWriteInto(state, r, m, { ...w, input: officialModalityIntent(container, w.input, labels.inputImage) })
-          },
-          // The editor's Reset drops wherever this row's intent landed.
-          r => { withdrawIntent(state, r, target.modelId) },
-          // Re-resolve the card's staged-ness at CALL time, not at mount time:
-          // the same DOM row moves between unsaved and saved as the user types
-          // a route id (or adds a model row), and the scan snapshot behind this
-          // closure lags that by up to one debounce window. The saved-model arm
-          // still reads the snapshot: the settings document only changes when a
-          // describe does.
-          () => (routeOfCard(target.card, providers, labels)?.staged ?? routeStaged) || !savedModelIds.has(target.modelId),
-        ),
+        },
         readOnly: join.writable !== true,
         t: deps.t,
       }

@@ -146,6 +146,26 @@ function isModelListingRequest(url: string, method: string | undefined): boolean
 }
 
 /**
+ * Whether aggregating the model listing could answer more than the plain
+ * request would.
+ *
+ * The merge began as a multi-key feature, but a SINGLE key can also reach
+ * beyond the one URL the plain GET asks: an automatic key carries the
+ * cross-family addresses the provider configured (更多端点), and a pinned key
+ * dials its own family's address. In both cases the catalogue the merge
+ * returns is the union of addresses, while the plain request would report
+ * only the route's own protocol's models — so the merge runs for one key too.
+ * A lone key with no extra address keeps the ordinary path, where the
+ * endpoint's own response passes through verbatim.
+ */
+function listingCouldExceedPlainRequest(keys: readonly KeyCandidate[]): boolean {
+  if (keys.length > 1) return true
+  return keys.some(candidate =>
+    candidate.endpoint !== undefined ||
+    (candidate.endpoints !== undefined && Object.keys(candidate.endpoints).length > 0))
+}
+
+/**
  * The caller's request headers as a mutable copy, seeded the way Fetch itself
  * resolves them: an explicit `init.headers` replaces a `Request`'s own headers,
  * and the `Request`'s are inherited only when the init names none. Seeding from
@@ -286,7 +306,7 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
     )
 
     const method = init?.method ?? (typeof Request !== 'undefined' && input instanceof Request ? input.method : undefined)
-    if (keyCandidates.length > 1 && entry.modelListing !== undefined && isModelListingRequest(url, method)) {
+    if (entry.modelListing !== undefined && isModelListingRequest(url, method) && listingCouldExceedPlainRequest(keyCandidates)) {
       const signal = init?.signal ?? (typeof Request !== 'undefined' && input instanceof Request ? input.signal : undefined)
       try {
         const listing = await entry.modelListing({

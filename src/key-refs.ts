@@ -35,12 +35,15 @@ export interface KeyEntry {
    */
   readonly models?: readonly string[]
   /**
-   * The wire protocol this key must speak, when it is not the route's own.
-   * Absent means "any protocol" — the request keeps the route's default
-   * protocol (`providers.<route>.api`). A concrete value re-dispatches the
-   * request through that protocol's API implementation AND that key's endpoint,
-   * so one provider route can hold a Chat-Completions key and an Anthropic key
-   * side by side (a true protocol switch, not just an endpoint swap).
+   * The wire protocol this key must speak, when it is pinned to one.
+   * Absent means AUTOMATIC: each request speaks the wire the model's own family
+   * names — an Anthropic-family endpoint for claude models, the Gemini one for
+   * gemini models, the route's default for everything else — as far as the
+   * provider configured that family's endpoint. A concrete value re-dispatches
+   * every request through that protocol's API implementation AND that key's
+   * endpoint, so one provider route can hold a Chat-Completions key and an
+   * Anthropic key side by side (a true protocol switch, not just an endpoint
+   * swap).
    */
   readonly protocol?: RouteProtocol
   /**
@@ -55,35 +58,56 @@ export interface KeyEntry {
 /**
  * The pi-ai API ids the manager can pin a key to. These are the exact ids
  * `providers.<route>.api` carries, so a key pinned to one speaks the same wire
- * format the official card would have produced for that protocol.
+ * format the official card would have produced for that protocol — with one
+ * addition: `google-generative-ai` names a protocol the harness's own adapter
+ * registry does not offer at route level, so it can only ever appear as a
+ * per-key pin riding the gemini family's endpoint.
  */
-export type RouteProtocol = 'openai-completions' | 'anthropic-messages' | 'openai-responses'
+export type RouteProtocol =
+  | 'openai-completions'
+  | 'anthropic-messages'
+  | 'openai-responses'
+  | 'google-generative-ai'
 
 /** Every protocol a key can be pinned to, in the order the picker shows them. */
 export const ROUTE_PROTOCOLS: readonly RouteProtocol[] = [
   'anthropic-messages',
   'openai-completions',
   'openai-responses',
+  'google-generative-ai',
 ]
 
+/** The endpoint families a protocol can draw its base URL from. */
+export type EndpointFamily = 'openai' | 'anthropic' | 'gemini'
+
+/** Every endpoint family, in the order address rows and pickers show them. */
+export const ENDPOINT_FAMILIES: readonly EndpointFamily[] = ['openai', 'anthropic', 'gemini']
+
 /** Which endpoint family a protocol draws its base URL from. */
-export function endpointFamilyOf(protocol: RouteProtocol): 'openai' | 'anthropic' {
-  return protocol === 'anthropic-messages' ? 'anthropic' : 'openai'
+export function endpointFamilyOf(protocol: RouteProtocol): EndpointFamily {
+  if (protocol === 'anthropic-messages') return 'anthropic'
+  if (protocol === 'google-generative-ai') return 'gemini'
+  return 'openai'
 }
 
 /** Whether a value is one of the protocol ids this manager understands. */
 export function isRouteProtocol(value: unknown): value is RouteProtocol {
-  return value === 'openai-completions' || value === 'anthropic-messages' || value === 'openai-responses'
+  return value === 'openai-completions'
+    || value === 'anthropic-messages'
+    || value === 'openai-responses'
+    || value === 'google-generative-ai'
 }
 
 /**
- * A stored per-key protocol, or undefined when the value means "any protocol".
+ * A stored per-key protocol, or undefined when the value means AUTOMATIC.
  *
  * `any`/`''`/unknown values collapse to undefined so a hand-edited index file
  * cannot pin a key to a protocol the runtime has no implementation for; the
- * request then keeps the route's own protocol, which is always valid.
+ * request is then resolved per model (the model family's own wire where the
+ * provider addressed it, the route's own protocol otherwise), which is always
+ * valid.
  * @param value - whatever arrived (a picker choice, or a hand-edited index file).
- * @returns the protocol id, or undefined for "any".
+ * @returns the protocol id, or undefined for "automatic".
  */
 export function normalizeKeyProtocol(value: unknown): RouteProtocol | undefined {
   return isRouteProtocol(value) ? value : undefined
@@ -103,15 +127,19 @@ export function normalizeKeyDisabled(value: unknown): boolean | undefined {
 }
 
 /**
- * The two base URLs one provider route can hold: an OpenAI-family endpoint and
- * an Anthropic-family endpoint. A key pinned to a protocol uses the matching
- * one; an "any protocol" key keeps the route's own `providers.<route>.baseURL`.
+ * The base URLs one provider route can hold, one per endpoint family: an
+ * OpenAI-family endpoint, an Anthropic-family endpoint and a Gemini-family one.
+ * A key pinned to a protocol uses the matching one; an automatic key (no pin)
+ * dispatches a model to the entry of the family the model's id names, and to
+ * the route's own `providers.<route>.baseURL` otherwise.
  */
 export interface RouteEndpoints {
   /** Base URL for openai-completions / openai-responses keys. */
   readonly openai?: string
   /** Base URL for anthropic-messages keys. */
   readonly anthropic?: string
+  /** Base URL for google-generative-ai keys (version path included, `…/v1beta`). */
+  readonly gemini?: string
 }
 
 /** Whether a value looks like an http(s) URL worth storing as an endpoint. */
@@ -123,21 +151,24 @@ function isEndpointUrl(value: unknown): value is string {
 }
 
 /**
- * A stored pair of endpoints, or undefined when neither carries a usable URL.
+ * A stored set of endpoints, or undefined when none carries a usable URL.
  *
  * Each URL is trimmed and must look like http(s); a blank or unusable side is
  * dropped rather than stored, so "no Anthropic endpoint configured" stays
  * distinguishable from "an empty string was saved here".
  * @param value - whatever arrived (the endpoints editor, or a hand-edited file).
- * @returns the cleaned pair, or undefined when it holds no endpoint.
+ * @returns the cleaned set, or undefined when it holds no endpoint.
  */
 export function normalizeRouteEndpoints(value: unknown): RouteEndpoints | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const record = value as Record<string, unknown>
-  const out: { openai?: string; anthropic?: string } = {}
+  const out: { openai?: string; anthropic?: string; gemini?: string } = {}
   if (isEndpointUrl(record['openai'])) out.openai = (record['openai'] as string).trim()
   if (isEndpointUrl(record['anthropic'])) out.anthropic = (record['anthropic'] as string).trim()
-  return out.openai === undefined && out.anthropic === undefined ? undefined : out
+  if (isEndpointUrl(record['gemini'])) out.gemini = (record['gemini'] as string).trim()
+  return out.openai === undefined && out.anthropic === undefined && out.gemini === undefined
+    ? undefined
+    : out
 }
 
 /**

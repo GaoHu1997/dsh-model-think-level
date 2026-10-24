@@ -29,10 +29,14 @@
  * On top of the model scope, three further signals decide the attempt order —
  * the same three a gateway such as magpie mixes into its dispatch:
  *
- *  - WIRE FIT: a key pinned to a protocol is ranked by how much translation the
- *    model needs (its own family first, the route's default second, a different
- *    vendor's family last), so a claude model on an OpenAI-speaking route reaches
- *    an Anthropic-pinned key before paying for a translated round trip;
+ *  - WIRE FIT: a key is ranked by how much translation the model needs (its own
+ *    family first, the route's default second, a different vendor's family
+ *    last), so a claude model on an OpenAI-speaking route reaches a key that
+ *    can speak the Anthropic wire before paying for a translated round trip.
+ *    A key PINNED to a protocol always speaks it; an UNPINNED key is automatic
+ *    ({@link autoWireOf}) — it speaks the model family's own wire against that
+ *    family's address when the key carries one, and the route's default
+ *    otherwise;
  *  - HONOUR: a pin that crosses wire families without that family's endpoint
  *    cannot re-dispatch, so it trails the keys that can (it is never dropped: a
  *    lone key must still sign the request);
@@ -46,7 +50,7 @@
  * @module dsh-model-think-level/key-route-core
  */
 
-import { endpointFamilyOf, type RouteProtocol } from './key-refs.js'
+import { endpointFamilyOf, type EndpointFamily, type RouteProtocol } from './key-refs.js'
 
 /** One key a route may use, with the secret already resolved. */
 export interface KeyCandidate {
@@ -61,8 +65,11 @@ export interface KeyCandidate {
    */
   readonly models?: readonly string[]
   /**
-   * The wire protocol this key must speak, when it is not the route's own.
-   * `undefined` means "any protocol" — the request keeps the route's default.
+   * The wire protocol this key must speak, when it is pinned to one.
+   * `undefined` means AUTOMATIC: the request speaks whichever wire the model's
+   * own family names — an Anthropic-family endpoint for claude models, the
+   * Gemini one for gemini models, the route's default for everything else —
+   * as far as the key carries that family's address in {@link endpoints}.
    * A concrete value makes the wire seam re-dispatch the request through that
    * protocol's API implementation (a true protocol switch), using {@link endpoint}.
    */
@@ -73,6 +80,13 @@ export interface KeyCandidate {
    * default). A pinned-protocol key carries its family's endpoint here.
    */
   readonly endpoint?: string
+  /**
+   * The addresses an AUTOMATIC key (no {@link protocol}) may dispatch on, one
+   * per endpoint family beyond the route's own. `wireOf` picks the model
+   * family's entry and the wire seam sends the request there; families absent
+   * from the map fall back to the route's default wire.
+   */
+  readonly endpoints?: Readonly<Partial<Record<EndpointFamily, string>>>
 }
 
 /** Whether `key` can serve `model`, per the scope rules above. */
@@ -112,27 +126,31 @@ export function keysForModel(
   return [...named, ...catchAll]
 }
 
-/** The two wire families: one body format and one endpoint shape each. */
-export type WireFamily = 'anthropic' | 'openai'
+/** The wire families: one body format and one endpoint shape each. */
+export type WireFamily = 'anthropic' | 'openai' | 'gemini'
 
 /** The family a protocol draws its body format and endpoint from. */
 export function wireFamilyOf(protocol: RouteProtocol): WireFamily {
-  return protocol === 'anthropic-messages' ? 'anthropic' : 'openai'
+  if (protocol === 'anthropic-messages') return 'anthropic'
+  if (protocol === 'google-generative-ai') return 'gemini'
+  return 'openai'
 }
 
 /**
  * A model id that names its own family. Vendor-prefixed ids (`anthropic/claude-…`)
- * and bare names (`claude-sonnet-5`, `gpt-6.1`, `o3-mini`, `codex-1`) both count;
- * an id that names no family (a relay's `tierflow_pro`) is left unknown so the
- * route's own protocol stays the reference.
+ * and bare names (`claude-sonnet-5`, `gpt-6.1`, `o3-mini`, `codex-1`, `gemini-2.5-flash`)
+ * both count; an id that names no family (a relay's `tierflow_pro`) is left unknown
+ * so the route's own protocol stays the reference.
  */
 const ANTHROPIC_MODEL_ID = /(?:^|[/:._-])(?:claude|anthropic)(?:$|[/:._-])/i
 const OPENAI_MODEL_ID = /(?:^|[/:._-])(?:gpt|chatgpt|codex)(?:$|[/:._-])|(?:^|[/:._-])o[1-9](?:$|[/:._-])/i
+const GEMINI_MODEL_ID = /(?:^|[/:._-])(?:gemini|gemma)(?:$|[/:._-])/i
 
 /** The family a model id announces, or undefined when it announces none. */
 export function modelWireFamily(modelId: string | undefined): WireFamily | undefined {
   if (modelId === undefined) return undefined
   if (ANTHROPIC_MODEL_ID.test(modelId)) return 'anthropic'
+  if (GEMINI_MODEL_ID.test(modelId)) return 'gemini'
   if (OPENAI_MODEL_ID.test(modelId)) return 'openai'
   return undefined
 }
@@ -142,31 +160,81 @@ export function modelWireFamily(modelId: string | undefined): WireFamily | undef
  *
  * The OpenAI family has two wires (Chat Completions and Responses), so no id can
  * single one of them out — the route's own protocol stays the tie-breaker there.
- * The Anthropic family has exactly one, so a key pinned to it needs no
- * translation for an Anthropic model and deserves the first attempt.
+ * The Anthropic and Gemini families have exactly one each, so a key pinned to
+ * one of them needs no translation for a model of that family and deserves the
+ * first attempt.
  * @param modelId - the model id the request names, or undefined.
  * @returns the concrete protocol, or undefined when the id does not settle one.
  */
 export function modelWireHint(modelId: string | undefined): RouteProtocol | undefined {
-  return modelWireFamily(modelId) === 'anthropic' ? 'anthropic-messages' : undefined
+  const family = modelWireFamily(modelId)
+  if (family === 'anthropic') return 'anthropic-messages'
+  if (family === 'gemini') return 'google-generative-ai'
+  return undefined
+}
+
+/**
+ * The wire an AUTOMATIC key (no pin) dispatches for `model`.
+ *
+ * The model's own family decides: a claude id speaks the Anthropic wire against
+ * the Anthropic address, a gemini id speaks the Gemini wire against the Gemini
+ * address — but only when the key actually carries that family's address; any
+ * other model (or a family the route itself serves) keeps the route's default
+ * wire, which is the one dispatch that always works. A wire that just failed
+ * this model before any content (`avoid`) is skipped as the automatic choice —
+ * the route's wire is the fallback that answers when the family's gateway does
+ * not — while an explicit pin is never second-guessed this way.
+ * @param candidate - the key (only its `endpoints` map is read).
+ * @param api - the protocol the route speaks.
+ * @param model - the model id the request names, or undefined when unknown.
+ * @param avoid - a wire not to pick automatically for this model, when one
+ *   recently failed.
+ * @returns the protocol this attempt speaks.
+ */
+export function autoWireOf(
+  candidate: Pick<KeyCandidate, 'endpoints'>,
+  api: RouteProtocol,
+  model: string | undefined,
+  avoid?: RouteProtocol | undefined,
+): RouteProtocol {
+  if (model === undefined) return api
+  const family = modelWireFamily(model)
+  // The route's own family has no separate address to switch to; the OpenAI
+  // family has two wires and no id can single one out, so both stay on `api`.
+  if (family === undefined || family === endpointFamilyOf(api)) return api
+  if (candidate.endpoints?.[family] === undefined) return api
+  const hinted: RouteProtocol =
+    family === 'anthropic' ? 'anthropic-messages'
+    : family === 'gemini' ? 'google-generative-ai'
+    : 'openai-completions'
+  return hinted === avoid ? api : hinted
 }
 
 /**
  * The protocol a key actually dispatches on a route speaking `api`.
  *
- * An unpinned key keeps the route's wire. A pin is honoured when it names the
- * route's own family (a same-family switch needs no other address) or when it
- * carries the endpoint of its family, which is what lets a true protocol switch
- * happen. A cross-family pin with no endpoint cannot be honoured — the route's
- * base URL carries the route family's paths — so the key still signs on the
- * route's own wire rather than being sent to an address it does not own.
+ * An unpinned key resolves automatically per model ({@link autoWireOf}). A pin
+ * is honoured when it names the route's own family (a same-family switch needs
+ * no other address) or when it carries the endpoint of its family, which is
+ * what lets a true protocol switch happen. A cross-family pin with no endpoint
+ * cannot be honoured — the route's base URL carries the route family's paths —
+ * so the key still signs on the route's own wire rather than being sent to an
+ * address it does not own.
  * @param candidate - the key.
  * @param api - the protocol the route speaks.
+ * @param model - the model id the request names, or undefined when unknown.
+ * @param avoid - a wire the automatic resolution should skip, when one
+ *   recently failed for this model.
  * @returns the protocol the attempt will speak.
  */
-export function wireOf(candidate: KeyCandidate, api: RouteProtocol): RouteProtocol {
+export function wireOf(
+  candidate: KeyCandidate,
+  api: RouteProtocol,
+  model?: string | undefined,
+  avoid?: RouteProtocol | undefined,
+): RouteProtocol {
   const pinned = candidate.protocol
-  if (pinned === undefined) return api
+  if (pinned === undefined) return autoWireOf(candidate, api, model, avoid)
   const crossesFamilies = endpointFamilyOf(pinned) !== endpointFamilyOf(api)
   return crossesFamilies && candidate.endpoint === undefined ? api : pinned
 }
@@ -191,14 +259,17 @@ export type WireFit = 0 | 1 | 2
  * @param candidate - the key.
  * @param api - the protocol the route speaks.
  * @param modelId - the model id, or undefined when the body was unreadable.
+ * @param avoid - a wire the automatic resolution should skip, when one
+ *   recently failed for this model.
  * @returns 0 (native), 1 (translated within the family) or 2 (another family).
  */
 export function protocolFit(
   candidate: KeyCandidate,
   api: RouteProtocol,
   modelId: string | undefined,
+  avoid?: RouteProtocol | undefined,
 ): WireFit {
-  const wire = wireOf(candidate, api)
+  const wire = wireOf(candidate, api, modelId, avoid)
   const keyFamily = wireFamilyOf(wire)
   const targetFamily = modelWireFamily(modelId) ?? wireFamilyOf(api)
   if (keyFamily !== targetFamily) return 2
@@ -226,15 +297,18 @@ function partition<T>(items: readonly T[], keep: (item: T) => boolean): T[] {
  * @param candidates - the route's keys in preference order.
  * @param api - the protocol the route speaks.
  * @param modelId - the model id the request names, or undefined.
+ * @param avoid - a wire the automatic resolution should skip, when one
+ *   recently failed for this model.
  * @returns a new array, stable within each rank.
  */
 export function sortByFit(
   candidates: readonly KeyCandidate[],
   api: RouteProtocol,
   modelId: string | undefined,
+  avoid?: RouteProtocol | undefined,
 ): KeyCandidate[] {
   return candidates
-    .map(candidate => ({ candidate, fit: protocolFit(candidate, api, modelId) }))
+    .map(candidate => ({ candidate, fit: protocolFit(candidate, api, modelId, avoid) }))
     .sort((a, b) => a.fit - b.fit)
     .map(entry => entry.candidate)
 }
@@ -286,6 +360,12 @@ export interface PlanOptions {
   readonly model?: string
   /** The wire that served this model last time, learned from a committed stream. */
   readonly preferredWire?: RouteProtocol
+  /**
+   * The wire that failed this model last time before any content, learned from
+   * a pre-content failure. An automatic key does not pick it again for this
+   * model ({@link autoWireOf}); explicit pins are never second-guessed.
+   */
+  readonly avoidWire?: RouteProtocol
   /** Whether a key is cooling down after a failure. */
   readonly isResting?: (candidate: KeyCandidate) => boolean
 }
@@ -296,7 +376,8 @@ export interface PlanOptions {
  * The order is the composition of four signals, strongest last, so a learned
  * fact always beats a heuristic and a hard constraint always beats both:
  *
- *  1. wire fit — least translation first ({@link protocolFit});
+ *  1. wire fit — least translation first ({@link protocolFit}; the automatic
+ *     resolution inside it also skips {@link PlanOptions.avoidWire});
  *  2. the wire that served this model last time ({@link PlanOptions.preferredWire});
  *  3. honour — keys whose pin can be dispatched before keys that cannot;
  *  4. pooling — the starting wire's keys first, other wires appended after them;
@@ -311,10 +392,12 @@ export interface PlanOptions {
  */
 export function planKeys(candidates: readonly KeyCandidate[], options: PlanOptions): KeyPlan {
   const api = options.api
+  const model = options.model
+  const avoid = options.avoidWire
   const entries = candidates.map((candidate): PlannedKey => ({
     candidate,
-    wire: wireOf(candidate, api),
-    fit: protocolFit(candidate, api, options.model),
+    wire: wireOf(candidate, api, model, avoid),
+    fit: protocolFit(candidate, api, model, avoid),
     honoured: isHonoured(candidate, api),
     resting: options.isResting?.(candidate) === true,
   }))
@@ -598,23 +681,33 @@ export function resetRoutePlans(): void {
  * @param value - the secret to sign with.
  */
 export function applyKeyToHeaders(headers: Headers, value: string): void {
+  const usesGoogle = headers.has('x-goog-api-key')
   const usesApiKey = headers.has('x-api-key')
   const usesBearer = headers.has('authorization')
+  if (usesGoogle) headers.set('x-goog-api-key', value)
   if (usesApiKey) headers.set('x-api-key', value)
   if (usesBearer) headers.set('authorization', `Bearer ${value}`)
   // A request that carried no credential header at all: default to Bearer.
-  if (!usesApiKey && !usesBearer) headers.set('authorization', `Bearer ${value}`)
-  // Never let the other scheme's (stale) credential linger.
-  if (usesApiKey && usesBearer) headers.delete('authorization')
+  if (!usesGoogle && !usesApiKey && !usesBearer) headers.set('authorization', `Bearer ${value}`)
+  // Never let another scheme's (stale) credential linger. A request that named
+  // the google scheme carries the only credential that scheme understands, so
+  // the other two are cleared together; otherwise an api-key outranks a Bearer.
+  if (usesGoogle) {
+    headers.delete('authorization')
+    headers.delete('x-api-key')
+  } else if (usesApiKey && usesBearer) {
+    headers.delete('authorization')
+  }
 }
 
 /**
- * The header names that carry a credential, for the two wire styles the harness
- * speaks: Anthropic Messages uses `x-api-key`, everything else a Bearer
+ * The header names that carry a credential, for the three wire styles the
+ * harness and its pinned keys speak: Anthropic Messages uses `x-api-key`,
+ * Google Generative AI uses `x-goog-api-key`, everything else a Bearer
  * `authorization`. Used to (a) overwrite whichever one the SDK already set, and
  * (b) know the name to remove when a request is re-signed with a different key.
  */
-const AUTH_HEADERS = ['authorization', 'x-api-key'] as const
+const AUTH_HEADERS = ['authorization', 'x-api-key', 'x-goog-api-key'] as const
 
 /** The credential header names, exported for the wire seam's diagnostics. */
 export const CREDENTIAL_HEADERS: readonly string[] = AUTH_HEADERS

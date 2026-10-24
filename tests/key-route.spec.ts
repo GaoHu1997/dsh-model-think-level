@@ -28,6 +28,22 @@ const anthropicKey: KeyCandidate = {
   endpoint: 'https://api.example.com/anthropic',
 }
 const barePin: KeyCandidate = { ref: 'BARE', value: 'sk-bare', protocol: 'anthropic-messages' }
+const geminiKey: KeyCandidate = {
+  ref: 'GOOGLE',
+  value: 'AIza-test',
+  protocol: 'google-generative-ai',
+  endpoint: 'https://gemini.example.com/v1beta',
+}
+const bareGeminiPin: KeyCandidate = { ref: 'BAREGOOG', value: 'AIza-bare', protocol: 'google-generative-ai' }
+/** An unpinned key whose provider addressed the Anthropic and Gemini families. */
+const autoKey: KeyCandidate = {
+  ref: 'AUTO',
+  value: 'sk-auto',
+  endpoints: {
+    anthropic: 'https://relay.example.com/anthropic',
+    gemini: 'https://relay.example.com/v1beta',
+  },
+}
 
 describe('modelWireFamily', () => {
   it('reads the vendor from a prefixed or bare id', () => {
@@ -38,14 +54,24 @@ describe('modelWireFamily', () => {
     expect(modelWireFamily('openai/codex-1')).toBe('openai')
   })
 
+  it('reads the Gemini family from gemini and gemma ids', () => {
+    expect(modelWireFamily('gemini-2.5-flash')).toBe('gemini')
+    expect(modelWireFamily('gemini-3-pro-preview')).toBe('gemini')
+    expect(modelWireFamily('google/gemini-2.5-pro')).toBe('gemini')
+    expect(modelWireFamily('gemma-4-31b-it')).toBe('gemini')
+    // A look-alike token inside another word is not a family claim.
+    expect(modelWireFamily('xgemini-pro')).toBeUndefined()
+  })
+
   it('leaves a relay id that names no vendor unknown', () => {
     expect(modelWireFamily('tierflow_pro')).toBeUndefined()
     expect(modelWireFamily('deepseek-v4.1')).toBeUndefined()
     expect(modelWireFamily(undefined)).toBeUndefined()
   })
 
-  it('hints a concrete wire only for the single-wire family', () => {
+  it('hints a concrete wire for each single-wire family', () => {
     expect(modelWireHint('claude-sonnet-5.5')).toBe('anthropic-messages')
+    expect(modelWireHint('gemini-2.5-flash')).toBe('google-generative-ai')
     // The OpenAI family has two wires, so no id can single one out.
     expect(modelWireHint('gpt-6.1-sol')).toBeUndefined()
   })
@@ -70,12 +96,78 @@ describe('wireOf and isHonoured', () => {
     expect(wireOf(barePin, 'openai-completions')).toBe('openai-completions')
     expect(isHonoured(barePin, 'openai-completions')).toBe(false)
   })
+
+  it('honours a gemini pin only with the gemini family address', () => {
+    expect(wireOf(geminiKey, 'openai-completions')).toBe('google-generative-ai')
+    expect(isHonoured(geminiKey, 'openai-completions')).toBe(true)
+    expect(wireOf(bareGeminiPin, 'openai-completions')).toBe('openai-completions')
+    expect(isHonoured(bareGeminiPin, 'openai-completions')).toBe(false)
+  })
+})
+
+describe('automatic wire resolution (no pin)', () => {
+  it('sends a claude model through the anthropic address and a gemini model through the gemini one', () => {
+    expect(wireOf(autoKey, 'openai-completions', 'claude-sonnet-5.5')).toBe('anthropic-messages')
+    expect(wireOf(autoKey, 'openai-completions', 'google/gemini-2.5-pro')).toBe('google-generative-ai')
+  })
+
+  it('keeps the route wire for models of the route family and ids that name none', () => {
+    expect(wireOf(autoKey, 'openai-completions', 'gpt-6.1-sol')).toBe('openai-completions')
+    expect(wireOf(autoKey, 'openai-completions', 'tierflow_pro')).toBe('openai-completions')
+    expect(wireOf(autoKey, 'openai-completions', undefined)).toBe('openai-completions')
+  })
+
+  it('falls back to the route wire when the model family has no address', () => {
+    expect(wireOf(openaiKey, 'openai-completions', 'claude-sonnet-5.5')).toBe('openai-completions')
+  })
+
+  it('resolves the openai family to Chat Completions when the route speaks another family', () => {
+    const onAnthropicRoute: KeyCandidate = { ...autoKey, endpoints: { openai: 'https://relay.example.com/v1' } }
+    expect(wireOf(onAnthropicRoute, 'anthropic-messages', 'gpt-6.1-sol')).toBe('openai-completions')
+  })
+
+  it('does not pick a wire that just failed this model, but never second-guesses a pin', () => {
+    expect(wireOf(autoKey, 'openai-completions', 'claude-sonnet-5.5', 'anthropic-messages')).toBe('openai-completions')
+    expect(wireOf(anthropicKey, 'openai-completions', 'claude-sonnet-5.5', 'anthropic-messages')).toBe('anthropic-messages')
+  })
+
+  it('ranks the automatic resolution as native for the model it names', () => {
+    expect(protocolFit(autoKey, 'openai-completions', 'claude-sonnet-5.5')).toBe(0)
+    // With the failed wire avoided, the resolution falls back to the route wire,
+    // which costs a translated round trip for a claude model.
+    expect(protocolFit(autoKey, 'openai-completions', 'claude-sonnet-5.5', 'anthropic-messages')).toBe(2)
+  })
+
+  it('is honoured whatever it resolves to: the resolution always dispatches', () => {
+    expect(isHonoured(autoKey, 'openai-completions')).toBe(true)
+  })
+
+  it('plans an automatic key ahead for the model family it can serve natively', () => {
+    const plan = planKeys([chatKey, autoKey], { api: 'openai-completions', model: 'claude-sonnet-5.5' })
+    expect(plan.ordered.map(key => key.ref)).toEqual(['AUTO', 'CHAT'])
+    expect(plan.wire).toBe('anthropic-messages')
+  })
+
+  it('falls back to the route wire in the plan when the family wire was refused', () => {
+    const plan = planKeys([autoKey], {
+      api: 'openai-completions',
+      model: 'claude-sonnet-5.5',
+      avoidWire: 'anthropic-messages',
+    })
+    expect(plan.ordered.map(key => key.ref)).toEqual(['AUTO'])
+    expect(plan.wire).toBe('openai-completions')
+  })
 })
 
 describe('protocolFit', () => {
   it('ranks the route wire as native and the model wire as native', () => {
     expect(protocolFit(chatKey, 'openai-completions', 'gpt-6.1-sol')).toBe(0)
     expect(protocolFit(anthropicKey, 'openai-completions', 'claude-sonnet-5.5')).toBe(0)
+  })
+
+  it('ranks a gemini pin as native for a gemini model, and as another family otherwise', () => {
+    expect(protocolFit(geminiKey, 'openai-completions', 'gemini-2.5-flash')).toBe(0)
+    expect(protocolFit(geminiKey, 'openai-completions', 'gpt-6.1-sol')).toBe(2)
   })
 
   it('ranks a same-family protocol switch as one translation', () => {

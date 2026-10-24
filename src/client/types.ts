@@ -233,9 +233,9 @@ export type SuggestReply =
         input?: InputModalities
         /** Where the modality part came from -- its confidence rides this. */
         inputSource?: InputSource
-        /** Reference context window (display-only; never auto-filled). */
+        /** Reference context window; a mounted row also echoes it into the official capacity input. */
         contextWindow?: number
-        /** Reference max output tokens (display-only). */
+        /** Reference max output tokens; a mounted row also echoes it into the official capacity input. */
         maxTokens?: number
         matched: boolean
         source: string
@@ -366,6 +366,16 @@ export interface EffortEditorApi {
    * decides the ledger, so the call carries it instead of trusting a closure.
    */
   commit(route: string, modelId: string, write: PendingWrite): void
+  /**
+   * Print a suggestion's reference capacities on this row's own official
+   * capacity inputs (context window / max output), when the seam sits on a
+   * mounted row. The official form's draft holds the values and its own Save
+   * persists them, so they never ride the plugin's document write.
+   * Fill-only: an input that already holds a positive number keeps it.
+   * Optional — a seam without a row (embedders) simply has nowhere to print,
+   * and the footnote copy in the editor still shows the numbers.
+   */
+  fillCapacities?(contextWindow?: number, maxTokens?: number): void
   /**
    * Withdraw everything this editor reported for its row (the editor's own
    * Reset). Without it, a Reset followed by the official Save would still write

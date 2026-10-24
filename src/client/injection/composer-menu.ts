@@ -333,14 +333,10 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
             directory: resolved,
             configuredInputs: deps.configuredInputs,
             t,
-            // The replicated body renders its OWN model and level lists, so it
-            // never has to hand control back to the official drill-in pane —
-            // that is what lets picking a model collapse only the list while
-            // the popover (and the still-unpicked level row) stays open.
-            // It only needs the card re-measured whenever its height changes:
-            // the official card measures from its own layout effect and only
-            // re-runs on a window resize, which rePlaceInFrame dispatches.
-            onLayoutChange: rePlaceInFrame,
+            // The replicated body keeps its columns and level footer ALWAYS
+            // visible — no panel opens or closes inside it — so its height is
+            // settled once at mount, which this sync commit + the reconcile's
+            // rePlaceInFrame (below, on the pane transition) already covers.
           })),
         }),
         // Sync: the replica changes the menu's height, so it must be committed

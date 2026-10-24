@@ -23,4 +23,6 @@ export interface EndpointsChangedDetail {
   readonly openai: string
   /** Its Anthropic-family base URL, '' when unset. */
   readonly anthropic: string
+  /** Its Gemini-family base URL, '' when unset (absent from older events). */
+  readonly gemini?: string
 }

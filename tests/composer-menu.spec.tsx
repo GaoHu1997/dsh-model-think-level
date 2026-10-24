@@ -301,7 +301,7 @@ describe('a popover upstream opened in its model-list pane (historical sessions)
   // Such a session must get the SAME replica body a new session gets, and the
   // official list must not show through behind it.
 
-  it('mounts the replica rows and hides the official list behind them', async () => {
+  it('mounts the replica body and hides the official list behind it', async () => {
     await withAppliedMenu('model', async (menu) => {
       await waitFor(() => menu.querySelector('[data-bre-slider="1"]') !== null)
 
@@ -310,10 +310,12 @@ describe('a popover upstream opened in its model-list pane (historical sessions)
       expect(menu.firstElementChild).toBe(slider)
       expect(slider.style.display).toBe('')
 
-      // Both replica rows are there, and the official rows they replace are not
-      // displayed — the popover must not read as "list AND switcher".
-      const rows = Array.from(slider.querySelectorAll<HTMLElement>('button[role="menuitem"]'))
-      expect(rows.map(row => row.querySelector('.bre-row-label')?.textContent)).toEqual(['Model', 'Reasoning level'])
+      // The replica body is complete on its own — head, columns and the level
+      // footer — and the official rows it replaces are not displayed: the
+      // popover must not read as "list AND switcher".
+      expect(slider.querySelector('.bre-menu-head')).not.toBeNull()
+      expect(slider.querySelector('.bre-panel-models')).not.toBeNull()
+      expect(slider.querySelector('.bre-menu-foot')).not.toBeNull()
       for (const child of Array.from(menu.children)) {
         if (child === slider) continue
         // The shell's material layer is NEVER hidden: it is the panel's own
@@ -374,16 +376,17 @@ describe('a popover upstream opened in its model-list pane (historical sessions)
     }, 'group')
   })
 
-  it('keeps the replica rows usable instead of handing control to the official list', async () => {
+  it('keeps the replica body usable instead of handing control to the official list', async () => {
     await withAppliedMenu('model', async (menu) => {
-      await waitFor(() => menu.querySelector('[data-bre-slider="1"]') !== null)
-      const modelRow = menu.querySelector<HTMLElement>('[data-bre-slider="1"] button[role="menuitem"]')!
-      modelRow.click()
-      // The replica opens its OWN provider/model lists: that is what makes the
+      await waitFor(() => menu.querySelector('[data-bre-slider="1"] .bre-panel-models') !== null)
+      // The columns are ALWAYS open — there is no row to click first — and a
+      // click inside them keeps the replica alive: that is what makes the
       // pane's switcher identical to the root pane's, and it also proves the
       // replica was not retired the moment an official radio appeared.
-      await waitFor(() => menu.querySelector('.bre-panel-models') !== null)
-      expect(menu.querySelector('[data-bre-slider="1"]')!.getAttribute('style')).toBeNull()
+      const replica = menu.querySelector<HTMLElement>('[data-bre-slider="1"]')!
+      replica.querySelector<HTMLButtonElement>('.bre-provider')!.click()
+      expect(replica.getAttribute('style')).toBeNull()
+      expect(replica.querySelector('.bre-menu-foot')).not.toBeNull()
     }, 'group')
   })
 })

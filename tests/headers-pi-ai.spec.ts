@@ -13,7 +13,7 @@ import {
   type Model,
   type ProviderStreams,
 } from '@earendil-works/pi-ai'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { buildHeaderIndex } from '../src/headers-core.js'
 import { installHeaderOverlay } from '../src/headers-fetch.js'
 import {
@@ -21,7 +21,28 @@ import {
   installPiAiHeaderTransform,
   installPiAiHeaderTransforms,
 } from '../src/headers-pi-ai.js'
-import { readRoutePlans } from '../src/key-route-core.js'
+import { keyRest, readRoutePlans, restKeyOf } from '../src/key-route-core.js'
+
+/**
+ * The protocol implementations the wire seam re-dispatches through are external
+ * modules; they are mocked so an automatic-key test can stage exactly one
+ * cross-family stream without any network. Each test stages its own handler;
+ * an unstaged dispatch fails loudly instead of reaching a real endpoint.
+ */
+const protocolMocks = vi.hoisted(() => ({
+  anthropic: undefined as
+    | undefined
+    | ((model: Record<string, unknown>, options: Record<string, unknown>) => AsyncIterable<Record<string, unknown>>),
+}))
+
+vi.mock('@earendil-works/pi-ai/api/anthropic-messages', () => ({
+  streamSimple: (model: Record<string, unknown>, context: unknown, options: Record<string, unknown>) => {
+    const handler = protocolMocks.anthropic
+    if (handler === undefined) throw new Error(`no anthropic stream was staged (model ${String((model as Record<string, unknown>)['id'])})`)
+    void context
+    return handler(model, options)
+  },
+}))
 
 type ProviderHeaders = Record<string, string | null>
 type HeaderTransform = (headers: ProviderHeaders) => ProviderHeaders | Promise<ProviderHeaders>
@@ -652,6 +673,92 @@ describe('pinned-protocol wire decisions', () => {
     const events = await drain(callStream(adapter, MODEL))
     expect(seen).toEqual(['sk-b'])
     expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
+    handle.dispose()
+  })
+})
+
+describe('automatic wire decisions (unpinned keys)', () => {
+  const CLAUDE = { id: 'claude-haiku-5', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }
+
+  it('dispatches a claude model through the anthropic address the key carries', async () => {
+    const dispatched: Array<{ model: Record<string, unknown>; apiKey: unknown }> = []
+    protocolMocks.anthropic = (model, options) => {
+      dispatched.push({ model, apiKey: options['apiKey'] })
+      return emit({ type: 'start' }, { type: 'done' })
+    }
+    const { adapter, seen } = keyedSetup(() => emit({ type: 'start' }, { type: 'done' }))
+    const source = {
+      current: buildHeaderIndex({ auto: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'claude-haiku-5' }] } }),
+      keys: async () => [
+        { ref: 'A', value: 'sk-a', endpoints: { anthropic: 'https://relay.example.com/anthropic' } },
+      ],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    const events = await drain(callStream(adapter, CLAUDE))
+    // The route provider was never reached: the Anthropic implementation was.
+    expect(seen).toEqual([])
+    expect(dispatched).toHaveLength(1)
+    expect(dispatched[0]?.apiKey).toBe('sk-a')
+    expect(dispatched[0]?.model).toMatchObject({
+      api: 'anthropic-messages',
+      baseUrl: 'https://relay.example.com/anthropic',
+    })
+    expect(events.map(event => event['type'])).toEqual(['start', 'done'])
+    handle.dispose()
+  })
+
+  it('keeps models of no addressed family on the route wire', async () => {
+    let anthropicAttempts = 0
+    protocolMocks.anthropic = () => {
+      anthropicAttempts += 1
+      return emit({ type: 'start' }, { type: 'done' })
+    }
+    const { adapter, seen } = keyedSetup(() => emit({ type: 'start' }, { type: 'done' }))
+    const source = {
+      current: buildHeaderIndex({
+        auto: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'relay-model' }, { id: 'claude-haiku-5' }] },
+      }),
+      keys: async () => [{ ref: 'A', value: 'sk-a' }],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    // An id that names no family, and a claude id with no family address: both
+    // stay on the dispatch that always works.
+    await drain(callStream(adapter, { id: 'relay-model', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }))
+    await drain(callStream(adapter, CLAUDE))
+    expect(seen).toEqual(['sk-a', 'sk-a'])
+    expect(anthropicAttempts).toBe(0)
+    handle.dispose()
+  })
+
+  it('falls back to the route wire once the family wire refused this model', async () => {
+    let anthropicAttempts = 0
+    protocolMocks.anthropic = () => {
+      anthropicAttempts += 1
+      return emit({ type: 'error', reason: 'error', error: { message: 'no such route' } })
+    }
+    const { adapter, seen } = keyedSetup(() => emit({ type: 'start' }, { type: 'done' }))
+    const source = {
+      current: buildHeaderIndex({ auto: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'claude-haiku-5' }] } }),
+      keys: async () => [
+        { ref: 'A', value: 'sk-a', endpoints: { anthropic: 'https://relay.example.com/anthropic' } },
+      ],
+    }
+    const handle = installPiAiHeaderTransform(adapter, source)
+    const first = await drain(callStream(adapter, CLAUDE))
+    expect(anthropicAttempts).toBe(1)
+    expect(first.map(event => event['type'])).toEqual(['error'])
+    expect(readRoutePlans(1)[0]?.wire).toBe('anthropic-messages')
+
+    // The refusal outlives the key's cooldown: unbench the key and ask again —
+    // the automatic resolution must fall back to the route wire instead of
+    // retrying the family the relay does not serve.
+    keyRest.clear(restKeyOf('auto', 'A'))
+    seen.length = 0
+    const second = await drain(callStream(adapter, CLAUDE))
+    expect(anthropicAttempts).toBe(1)
+    expect(seen).toEqual(['sk-a'])
+    expect(second.map(event => event['type'])).toEqual(['start', 'done'])
+    expect(readRoutePlans(1)[0]?.wire).toBe('openai-completions')
     handle.dispose()
   })
 })

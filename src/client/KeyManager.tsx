@@ -30,8 +30,10 @@
  *   - **each key may pin a wire protocol.** A key that pins a protocol speaks
  *     that API shape (Anthropic Messages, Chat Completions or Responses) instead
  *     of the provider's default, and uses the matching base URL. A key left on
- *     "default protocol" follows the route's own API protocol. The protocol
- *     picker lives in the same hover-revealed action tray as the other actions.
+ *     "auto" speaks each model's own wire: claude models against the Anthropic
+ *     address, gemini models against the Gemini one, the rest the provider's
+ *     protocol — wherever that address is configured. The protocol picker lives
+ *     in the same hover-revealed action tray as the other actions.
  *   - **a value is shown masked, or not at all.** The host reads the stored
  *     secret and answers a head-and-tail preview; the middle never leaves it,
  *     and the eye beside the field stays the one gesture that reveals a value.
@@ -72,6 +74,14 @@ export interface KeyManagerProps {
   readonly t: Translate
   /** Transport; injectable for tests. */
   readonly client?: KeyManagerClient | undefined
+  /**
+   * Draft mode — the create-provider card's list over an in-memory store
+   * instead of the host's. Rows read as "saved on create" rather than probed,
+   * the model-scope action is gone (the provider has no models to pick from
+   * before it exists), and every protocol is offered (the address a pin rides
+   * is the card's own Base URL field, which no endpoint family reports yet).
+   */
+  readonly draft?: boolean | undefined
 }
 
 /** A transient line under the list: the host's refusal, or a confirmation. */
@@ -89,15 +99,8 @@ interface Editing {
 /** The circle-plus drawn on the row that opens the add form. */
 const PLUS_PATHS: readonly string[] = ['M8 3.9v8.2', 'M3.9 8h8.2']
 
-/** The tick drawn inside a selected model chip, and inside a lit key check. */
+/** The tick drawn inside a selected model chip. */
 const CHECK_PATH = 'M3.9 8.35 6.6 11.05 12.1 5.5'
-
-/**
- * The ring that opens every key row. It stands alone while the key is switched
- * off (a grey circle, nothing inside); switched on, the tick joins it inside
- * and both take the success colour.
- */
-const RING_PATH = 'M8 1.75a6.25 6.25 0 1 0 0 12.5a6.25 6.25 0 1 0 0-12.5'
 
 /** One 16px stroke glyph, on the same grid the injected controls draw on. */
 function Glyph({ paths }: { paths: readonly string[] }): ReactNode {
@@ -150,16 +153,26 @@ function scopeText(row: KeyRow, t: Translate): string {
 }
 
 /** The protocols a key may pin, in the picker's order (undefined = any). */
-const PROTOCOL_CHOICES: readonly RouteProtocol[] = ['anthropic-messages', 'openai-completions', 'openai-responses']
+const PROTOCOL_CHOICES: readonly RouteProtocol[] = ['anthropic-messages', 'openai-completions', 'openai-responses', 'google-generative-ai']
 
 /** The addresses nothing is known about yet. */
-const NO_ENDPOINTS: KeyEndpoints = { openai: null, anthropic: null }
+const NO_ENDPOINTS: KeyEndpoints = { openai: null, anthropic: null, gemini: null }
+
+/**
+ * How model ids read in every list this panel shows. `numeric` keeps a family
+ * in version order (`glm-4.5` before `glm-4.6`), and one collator over the
+ * whole list is what keeps a letter grouped: the route's own models and the
+ * ones the keys discovered are merged into one alphabet, not two blocks.
+ */
+const MODEL_ORDER = new Intl.Collator('en', { numeric: true, sensitivity: 'base' })
 
 /**
  * The protocols the picker may offer: only those whose family address the provider
  * has actually configured, because a pinned key signs against THAT family's URL
- * (user item 3). The row's own protocol always stays on the list, so a pin made
- * while the address existed never comes back reading as "默认协议".
+ * (user item 3). Protocols with no address stay off the list entirely — a greyed
+ * row reads as broken rather than as unavailable (未配置端点地址的协议不要出现在
+ * 切换协议选项中). The row's own protocol always stays on the list, so a pin made
+ * while the address existed never comes back reading as "自动（按模型）".
  */
 function offeredProtocols(
   endpoints: KeyEndpoints,
@@ -176,8 +189,9 @@ function protocolLabel(protocol: RouteProtocol | undefined, t: Translate): strin
   if (protocol === 'anthropic-messages') return t('keysProtocolAnthropic')
   if (protocol === 'openai-responses') return t('keysProtocolResponses')
   if (protocol === 'openai-completions') return t('keysProtocolOpenAI')
-  // Anything else (including none) means the route's own protocol is used, which
-  // is the word the empty option already carries — there is no "any" key to show.
+  if (protocol === 'google-generative-ai') return t('keysProtocolGemini')
+  // Anything else (including none) is the AUTOMATIC wire: each request speaks
+  // the protocol the model's own family names, where the provider addressed it.
   return t('keysProtocolDefault')
 }
 
@@ -191,16 +205,23 @@ function protocolHint(protocol: RouteProtocol | undefined, t: Translate): string
   if (protocol === 'anthropic-messages') return t('keysProtocolAnthropicHint')
   if (protocol === 'openai-responses') return t('keysProtocolResponsesHint')
   if (protocol === 'openai-completions') return t('keysProtocolOpenAIHint')
+  if (protocol === 'google-generative-ai') return t('keysProtocolGeminiHint')
   return t('keysProtocolDefaultHint')
 }
 
-/** The menu's choices, in the picker's order, each with its own explanation. */
+/** The menu's choices, in the picker's order, each with its own explanation.
+ * A draft list offers every protocol: the address a pin rides is the create
+ * card's own Base URL field, which no endpoint family reports yet. */
 function protocolOptions(
   endpoints: KeyEndpoints,
   pinned: RouteProtocol | undefined,
   t: Translate,
+  draft = false,
 ): readonly ProtocolOption[] {
-  const choices: Array<RouteProtocol | undefined> = [undefined, ...offeredProtocols(endpoints, pinned)]
+  const choices: Array<RouteProtocol | undefined> = [
+    undefined,
+    ...(draft ? PROTOCOL_CHOICES : offeredProtocols(endpoints, pinned)),
+  ]
   return choices.map(protocol => ({
     value: protocol ?? '',
     title: protocolLabel(protocol, t),
@@ -214,7 +235,7 @@ function protocolOptions(
  * @returns the list's root element.
  */
 export function KeyManager(props: KeyManagerProps): ReactNode {
-  const { route, t } = props
+  const { route, t, draft } = props
   const client = props.client ?? httpKeyManagerClient
 
   const [rows, setRows] = useState<readonly KeyRow[] | undefined>(undefined)
@@ -250,7 +271,8 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
       }
       setRows(answer.entries)
       setRouteModels(answer.models ?? [])
-      setUnmerged(answer.unmergedModels ?? [])
+      // Sorted here too, so the offer line reads in the same order the chips do.
+      setUnmerged((answer.unmergedModels ?? []).slice().sort(MODEL_ORDER.compare))
       setEndpoints(answer.endpoints)
       setNotice(okText === undefined ? undefined : { kind: 'status', text: okText })
     },
@@ -372,9 +394,11 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   /**
    * The models a scope may be chosen from: the provider's own list plus whatever
    * the keys advertise — a key serving a model the provider has not declared yet
-   * is exactly the case scopes exist for.
+   * is exactly the case scopes exist for. One sorted list, so the picker reads
+   * as a single alphabet instead of "declared block, then discovered block"
+   * (where the same letter would sit at both ends).
    */
-  const chipModels = unmerged.length === 0 ? routeModels : [...routeModels, ...unmerged]
+  const chipModels = [...routeModels, ...unmerged].sort(MODEL_ORDER.compare)
 
   const form = (): ReactNode => {
     if (editing === undefined) return null
@@ -530,36 +554,43 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     )
   }
 
+  // How many keys are switched into the pool right now: the one fact that
+  // decides whether a row's check may be clicked at all — the LAST enabled key
+  // cannot be switched off (an empty pool would sign with the very key the user
+  // just benched), so a single enabled key's check stands down instead of
+  // answering a click with the host's refusal.
+  const enabledCount = rows.reduce((count, entry) => (entry.enabled ? count + 1 : count), 0)
+
   return (
     <div className="bre-keys">
       <ul className="bre-keys-list">
         {rows.map(row => {
           const name = nameOf(row)
+          const lastEnabled = row.enabled && enabledCount <= 1
           return (
             <Fragment key={row.ref}>
               <li
                 className={row.enabled ? 'bre-keys-row' : 'bre-keys-row is-off'}
                 data-state={row.configured === false ? 'missing' : 'ready'}
               >
-                {/* The row's switch, not a status dot: clicking it moves the key
-                    into or out of the routing pool. There is no default badge to
-                    be found beside it — with several keys coexisting, which one
-                    signs a model is the scope's decision, not a row's position. */}
+                {/* The row's switch: clicking it moves the key into or out of
+                    the routing pool. There is no default badge to be found
+                    beside it — with several keys coexisting, which one signs a
+                    model is the scope's decision, not a row's position. */}
                 <button
                   type="button"
                   className={row.enabled ? 'bre-keys-toggle is-on' : 'bre-keys-toggle'}
                   aria-pressed={row.enabled}
                   aria-label={t(row.enabled ? 'keysDisable' : 'keysEnable', { name })}
                   title={t(row.enabled ? 'keysDisable' : 'keysEnable', { name })}
-                  disabled={busy}
+                  disabled={busy || lastEnabled}
                   onClick={() => void run(() => client.setEnabled(route, row.ref, !row.enabled), undefined)}
                 >
+                  {/* 圆圈加对勾：选中时整枚图标（圈与勾）都是品牌蓝，未选中是
+                      灰圈、没有勾（勾由样式在未选中时藏掉）。唯一不能点的状态
+                      是"最后一把启用中的密钥"——宿主会拒绝，控件直接站开。 */}
                   <span className="bre-keys-toggle-mark" aria-hidden="true">
-                    {/* The ring is the seat; the tick only takes it when the key
-                        is switched into use — an empty circle reads as "off",
-                        a ticked one as "on", with no colour alone to carry it. */}
-                    <Glyph paths={[RING_PATH]} />
-                    {row.enabled ? <Glyph paths={[CHECK_PATH]} /> : null}
+                    <Glyph paths={[CHECK_PATH]} />
                   </span>
                 </button>
                 {row.alias === undefined ? null : <span className="bre-keys-alias">{row.alias}</span>}
@@ -639,15 +670,20 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                       >
                         {t('keysAlias')}
                       </button>
-                      <button
-                        type="button"
-                        className="bre-link-button"
-                        disabled={busy}
-                        title={t('keysScope', { name })}
-                        onClick={() => openForm('scope', row)}
-                      >
-                        {scopeText(row, t)}
-                      </button>
+                      {/* The scope action is the edit card's alone: a draft list
+                          has no models to pick from — the provider the scope
+                          would name its keys by does not exist yet. */}
+                      {draft === true ? null : (
+                        <button
+                          type="button"
+                          className="bre-link-button"
+                          disabled={busy}
+                          title={t('keysScope', { name })}
+                          onClick={() => openForm('scope', row)}
+                        >
+                          {scopeText(row, t)}
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="bre-link-button"
@@ -668,6 +704,12 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
         })}
         {addEntry()}
       </ul>
+
+      {/* The one line that tells a draft list what it is: the keys are held by
+          this page and land with the card's own create — the same contract the
+          request-header pane states, and the reason a reload loses nothing the
+          official form would have kept. */}
+      {draft === true ? <p className="bre-keys-note">{t('keysDraftHint')}</p> : null}
 
       {unmerged.length === 0 ? null : (
         <p className="bre-keys-note">
@@ -692,7 +734,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
         <ProtocolMenu
           anchor={protocolMenu.anchor}
           label={t('keysProtocolLabel', { name: nameOf(menuRow) })}
-          options={protocolOptions(endpoints, menuRow.protocol, t)}
+          options={protocolOptions(endpoints, menuRow.protocol, t, draft === true)}
           selected={menuRow.protocol ?? ''}
           onPick={value => changeProtocol(menuRow, value)}
           onClose={() => setProtocolMenu(undefined)}

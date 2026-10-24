@@ -101,13 +101,12 @@ function buildAddBlock(): HTMLElement {
 }
 
 /**
- * The level checkboxes of the injected editor, in LEVEL_ORDER (off…max) plus the
- * trailing image-input toggle. Scoped to the effort CARD: the master Thinking
- * switch renders outside it (it gates whether the card exists at all), so a bare
- * sweep would put that switch at index 0 and shift every level by one.
+ * The editor's level pills, in LEVEL_ORDER (off…max). Scoped to the LEVELS
+ * group: the default-pick and modality pill rows live in the same card, and
+ * the master Thinking switch outside it.
  */
-function checkboxes(): HTMLInputElement[] {
-  return Array.from(document.querySelectorAll<HTMLInputElement>('.bre-effort-card input[type="checkbox"]'))
+function levelPills(): HTMLButtonElement[] {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>('.bre-effort-card .bre-pillrow[aria-label="Declared levels"] .bre-lvl'))
 }
 
 beforeEach(() => {
@@ -432,7 +431,7 @@ describe('client apply()', () => {
       ;(providers.aliyun as { models: Array<Record<string, unknown>> }).models[0]!['reasoningEfforts'] = { high: 'high' }
       join = makeJoin(providers)
       h.emitRemote('settings/document-updated', PI_AI_NS)
-      await waitFor(() => checkboxes().length >= 7 && checkboxes()[4]!.checked === true)
+      await waitFor(() => levelPills().length >= 7 && levelPills()[4]!.classList.contains('is-on'))
     } finally {
       h.disposeAll()
     }
@@ -527,21 +526,24 @@ describe('client apply()', () => {
       const trigger = card.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!
        expect(trigger).not.toBeNull()
       // The wrapper is created synchronously; the React commit inside it is
-      // scheduled, so wait for the two rows to land.
-      await waitFor(() => wrapper.querySelectorAll('.bre-row-control').length === 2)
-      const rows = Array.from(wrapper.querySelectorAll<HTMLButtonElement>('.bre-row-control'))
-      expect(rows[0]?.querySelector('.bre-row-label')?.textContent).toBe('Model')
-      expect(rows[0]?.querySelector('.bre-row-value')?.textContent).toBe('Aliyun · Qwen Max')
+      // scheduled, so wait for the body to land: the head names the current
+      // model, the columns are already open, and the level pill follows the
+      // mount-sync effect onto the session's level.
+      await waitFor(() => wrapper.querySelector('.bre-menu-head') !== null)
+      expect(wrapper.querySelector('.bre-menu-head .bre-row-label')?.textContent).toBe('Model')
+      await waitFor(() => wrapper.querySelector('.bre-menu-name')?.textContent === 'Qwen Max')
+      expect(wrapper.querySelector('.bre-menu-prov')?.textContent).toBe('Aliyun')
        await waitFor(() => trigger.dataset['breProvider'] === 'Aliyun')
        expect(trigger.textContent).toBe('Qwen Max')
 
-      // The level row is moved onto the session's level by a passive effect, so
-      // the row exists one commit BEFORE it carries the value: wait for it
-      // rather than racing the commit.
-      await waitFor(() => rows[1]?.querySelector('.bre-row-value')?.textContent === 'Medium')
+      // The level pill is moved onto the session's level by a passive effect, so
+      // it exists one commit BEFORE it carries the value: wait for it rather
+      // than racing the commit.
+      await waitFor(() => wrapper.querySelector('.bre-menu-head .bre-pill')?.textContent === 'Medium')
        await directory.select({ provider: 'dashscope', model: 'qwen-max' })
        await waitFor(() => trigger.dataset['breProvider'] === 'dashscope')
-       await waitFor(() => rows[0]?.querySelector('.bre-row-value')?.textContent === 'dashscope · qwen-max')
+       await waitFor(() => wrapper.querySelector('.bre-menu-name')?.textContent === 'qwen-max')
+       await waitFor(() => wrapper.querySelector('.bre-menu-prov')?.textContent === 'dashscope')
 
       // The replicated body takes the upstream box, and the official root cells
       // are hidden because the replica IS the content.
@@ -550,12 +552,13 @@ describe('client apply()', () => {
       expect(cells).toHaveLength(2)
       for (const cell of cells) expect((cell as HTMLButtonElement).style.display).toBe('none')
 
-      // The model row opens the REPLICA'S OWN provider → model panel: it never
-      // reaches for an official cell (which stays hidden behind the body).
+      // The columns are the replica's OWN provider → model list, always open:
+      // nothing ever reaches for an official cell (which stays hidden behind
+      // the body).
       let officialClicks = 0
       for (const cell of cells) cell.addEventListener('click', () => { officialClicks += 1 })
-      rows[0]!.click()
-      await waitFor(() => wrapper.querySelector('.bre-panel-models') !== null)
+      wrapper.querySelector<HTMLButtonElement>('.bre-provider')!.click()
+      expect(wrapper.querySelector('.bre-panel-models')).not.toBeNull()
       expect(officialClicks).toBe(0)
 
       // Closing the menu (React removes it) unmounts the slider root.
@@ -683,9 +686,9 @@ describe('client apply()', () => {
       const wrapper = document.querySelector<HTMLElement>('[data-bre-slider="1"]')!
       const menu = card.querySelector<HTMLElement>('[role="menu"]')!
 
-      // The replica's model row is the user's click target: focus it (a real
-      // click focuses the button) BEFORE drilling in.
-      const row = wrapper.querySelector<HTMLButtonElement>('.bre-row-control')!
+      // A replica control is the user's click target: focus it (a real click
+      // focuses the button) BEFORE drilling in.
+      const row = wrapper.querySelector<HTMLButtonElement>('.bre-provider')!
       row.focus()
       expect(document.activeElement).toBe(row)
 
@@ -888,8 +891,7 @@ describe('client apply()', () => {
       buildComposerMenu()
       const { apply } = await import('../src/client/index.js')
       apply(h.ctx as unknown as Ctx)
-      await waitFor(() => document.querySelector('.bre-row-control') !== null)
-      document.querySelector<HTMLButtonElement>('.bre-row-control')!.click()
+      await waitFor(() => document.querySelector('.bre-menu-head') !== null)
       await waitFor(hasVision)
       // Explicit text-only settings also override a vision-capable family.
       const gpt = Array.from(document.querySelectorAll('.bre-provider-models .bre-option'))

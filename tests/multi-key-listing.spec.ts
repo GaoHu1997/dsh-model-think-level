@@ -32,21 +32,29 @@ function idsOf(listing: MergedListing): string[] {
 }
 
 describe('mergeKeyListings', () => {
-  it('keeps first-advertised order and names every key serving one model', () => {
+  it('reads in natural id order and names every key serving one model', () => {
+    // First-advertised order would read qwen-max, glm-4, kimi-k2 (A's list, then
+    // B's extras) — the catalogue reads as one alphabet instead.
     const merged = mergeKeyListings([
-      result('A', ['glm-4', 'glm-4-flash']),
+      result('A', ['qwen-max', 'glm-4']),
       result('B', ['kimi-k2', 'glm-4']),
     ])
 
-    expect(idsOf(merged)).toEqual(['glm-4', 'glm-4-flash', 'kimi-k2'])
+    expect(idsOf(merged)).toEqual(['glm-4', 'kimi-k2', 'qwen-max'])
     expect(merged.models).toEqual([
       { id: 'glm-4', keys: ['A', 'B'] },
-      { id: 'glm-4-flash', keys: ['A'] },
       { id: 'kimi-k2', keys: ['B'] },
+      { id: 'qwen-max', keys: ['A'] },
     ])
     expect(merged.answered).toEqual(['A', 'B'])
     expect(merged.retained).toEqual([])
     expect(merged.unreadable).toEqual([])
+  })
+
+  it('sorts a family in version order, not by string', () => {
+    const merged = mergeKeyListings([result('A', ['glm-4.6', 'glm-4.5', 'glm-4.5-flash', 'glm-4.10'])])
+
+    expect(idsOf(merged)).toEqual(['glm-4.5', 'glm-4.5-flash', 'glm-4.6', 'glm-4.10'])
   })
 
   it('dedupes inside one key and drops blank ids', () => {
@@ -149,7 +157,7 @@ describe('collectKeyListings', () => {
       },
     })
 
-    expect(idsOf(merged)).toEqual(['model-A', 'kept-by-B'])
+    expect(idsOf(merged)).toEqual(['kept-by-B', 'model-A'])
     expect(merged.retained).toEqual(['B'])
   })
 })

@@ -32,6 +32,7 @@ import {
   type EditorTabsState,
 } from '../src/client/injection/editor-tabs.js'
 import { createStagedHeadersState, type StagedHeadersState } from '../src/client/injection/staged-headers.js'
+import { createStagedKeysState, type StagedKeysState } from '../src/client/injection/staged-keys.js'
 import { en } from '../src/client/locales.js'
 import type { RemoteApi } from '../src/client/types.js'
 
@@ -62,12 +63,16 @@ function fakeApi(): RemoteApi {
  * language under a mounted pane, and the pass's own copy is not what these
  * tests are about.
  */
-function deps(staged: StagedHeadersState = createStagedHeadersState()): AddCardDeps {
+function deps(
+  staged: StagedHeadersState = createStagedHeadersState(),
+  stagedKeys: StagedKeysState = createStagedKeysState(),
+): AddCardDeps {
   return {
     t,
     api: fakeApi(),
     routeIdLabels: () => ['customRoute', 'Provider ID'],
     staged,
+    stagedKeys,
     refreshed: (children: () => ReactNode): ReactNode => children(),
   }
 }
@@ -177,6 +182,13 @@ function buildCard(custom: CustomHalf = 'unmounted'): Fixture {
 
 function barIn(scope: HTMLElement): HTMLElement | null {
   return scope.querySelector(`.${EDITOR_TABS_CLASS}`)
+}
+
+/** Let the seat's pane, its first read and the render that adopts it settle. */
+async function flush(turns = 6): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
 }
 
 function tabLabel(scope: HTMLElement, id: string): string {
@@ -352,6 +364,60 @@ describe('the create-provider card', () => {
 
     expect(document.querySelectorAll('.bre-key-field')).toHaveLength(0)
     expect(document.querySelectorAll('.bre-key-eye')).toHaveLength(0)
+  })
+
+  it('seats the draft key list under the custom form’s key field, not the catalogue’s', async () => {
+    const fixture = buildCard('shown')
+
+    reconcileAddCards(fixture.root, deps(), state)
+    await flush()
+
+    const customKeyField = fixture.customPanel.querySelector<HTMLElement>('input[aria-label="API key"]')?.parentElement
+    expect(customKeyField?.classList.contains('bre-key-managed')).toBe(true)
+    const host = customKeyField?.nextElementSibling
+    expect(host instanceof HTMLElement && host.hasAttribute('data-bre-create-keys')).toBe(true)
+    // The list itself is up: the same add entry the edit card's list carries.
+    expect(host instanceof HTMLElement && host.querySelector('.bre-keys-add') !== null).toBe(true)
+
+    // The catalogue half keeps its own key field exactly as the page built it:
+    // that half stays mounted, and a second seat would stage a second, empty
+    // draft list against the same route the visible one holds.
+    const catalogKeyField = fixture.root.querySelector<HTMLElement>(
+      '#\\:r1\\:-catalog-panel input[aria-label="API key"]',
+    )?.parentElement
+    expect(catalogKeyField?.classList.contains('bre-key-managed')).toBe(false)
+    expect(catalogKeyField?.nextElementSibling?.hasAttribute?.('data-bre-create-keys')).toBeFalsy()
+  })
+
+  it('seats the key list even when the form does not use .field wrappers', async () => {
+    // The live create form wraps its controls in classes of its own — the seat
+    // keyed on the edit card's `.field` found nothing there and the official
+    // single input stayed. The field is derived from the key INPUT instead.
+    const fixture = buildCard('shown')
+    for (const div of Array.from(fixture.customPanel.querySelectorAll<HTMLElement>('.field'))) {
+      div.className = 'formRow'
+    }
+
+    reconcileAddCards(fixture.root, deps(), state)
+    await flush()
+
+    const keyField = fixture.customPanel.querySelector<HTMLElement>('input[aria-label="API key"]')?.parentElement
+    expect(keyField?.classList.contains('bre-key-field')).toBe(true)
+    expect(keyField?.classList.contains('bre-key-managed')).toBe(true)
+    const host = keyField?.nextElementSibling
+    expect(host instanceof HTMLElement && host.hasAttribute('data-bre-create-keys')).toBe(true)
+    expect(host instanceof HTMLElement && host.querySelector('.bre-keys-add') !== null).toBe(true)
+  })
+
+  it('gives the seated key fields back with the rest of the card', async () => {
+    const fixture = buildCard('shown')
+    reconcileAddCards(fixture.root, deps(), state)
+    await flush()
+
+    teardownAddCards(state)
+
+    expect(document.querySelectorAll('[data-bre-create-keys]')).toHaveLength(0)
+    expect(document.querySelectorAll('.bre-key-managed')).toHaveLength(0)
   })
 
   it('sweeps a mount left behind by a dead fiber', () => {

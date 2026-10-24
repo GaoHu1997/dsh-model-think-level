@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { probeKeyModels, probePlanFor, type ProbeKeyOptions } from '../src/key-probe.js'
-import { anthropicRequestBaseUrl, listingEntries, probeListingUrl } from '../src/listing.js'
+import { anthropicRequestBaseUrl, geminiRequestBaseUrl, listingEntries, modelsFromListing, probeListingUrl } from '../src/listing.js'
 
 const intent = (over: Partial<Parameters<typeof probePlanFor>[0]> = {}): Parameters<typeof probePlanFor>[0] => ({
   api: 'openai-completions',
@@ -11,6 +11,11 @@ const intent = (over: Partial<Parameters<typeof probePlanFor>[0]> = {}): Paramet
 const endpoints = {
   openai: 'https://relay.example.com/v1',
   anthropic: 'https://relay.example.com/anthropic',
+}
+
+const triEndpoints = {
+  ...endpoints,
+  gemini: 'https://relay.example.com/v1beta',
 }
 
 describe('probePlanFor', () => {
@@ -41,6 +46,28 @@ describe('probePlanFor', () => {
     const plan = probePlanFor(intent({ pinned: 'anthropic-messages', endpoints }))
     expect(plan.targets).toEqual([
       { api: 'anthropic-messages', baseURL: 'https://relay.example.com/anthropic', family: 'anthropic' },
+    ])
+  })
+
+  it('asks a gemini pin on the gemini family address', () => {
+    const plan = probePlanFor(intent({ pinned: 'google-generative-ai', endpoints: triEndpoints }))
+    expect(plan.targets).toEqual([
+      { api: 'google-generative-ai', baseURL: 'https://relay.example.com/v1beta', family: 'gemini' },
+    ])
+  })
+
+  it('skips a gemini pin the provider has no gemini address for', () => {
+    const plan = probePlanFor(intent({ pinned: 'google-generative-ai', endpoints }))
+    expect(plan.targets).toEqual([])
+    expect(plan.skipped).toContain('no gemini address')
+  })
+
+  it('asks an unpinned key on every family the provider addressed', () => {
+    const plan = probePlanFor(intent({ endpoints: triEndpoints }))
+    expect(plan.targets.map(target => [target.api, target.baseURL])).toEqual([
+      ['openai-completions', 'https://relay.example.com/v1'],
+      ['anthropic-messages', 'https://relay.example.com/anthropic'],
+      ['google-generative-ai', 'https://relay.example.com/v1beta'],
     ])
   })
 
@@ -94,6 +121,68 @@ describe('Anthropic endpoint paths', () => {
       .toBe('https://anth.example.com/v1/models?limit=1000')
     expect(anthropicRequestBaseUrl('https://anth.example.com/v1'))
       .toBe('https://anth.example.com')
+  })
+})
+
+describe('Gemini endpoint paths', () => {
+  it.each([
+    // The Google client takes baseUrl verbatim with no apiVersion, so a bare
+    // origin gains /v1beta and a spelled-out path is the gateway's own.
+    ['https://gem.example.com', 'https://gem.example.com/v1beta'],
+    ['https://gem.example.com/', 'https://gem.example.com/v1beta'],
+    ['https://gem.example.com/v1beta', 'https://gem.example.com/v1beta'],
+    ['https://gem.example.com/v1beta/', 'https://gem.example.com/v1beta'],
+    ['https://gem.example.com/api/gemini', 'https://gem.example.com/api/gemini'],
+  ])('derives the version-qualified base from %s', (baseURL, expected) => {
+    expect(geminiRequestBaseUrl(baseURL)).toBe(expected)
+  })
+
+  it('lists at the native models route with one bounded page', () => {
+    expect(probeListingUrl('https://gem.example.com/v1beta', 'google-generative-ai'))
+      .toBe('https://gem.example.com/v1beta/models?pageSize=1000')
+    // A bare origin still asks a valid URL, the same one a request would use.
+    expect(probeListingUrl('https://gem.example.com', 'google-generative-ai'))
+      .toBe('https://gem.example.com/v1beta/models?pageSize=1000')
+  })
+})
+
+describe('Gemini native listing shape', () => {
+  it('unwraps models/<id> resource names and keeps only generative entries', () => {
+    const entries = listingEntries({
+      models: [
+        { name: 'models/gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', inputTokenLimit: 1_048_576, outputTokenLimit: 65_536, supportedGenerationMethods: ['generateContent', 'countTokens'] },
+        { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] },
+        { name: 'models/no-methods-declared' },
+        { supportedGenerationMethods: ['generateContent'] },
+      ],
+    })
+    expect(entries).not.toBeUndefined()
+    expect(entries?.map(entry => entry['id'])).toEqual(['gemini-2.5-flash', 'no-methods-declared'])
+  })
+
+  it('reads the display label from displayName, never the resource path', () => {
+    const models = modelsFromListing({
+      models: [
+        { name: 'models/gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', inputTokenLimit: 1_048_576, outputTokenLimit: 65_536, supportedGenerationMethods: ['generateContent'] },
+      ],
+    })
+    expect(models).toEqual([
+      {
+        id: 'gemini-2.5-pro',
+        name: 'Gemini 2.5 Pro',
+        contextWindow: 1_048_576,
+        maxTokens: 65_536,
+      },
+    ])
+  })
+
+  it('treats an empty models array as a real, empty listing', () => {
+    expect(listingEntries({ models: [] })).toEqual([])
+  })
+
+  it('still reads the harness shapes unchanged', () => {
+    expect(listingEntries({ data: [{ id: 'gpt-x' }] })?.map(entry => entry['id'])).toEqual(['gpt-x'])
+    expect(listingEntries({ models: { 'relay/model': { id: 'canonical' } } })?.map(entry => entry['id'])).toEqual(['relay/model'])
   })
 })
 

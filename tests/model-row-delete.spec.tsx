@@ -32,7 +32,10 @@ const LABELS: HostLabels = {
   capacity: ['Capacities'], modelId: ['Model ID'], modelName: ['Display name'], routeId: ['Provider ID'],
   baseUrl: ['Base URL'], apiProtocol: ['API protocol'], apply: ['Apply'], cancel: ['Cancel'],
   editProvider: ['Edit {provider}'],
+
   inputImage: ['Image'],
+  contextWindow: ['Context window'],
+  maxOutput: ['Max output'],
 }
 const deps = (): { t: (k: string) => string; labels: () => HostLabels } => ({ t: (k: string) => k, labels: () => LABELS })
 const PROVIDER = 'aliyun'
