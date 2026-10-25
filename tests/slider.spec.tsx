@@ -9,7 +9,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ComposerSlider, effectiveEffortIndex, effortRampColor, sliderLevels } from '../src/client/ComposerSlider.js'
+import { ComposerSlider, effectiveEffortIndex, sliderLevels } from '../src/client/ComposerSlider.js'
+
 import type { ModelDirectoryLike, ModelDirectoryStateLike } from '../src/client/types.js'
 
 /**
@@ -114,17 +115,13 @@ function click(el: Element | null | undefined): void {
   ;(el as HTMLElement).click()
 }
 
-/** The head's current-model line and its level pill. */
+/** The head's current-model line. */
 function headName(container: HTMLElement): string | undefined {
   return container.querySelector('.bre-menu-name')?.textContent ?? undefined
 }
 
 function headProvider(container: HTMLElement): string | undefined {
   return container.querySelector('.bre-menu-prov')?.textContent ?? undefined
-}
-
-function headPill(container: HTMLElement): string | undefined {
-  return container.querySelector('.bre-menu-head .bre-pill')?.textContent ?? undefined
 }
 
 /** The model column's options, in provider order. */
@@ -219,9 +216,12 @@ describe('ComposerSlider body', () => {
     expect(container.querySelector('.bre-menu-head .bre-row-label')?.textContent).toBe('modelRowLabel')
     expect(headName(container)).toBe('Qwen Max')
     expect(headProvider(container)).toBe('Aliyun')
-    // The level pill follows the mount-sync effect onto the session's medium.
-    // Passive effects flush asynchronously, so wait for the rest position.
-    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    // The level is named once, in the footer, and follows the mount-sync effect
+    // onto the session's medium. Passive effects flush asynchronously, so wait
+    // for the rest position.
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('Medium'))
+    // The head carries no second copy of it: one level, one place.
+    expect(container.querySelector('.bre-menu-head .bre-pill')).toBeNull()
     // The radiation slider is gone: nothing renders a range input or a track.
     expect(container.querySelector('input[type="range"]')).toBeNull()
     expect(container.querySelector('.bre-effort-track')).toBeNull()
@@ -259,10 +259,10 @@ describe('ComposerSlider body', () => {
     root.unmount()
   })
 
-  it('paints the footer as a gradient slider under a head naming the current level', async () => {
+  it('paints the footer as one accent track with a tick per stop, under a head naming the level', async () => {
     const { root, container } = await mount(fixture().directory)
     // The head above the track names the section and carries the level under
-    // the thumb (进度条上方：思考等级 + 当前等级), wearing that stop's hue.
+    // the thumb (进度条上方：思考等级 + 当前等级).
     expect(container.querySelector('.bre-menu-foot .bre-effort-slider-head-label')?.textContent).toBe('effortRowLabel')
     const headValue = footHeadValue(container)
     expect(headValue).not.toBeNull()
@@ -270,20 +270,21 @@ describe('ComposerSlider body', () => {
     const thumb = container.querySelector<HTMLElement>('.bre-effort-slider-thumb')
     expect(fill).not.toBeNull()
     expect(thumb).not.toBeNull()
-    // The gradient carries every stop's ramp hue in track coordinates; the
-    // session rests on medium (stop 2 of 5 → 50%), so the reveal opens the
-    // gradient's left half to the thumb.
-    const hues = LADDER.map((_, at) => effortRampColor(at / (LADDER.length - 1)))
-    await vi.waitFor(() => expect(thumb?.style.background).toBe(hues[2]))
-    // The head's value settles onto the session's level, in that stop's hue.
-    await vi.waitFor(() => expect(headValue?.textContent).toBe('Medium'))
-    expect(headValue?.style.color).toBe(hues[2])
-    for (const hue of hues) expect(fill?.style.background).toContain(hue)
-    expect(fill?.style.background).toContain('linear-gradient')
+    // No hue per stop: the accent comes from the stylesheet, and the component
+    // writes no colour at all — only the drag preview's reveal.
+    await vi.waitFor(() => expect(thumb?.style.left).toBe('50%'))
+    expect(fill?.style.background).toBe('')
+    expect(thumb?.style.background).toBe('')
     expect(fill?.style.clipPath).toBe('inset(0 50% 0 0)')
-    // The name under the active stop wears the same hue, so the colour alone
-    // names the level.
-    expect(container.querySelector<HTMLElement>('.bre-effort-slider-label.is-on')?.style.color).toBe(hues[2])
+    // The head's value settles onto the session's level.
+    await vi.waitFor(() => expect(headValue?.textContent).toBe('Medium'))
+    expect(headValue?.style.color).toBe('')
+    // Every stop but the occupied one is a hole in the track, so the ladder's
+    // size is legible without a colour per stop.
+    expect(container.querySelectorAll('.bre-effort-slider-tick')).toHaveLength(LADDER.length - 1)
+    // The active stop's name is marked on the class, not by colour.
+    expect(container.querySelector<HTMLElement>('.bre-effort-slider-label.is-on')?.textContent).toBe('Medium')
+    expect(container.querySelector<HTMLElement>('.bre-effort-slider-label.is-on')?.style.color).toBe('')
     root.unmount()
   })
 })
@@ -432,14 +433,14 @@ describe('ComposerSlider commit', () => {
     // pill both follow it.
     await vi.waitFor(() => expect(activeLevelName(container)).toBe('High'))
     await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('High'))
-    await vi.waitFor(() => expect(headPill(container)).toBe('High'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('High'))
     root.unmount()
   })
 
   it('ignores a repick of the level already committed', async () => {
     const { directory, selectSpy } = fixture()
     const { root, container } = await mount(directory)
-    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('Medium'))
     pickLevel(container, 'Medium')
     await vi.waitFor(() => expect(selectSpy).not.toHaveBeenCalled())
     root.unmount()
@@ -455,10 +456,10 @@ describe('ComposerSlider commit', () => {
     const { root, container } = await mount(directory)
     expect(directory.store.getSnapshot().current?.reasoningEffort).toBeUndefined()
     // The adapter default (medium) is what the footer predicts before any pick.
-    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('Medium'))
     pickLevel(container, 'Medium')
     await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'medium' }))
-    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('Medium'))
     root.unmount()
   })
 
@@ -470,7 +471,7 @@ describe('ComposerSlider commit', () => {
       groups: onlyModel({ id: 'qwen-plus', name: 'Qwen Plus', reasoning: { efforts: LADDER.slice(0, 4) } }),
     })
     const { root, container } = await mount(directory)
-    await vi.waitFor(() => expect(headPill(container)).toBe('Low'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('Low'))
     pickLevel(container, 'Low')
     await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-plus', reasoningEffort: 'low' }))
     root.unmount()
@@ -490,11 +491,11 @@ describe('ComposerSlider commit', () => {
       throw new Error('refused')
     })
     const { root, container } = await mount(directory)
-    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('Medium'))
     pickLevel(container, 'High')
     await vi.waitFor(() => {
       expect(container.querySelector('.bre-model-error')?.textContent).toContain('refused')
-      expect(headPill(container)).toBe('Medium')
+      expect(footHeadValue(container)?.textContent).toBe('Medium')
     })
     root.unmount()
   })
@@ -511,11 +512,11 @@ describe('ComposerSlider commit', () => {
     })
     const { root, container } = await mount(directory)
     // The adapter default (medium) is the rest position before any pick.
-    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('Medium'))
     pickLevel(container, 'High')
     await vi.waitFor(() => {
       expect(container.querySelector('.bre-model-error')?.textContent).toContain('no such effort')
-      expect(headPill(container)).toBe('Medium')
+      expect(footHeadValue(container)?.textContent).toBe('Medium')
     })
     root.unmount()
   })
@@ -527,7 +528,7 @@ describe('ComposerSlider commit', () => {
     // itself in the same task, so the menu stays open.
     const { directory, selectSpy } = fixture()
     const { root, container, menu } = await mount(directory)
-    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('Medium'))
     pickLevel(container, 'High')
     // Synchronous: the handoff runs in the commit's sync section, before the
     // first await, so the disabled segment never owns the focus.
@@ -544,7 +545,7 @@ describe('ComposerSlider commit', () => {
     const { directory, selectSpy } = fixture()
     const loadSpy = directory.load as ReturnType<typeof vi.fn>
     const { root, container } = await mount(directory)
-    await vi.waitFor(() => expect(headPill(container)).toBe('Medium'))
+    await vi.waitFor(() => expect(footHeadValue(container)?.textContent).toBe('Medium'))
     loadSpy.mockClear()
     pickLevel(container, 'High')
     await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'high' }))

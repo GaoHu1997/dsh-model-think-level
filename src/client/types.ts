@@ -373,9 +373,26 @@ export interface EffortEditorApi {
    * persists them, so they never ride the plugin's document write.
    * Fill-only: an input that already holds a positive number keeps it.
    * Optional — a seam without a row (embedders) simply has nowhere to print,
-   * and the footnote copy in the editor still shows the numbers.
+   * and the editor's own fields still hold the numbers.
    */
   fillCapacities?(contextWindow?: number, maxTokens?: number): void
+  /**
+   * The row's official capacity inputs as they stand in the form's draft, for
+   * the editor's own two fields to seed from. Absent when the seam has no row
+   * (embedders), in which case the fields start blank and stay local.
+   */
+  readCapacities?(): { contextWindow?: number; maxTokens?: number }
+  /**
+   * Write the editor's capacity fields into the official inputs.
+   *
+   * Not fill-only, unlike {@link fillCapacities}: this is the user typing in the
+   * editor, so the value lands over whatever the form held, and `undefined`
+   * EMPTIES the input — that is how a capacity goes back to inheriting the
+   * catalogue value instead of being pinned to the old number. Keys omitted from
+   * `next` are left alone. The official Save still persists, exactly as for
+   * {@link fillCapacities}: the form's draft remains the single writer.
+   */
+  setCapacities?(next: { contextWindow?: number | undefined; maxTokens?: number | undefined }): void
   /**
    * Withdraw everything this editor reported for its row (the editor's own
    * Reset). Without it, a Reset followed by the official Save would still write

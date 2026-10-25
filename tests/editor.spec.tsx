@@ -33,14 +33,34 @@ function baseApi(): EffortEditorApi & {
   commit: ReturnType<typeof vi.fn>
   withdraw: ReturnType<typeof vi.fn>
   fillCapacities: ReturnType<typeof vi.fn>
+  readCapacities: ReturnType<typeof vi.fn>
+  setCapacities: ReturnType<typeof vi.fn>
 } {
+  // The capacity pair is a form, not a store: the mock keeps what was written
+  // where the real official inputs would hold it, so a test can assert what the
+  // row now says without reaching into a fake DOM twice.
+  const capacities: { contextWindow?: number; maxTokens?: number } = {}
   return {
     suggest: vi.fn(async (): Promise<SuggestReply> => ({ ok: false, error: 'no-suggestion' })),
     // Since C2 the editor reports through commit() and the injector decides
     // where the intent lands; writeEfforts/stageEfforts are no longer its path.
     commit: vi.fn((_route: string, _modelId: string, _write: unknown): void => {}),
     withdraw: vi.fn((_route: string, _modelId: string): void => {}),
-    fillCapacities: vi.fn((_contextWindow?: number, _maxTokens?: number): void => {}),
+    fillCapacities: vi.fn((contextWindow?: number, maxTokens?: number): void => {
+      if (contextWindow !== undefined) capacities.contextWindow = contextWindow
+      if (maxTokens !== undefined) capacities.maxTokens = maxTokens
+    }),
+    readCapacities: vi.fn((): { contextWindow?: number; maxTokens?: number } => ({ ...capacities })),
+    setCapacities: vi.fn((next: { contextWindow?: number | undefined; maxTokens?: number | undefined }): void => {
+      if ('contextWindow' in next) {
+        if (next.contextWindow === undefined) delete capacities.contextWindow
+        else capacities.contextWindow = next.contextWindow
+      }
+      if ('maxTokens' in next) {
+        if (next.maxTokens === undefined) delete capacities.maxTokens
+        else capacities.maxTokens = next.maxTokens
+      }
+    }),
     writeEfforts: vi.fn(async (): Promise<WriteEffortsReply> => ({ ok: true })),
     stageEfforts: vi.fn((_route: string, _modelId: string, _efforts: unknown, _compat?: unknown): void => {}),
   }
@@ -106,6 +126,13 @@ function modalityPill(container: HTMLElement, label: string): HTMLButtonElement 
   return hit
 }
 
+/** One capacity field: the context window or the max output. */
+function capacityField(container: HTMLElement, label: string): HTMLInputElement {
+  const hit = container.querySelector<HTMLInputElement>(`.bre-effort-card input[aria-label^="${label}"]`)
+  if (hit === null) throw new Error(`no capacity field "${label}"`)
+  return hit
+}
+
 /** The pill's group: the level ladder, the default pick, or the modality. */
 function pillGroup(container: HTMLElement, label: string): HTMLButtonElement[] {
   const group = Array.from(container.querySelectorAll<HTMLElement>('.bre-effort-card .bre-pillrow'))
@@ -116,7 +143,7 @@ function pillGroup(container: HTMLElement, label: string): HTMLButtonElement[] {
 
 /** The armed levels' wire spelling inputs, in LEVEL_ORDER. */
 function wires(container: HTMLElement): HTMLInputElement[] {
-  return Array.from(container.querySelectorAll<HTMLInputElement>('.bre-effort-card input[type="text"]'))
+  return Array.from(container.querySelectorAll<HTMLInputElement>('.bre-effort-card .bre-wire-row input[type="text"]'))
 }
 
 /** The quiet link that unfolds the wire-spelling row (folded by default). */
@@ -580,17 +607,17 @@ describe('EffortEditor modality', () => {
 
     await act(async () => { buttonByText(container, t('autoAdapt')).click() })
 
-    const reference = container.querySelector('.bre-reference')
-    expect(reference?.textContent).toContain(t('referenceTitle'))
-    expect(reference?.textContent).toContain('1,048,576')
-    expect(reference?.textContent).toContain('128,000')
-    expect(container.textContent).toContain(t('contextWindowLabel'))
-    expect(container.textContent).toContain(t('maxTokensLabel'))
-    expect(container.textContent).toContain(t('inputHintEndpoint'))
     // The same capacities are offered to the row's official inputs through the
     // seam (the injector's echo is what fills them); a seam without them
     // (embedders) simply never hears the call.
     expect(api.fillCapacities).toHaveBeenCalledWith(1048576, 128000)
+    // ...and the editor's own two fields show what those inputs now hold,
+    // grouped the way the form prints it.
+    expect(capacityField(container, t('contextWindowLabel')).value).toBe('1,048,576')
+    expect(capacityField(container, t('maxTokensLabel')).value).toBe('128,000')
+    expect(container.textContent).toContain(t('contextWindowLabel'))
+    expect(container.textContent).toContain(t('maxTokensLabel'))
+    expect(container.textContent).toContain(t('inputHintEndpoint'))
     // The suggestion's text-only advice leaves the image pill disarmed.
     expect(modalityPill(container, t('modalityImage')).classList.contains('is-on')).toBe(false)
   })
@@ -630,9 +657,10 @@ describe('EffortEditor modality', () => {
 
     expect(container.textContent).toContain(t('inputHintHeuristic'))
     expect(modalityPill(container, t('modalityImage')).classList.contains('is-on')).toBe(true)
-    // No capacities in the suggestion -- no reference block at all.
-    expect(container.querySelector('.bre-reference')).toBeNull()
-  })
+    // No capacities in the suggestion: the fields stay blank, which is the
+    // catalogue-fallback state rather than a block hidden from the user.
+    expect(capacityField(container, t('contextWindowLabel')).value).toBe('')
+    expect(capacityField(container, t('contextWindowLabel')).getAttribute('placeholder')).toBe(t('capacityBlank'))  })
 })
 
 describe('EffortEditor compat controls', () => {

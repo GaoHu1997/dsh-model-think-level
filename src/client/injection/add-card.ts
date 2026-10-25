@@ -182,6 +182,20 @@ function applyAddCard(card: HTMLElement, deps: AddCardDeps, state: AddCardState)
 const FIELD_SELECTOR = '.field, label'
 
 /**
+ * The plugin's own surfaces inside a card — the keys list's host, the list
+ * itself, and the tab bar's mount.
+ *
+ * An input inside one of these is OURS, not the official form's. This is not
+ * cosmetic: the draft list's open form carries a password box of its own, and a
+ * pass that read it as an official key field would seat a SECOND list under it,
+ * whose open form carries another password box — a host nested inside a host,
+ * one per pass, until the card is metres tall. Reported as "点开新增供应商，
+ * 出现了无限向下扩展" (2026-10-25), which is exactly this: the card's own key
+ * list grew a list, and that list grew a list.
+ */
+const OWN_SURFACE_SELECTOR = '.bre-keys-host, .bre-keys, .bre-create-host'
+
+/**
  * The API-key fields of a form, derived from the INPUTS rather than a wrapper
  * class: the reveal pass spells a key input as a masked one (or, once it has
  * dressed the field, a marked one), and the official create form does not agree
@@ -189,6 +203,9 @@ const FIELD_SELECTOR = '.field, label'
  * on the wrapper found nothing on the live card, and the key field kept its
  * official single-input look beside a takeover that plainly worked. The field
  * is the input's nearest `.field`/`label` ancestor, or simply its parent.
+ *
+ * Inputs inside the plugin's own surfaces are skipped: they are ours to render,
+ * not the page's to adopt (see {@link OWN_SURFACE_SELECTOR}).
  */
 function keyFieldsOf(scope: HTMLElement): HTMLElement[] {
   const fields: HTMLElement[] = []
@@ -196,6 +213,7 @@ function keyFieldsOf(scope: HTMLElement): HTMLElement[] {
     'input[type="password"], input[data-bre-key-input]',
   )
   for (const input of Array.from(marked)) {
+    if (input.closest(OWN_SURFACE_SELECTOR) !== null) continue
     const field = input.closest<HTMLElement>(FIELD_SELECTOR) ?? input.parentElement
     if (field !== null && !fields.includes(field)) fields.push(field)
   }

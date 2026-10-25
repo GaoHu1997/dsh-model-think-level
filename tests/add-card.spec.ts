@@ -281,6 +281,35 @@ describe('the create-provider card', () => {
     expect(fixture.picker?.classList.contains(MODE_PICKER_CLASS)).toBe(true)
   })
 
+  it('does not seat a list under the list the card already shows', async () => {
+    const fixture = buildCard('shown')
+    const stagedKeys = createStagedKeysState()
+
+    reconcileAddCards(fixture.root, deps(createStagedHeadersState(), stagedKeys), state)
+    await flush()
+    // The draft pane opens its form by itself, so the only password box inside
+    // the card is the list's own once the seat is up.
+    expect(fixture.customPanel.querySelector('.bre-keys-form')).not.toBeNull()
+    expect(fixture.customPanel.querySelectorAll('[data-bre-create-keys]')).toHaveLength(1)
+
+    // More passes over the same card: the list's key box must never be adopted
+    // as an official field again. The live regression did exactly that — it
+    // seated a host under that box, whose open form carried another box, one
+    // nested host per pass, until the card measured 150 000px and the reported
+    // symptom was 点开新增供应商就无限向下扩展.
+    for (let pass = 0; pass < 5; pass += 1) {
+      reconcileAddCards(fixture.root, deps(createStagedHeadersState(), stagedKeys), state)
+      await flush(2)
+    }
+
+    const hosts = fixture.customPanel.querySelectorAll<HTMLElement>('[data-bre-create-keys]')
+    expect(hosts).toHaveLength(1)
+    expect(hosts[0]?.querySelector('[data-bre-create-keys]')).toBeNull()
+    // And the form's own box is not dressed as a managed official field.
+    const formInput = fixture.customPanel.querySelector('.bre-keys-form input[type="password"]')
+    expect(formInput?.closest('.bre-key-managed')).toBeNull()
+  })
+
   it('gives the create card an Advanced tab the tab pass can light up', () => {
     const fixture = buildCard('shown')
     const tabs: EditorTabsState = createEditorTabsState()
@@ -376,8 +405,9 @@ describe('the create-provider card', () => {
     expect(customKeyField?.classList.contains('bre-key-managed')).toBe(true)
     const host = customKeyField?.nextElementSibling
     expect(host instanceof HTMLElement && host.hasAttribute('data-bre-create-keys')).toBe(true)
-    // The list itself is up: the same add entry the edit card's list carries.
-    expect(host instanceof HTMLElement && host.querySelector('.bre-keys-add') !== null).toBe(true)
+    // The list itself is up: the same one open form the edit card's list
+    // carries, since a card with no key yet shows the field it waits for.
+    expect(host instanceof HTMLElement && host.querySelector('.bre-keys-form') !== null).toBe(true)
 
     // The catalogue half keeps its own key field exactly as the page built it:
     // that half stays mounted, and a second seat would stage a second, empty
@@ -406,7 +436,7 @@ describe('the create-provider card', () => {
     expect(keyField?.classList.contains('bre-key-managed')).toBe(true)
     const host = keyField?.nextElementSibling
     expect(host instanceof HTMLElement && host.hasAttribute('data-bre-create-keys')).toBe(true)
-    expect(host instanceof HTMLElement && host.querySelector('.bre-keys-add') !== null).toBe(true)
+    expect(host instanceof HTMLElement && host.querySelector('.bre-keys-form') !== null).toBe(true)
   })
 
   it('gives the seated key fields back with the rest of the card', async () => {

@@ -69,12 +69,19 @@ const EXTRA_ROWS_ATTR = 'data-bre-endpoint-rows'
 const SECOND_ROW_ATTR = 'data-bre-endpoint-row'
 /** Marks the family tag span. */
 const FAMILY_ATTR = 'data-bre-endpoint-family'
+/**
+ * Marks whether the address beside that tag holds anything, so the stylesheet
+ * can draw the family's dot solid once it does and hollow while it is still
+ * being asked for. Cosmetic only: no behaviour reads it back.
+ */
+const FILLED_ATTR = 'data-bre-endpoint-filled'
 /** Marks the address field whose tag shares a row with the input. */
 const ADDRESS_FIELD_ATTR = 'data-bre-endpoint-field'
 /** Marks the address field's own title inside that wrapper. */
 const ADDRESS_TITLE_ATTR = 'data-bre-endpoint-title'
 /** Marks the injected toggle button. */
 const TOGGLE_ATTR = 'data-bre-endpoint-toggle'
+const COUNT_ATTR = 'data-bre-endpoint-count'
 /** Marks a card whose field order was already enforced. */
 const ORDERED_ATTR = 'data-bre-field-order'
 /** Holds the family the main address field currently serves, on that field. */
@@ -277,6 +284,18 @@ function addressTitleOf(urlGroup: HTMLElement, control: HTMLElement): HTMLElemen
  * only a hidden tag still indents the input by the column gap, which would make
  * a protocol the plugin cannot name look misaligned.
  */
+/**
+ * Say whether the address this tag names holds a value yet.
+ *
+ * The row keeps one word ("Anthropic") and the dot beside it carries the state:
+ * solid once an address is stored, hollow while the field is still empty. It is
+ * rewritten only when it changes, because the scan re-runs this on every pass.
+ */
+function markFilled(tag: HTMLElement, filled: boolean): void {
+  const next = filled ? '1' : '0'
+  if (tag.getAttribute(FILLED_ATTR) !== next) tag.setAttribute(FILLED_ATTR, next)
+}
+
 function markAddressRow(urlGroup: HTMLElement, control: HTMLElement, tagged: boolean): void {
   const title = addressTitleOf(urlGroup, control)
   if (!tagged) {
@@ -315,6 +334,7 @@ function decorateAddressLabel(card: HTMLElement, labels: EndpointLabels, t: Endp
   if (tag !== null) {
     if (tag.textContent !== text) tag.textContent = text
     tag.hidden = text.length === 0
+    markFilled(tag, control instanceof HTMLInputElement && control.value.trim().length > 0)
   }
   markAddressRow(urlGroup, control, tag !== null && text.length > 0)
   // Remember which family this field currently serves: switching the protocol to
@@ -490,6 +510,28 @@ function decorateProtocolCards(card: HTMLElement, labels: EndpointLabels, deps: 
 }
 
 /**
+ * The folded-address tally now rides the link instead of sitting beside it.
+ *
+ * It used to be its own span between "API 地址" and "更多端点", so unfolding the
+ * rows deleted a text run in the label's inline-flex line and dragged the link
+ * sideways by the tally's width. The same sentence is a tooltip on the link now:
+ * the line never reflows, and the count stays one hover away.
+ */
+function syncEndpointTally(
+  rows: HTMLElement | null,
+  button: HTMLElement,
+  deps: EndpointDeps,
+): void {
+  const count = rows === null ? 0 : rows.querySelectorAll(`[${SECOND_ROW_ATTR}]`).length
+  const text = count === 0 ? '' : deps.t('keysEndpointsCount', { count })
+  if (text.length === 0) {
+    if (button.hasAttribute('title')) button.removeAttribute('title')
+    return
+  }
+  if (button.getAttribute('title') !== text) button.setAttribute('title', text)
+}
+
+/**
  * Ensure the "更多端点" toggle rides the API ADDRESS field's own label line, right
  * after the label text (user item 4). The official label is an inline-flex box, so
  * joining its children puts the link on the same line as "API 地址" with the host's
@@ -503,6 +545,7 @@ function decorateToggle(card: HTMLElement, labels: EndpointLabels, deps: Endpoin
   // leave it exactly as it was rather than growing a stray disclosure on it.
   if (fieldGroupOf(card, labels.apiProtocol) === undefined) {
     existing?.remove()
+    card.querySelector(`[${COUNT_ATTR}]`)?.remove()
     return
   }
   const urlGroup = fieldGroupOf(card, labels.baseUrl)
@@ -511,11 +554,28 @@ function decorateToggle(card: HTMLElement, labels: EndpointLabels, deps: Endpoin
   if (control === undefined) return
   const title = addressTitleOf(urlGroup, control)
   if (title === undefined || title === existing) return
+
+  // Re-queried on every pass rather than captured once: the host can swap the
+  // second row for a fresh node, and a captured handle would then describe rows
+  // nobody is looking at (and keep the link's tally pinned to a dead element).
+  const rowsOf = (): HTMLElement | null => card.querySelector<HTMLElement>(`[${EXTRA_ROWS_ATTR}]`)
+
+  const rewrite = (button: HTMLButtonElement): void => {
+    const label = deps.t('keysMoreEndpoints')
+    if (button.textContent !== label) button.textContent = label
+    const rows = rowsOf()
+    // Kept in step here instead of only on click: a reshaped card can arrive with
+    // the old attribute, and a disclosure that lies about its state reads worse
+    // than one that simply has no attribute yet.
+    button.setAttribute('aria-expanded', rows !== null && !rows.hidden ? 'true' : 'false')
+    syncEndpointTally(rows, button, deps)
+  }
+
   if (existing !== null) {
-    if (existing.textContent !== deps.t('keysMoreEndpoints')) existing.textContent = deps.t('keysMoreEndpoints')
     // A card reshaped by an older build can still hold the link below the field;
     // it is moved up onto the label line it now belongs to.
     if (existing.parentElement !== title) title.append(existing)
+    rewrite(existing)
     return
   }
   const button = document.createElement('button')
@@ -524,19 +584,20 @@ function decorateToggle(card: HTMLElement, labels: EndpointLabels, deps: Endpoin
   button.className = 'bre-endpoint-toggle'
   button.textContent = deps.t('keysMoreEndpoints')
   button.addEventListener('click', () => {
-    const rows = card.querySelector<HTMLElement>(`[${EXTRA_ROWS_ATTR}]`)
-    if (rows === null) return
-    rows.hidden = !rows.hidden
-    button.setAttribute('aria-expanded', rows.hidden ? 'false' : 'true')
+    const extra = rowsOf()
+    if (extra === null) return
+    extra.hidden = !extra.hidden
+    rewrite(button)
     // Revealing the rows is the one moment their values must be fresh, and a
     // `hidden` flip fires no childList mutation the scan could ride — read them
     // right here instead of waiting for the throttled scan-driven hydrate.
-    if (!rows.hidden) {
+    if (!extra.hidden) {
       const route = routeOf(card, labels)
-      if (route.length > 0) void hydrateRows(rows, route, deps, card, labels)
+      if (route.length > 0) void hydrateRows(extra, route, deps, card, labels)
     }
   })
   title.append(button)
+  rewrite(button)
 }
 
 /**
@@ -632,6 +693,8 @@ async function hydrate(
   await adoptVisibleAddress(card, labels, deps, route, familyOf(card, labels), stored)
   const value = stored[family]
   if (input.value !== value) input.value = value
+  const tag = row.querySelector<HTMLElement>(`.bre-endpoint-family`)
+  if (tag !== null) markFilled(tag, value.length > 0)
 }
 
 /**
@@ -738,9 +801,13 @@ function decorateExtraRows(
     row.remove()
   }
   // The link's caret follows the rows it governs (the click handler keeps it in
-  // step afterwards).
+  // step afterwards), and so does the tally of what is folded away — a protocol
+  // switch changes that count, so it is refreshed here as well.
   const toggle = card.querySelector<HTMLElement>(`[${TOGGLE_ATTR}]`)
-  if (toggle !== null) toggle.setAttribute('aria-expanded', rows.hidden ? 'false' : 'true')
+  if (toggle !== null) {
+    toggle.setAttribute('aria-expanded', rows.hidden ? 'false' : 'true')
+    syncEndpointTally(rows, toggle, deps)
+  }
   const route = routeOf(card, labels)
   if (route.length > 0) {
     // The scan re-runs this decoration constantly (and the hydrate is also the
@@ -775,6 +842,7 @@ function createExtraRow(
   const tag = document.createElement('span')
   tag.className = 'bre-endpoint-family'
   tag.textContent = familyText(family, deps.t)
+  markFilled(tag, false)
   const input = document.createElement('input')
   input.type = 'url'
   input.className = 'bre-text-input bre-endpoint-url'
@@ -797,6 +865,7 @@ function createExtraRow(
     }
     if (input.hasAttribute('aria-invalid')) input.removeAttribute('aria-invalid')
     if (input.hasAttribute('title')) input.removeAttribute('title')
+    markFilled(tag, value.length > 0)
     void (async () => {
       // The family is re-read after the answer: the row may have been re-keyed
       // while the read was in flight, and filing under the stale one misfiles
@@ -1022,7 +1091,7 @@ export function forgetEndpointCache(): void {
 export function teardownProviderEndpoints(): void {
   forgetEndpointCache()
   for (const node of Array.from(document.querySelectorAll<HTMLElement>(
-    `[${EXTRA_ROWS_ATTR}], [${SECOND_ROW_ATTR}], [${TOGGLE_ATTR}], [${PROTOCOL_CARDS_ATTR}], [${FAMILY_ATTR}]`,
+    `[${EXTRA_ROWS_ATTR}], [${SECOND_ROW_ATTR}], [${TOGGLE_ATTR}], [${COUNT_ATTR}], [${PROTOCOL_CARDS_ATTR}], [${FAMILY_ATTR}]`,
   ))) {
     node.remove()
   }

@@ -9,12 +9,11 @@
  * default X" state, and the applied suggestion's provenance pill), the level
  * ladder as a row of toggle pills with the armed levels' wire spellings in a
  * compact row beneath, and the default pick and input modality as pill rows in
- * two columns. Capacity references render as a footnote, and a row mounted by
- * the injector also echoes them into the official capacity inputs above
- * (fill-only; a value the user typed keeps its place). The apply/reset actions
- * sit at the very bottom and own every section.
- *
- * @module dsh-model-think-level/EffortEditor
+ * two columns. The capacities are editable here: the two fields mirror the
+ * official row's own context-window / max-output inputs and write straight back
+ * into them, so this card and the official disclosure are one draft with one
+ * Save (a blank field hands the model back to the catalogue value). The
+ * apply/reset actions sit at the very bottom and own every section.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -42,6 +41,55 @@ import type { EffortEditorApi, EffortWriteIntent, PendingWrite, PendingWritePart
 /** Thousands-grouped token counts, matching the official capacity inputs. */
 const COUNT = new Intl.NumberFormat('en-US')
 
+/** The glyphs this editor draws, on the 16px grid the injected controls use. */
+const TEXT_PATHS: readonly string[] = ['M3.4 4.2h9.2', 'M8 4.2v8.2', 'M5.9 12.4h4.2']
+const IMAGE_PATHS: readonly string[] = [
+  'M4.4 3.4h7.2a1.9 1.9 0 0 1 1.9 1.9v5.4a1.9 1.9 0 0 1-1.9 1.9H4.4a1.9 1.9 0 0 1-1.9-1.9V5.3a1.9 1.9 0 0 1 1.9-1.9Z',
+  'M6.2 7.2a.9.9 0 1 0 0-1.8.9.9 0 0 0 0 1.8Z',
+  'M2.9 11.2 6.1 8.4l2.1 1.9 1.8-1.5 2.7 2.4',
+]
+const WARN_PATHS: readonly string[] = ['M8 3.2 13.6 12.8H2.4L8 3.2Z', 'M8 6.9v2.5', 'M8 11.3h.01']
+
+/** One 12px stroke glyph, beside a modality pill's name or a warning note. */
+function Glyph({ paths }: { paths: readonly string[] }): ReactNode {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={12}
+      height={12}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {paths.map(d => (
+        <path key={d} d={d} />
+      ))}
+    </svg>
+  )
+}
+
+/**
+ * A capacity field's token count, or `undefined` for a blank field.
+ *
+ * The official inputs take plain digits, so the draft keeps the digits alone and
+ * the display groups them: one parser for both directions keeps "1,048,576"
+ * the number the official form already held.
+ */
+function parseCapacity(text: string): number | undefined {
+  const digits = text.replace(/\D/g, '')
+  if (digits === '') return undefined
+  const value = Number(digits)
+  return Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+/** A capacity count as the field shows it when it is not being typed into. */
+function capacityText(value: number | undefined): string {
+  return value === undefined ? '' : COUNT.format(value)
+}
 /** One model row's data the editor needs. */
 export interface EffortModel {
   /** Model id (the settings key). */
@@ -225,12 +273,21 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   // the host autofill writes. Only a fresh Auto-adapt replaces it; Reset
   // discards it along with everything else.
   const appliedCompatRef = useRef<CompatSuggestion | undefined>(undefined)
-  // Modality + capacity parts of the applied suggestion. Capacities are
-  // DISPLAY-ONLY: they render in the reference block and never touch the
-  // official capacity inputs.
+  // Modality part of the applied suggestion.
   const [suggestedInputSource, setSuggestedInputSource] = useState<InputSource | undefined>(undefined)
-  const [referenceContext, setReferenceContext] = useState<number | undefined>(undefined)
-  const [referenceMaxTokens, setReferenceMaxTokens] = useState<number | undefined>(undefined)
+  // The official capacity inputs' draft, mirrored here so the two numbers can be
+  // edited from THIS card (user request: they must be configurable, not a
+  // read-only footnote). The official form stays the single writer -- the mirror
+  // seeds once from it and writes straight back through setCapacities -- so its
+  // own Save is still what persists, and the plugin's document write never grows
+  // a second writer for the same field.
+  const initialCapacity = useRef<{ contextWindow?: number; maxTokens?: number } | undefined>(undefined)
+  if (initialCapacity.current === undefined) initialCapacity.current = api.readCapacities?.() ?? {}
+  const [capacityContext, setCapacityContext] = useState<string>(() => capacityText(initialCapacity.current?.contextWindow))
+  const [capacityMax, setCapacityMax] = useState<string>(() => capacityText(initialCapacity.current?.maxTokens))
+  // Which field the caret is in: the focused one shows the digits alone, so a
+  // grouped value never fights the keyboard.
+  const [capacityFocus, setCapacityFocus] = useState<'context' | 'output' | undefined>(undefined)
   // Once the user edits, the drafts own the row: a re-render that changes
   // the initial props (the official page re-renders on its own edits and on
   // apply) must not overwrite in-flight input. Before any edit the drafts
@@ -445,6 +502,24 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     setMessage(undefined)
   }
 
+  /**
+   * Type into one capacity field.
+   *
+   * Write-through, not a draft: the two fields ARE the official form's fields,
+   * so every keystroke becomes that form's value and the card's own Save
+   * persists it. A cleared field hands the number back to the catalogue (the
+   * official input is emptied rather than pinned to the old value).
+   */
+  const patchCapacity = (which: 'context' | 'output', text: string): void => {
+    const digits = text.replace(/\D/g, '').slice(0, 12)
+    const nextContext = which === 'context' ? digits : capacityContext
+    const nextMax = which === 'output' ? digits : capacityMax
+    setCapacityFocus(which)
+    if (which === 'context') setCapacityContext(digits)
+    else setCapacityMax(digits)
+    api.setCapacities?.({ contextWindow: parseCapacity(nextContext), maxTokens: parseCapacity(nextMax) })
+  }
+
   const applySuggestion = (
     parts: {
       efforts: ReasoningEfforts | false
@@ -480,15 +555,18 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     setSuggestedConfidence(parts.confidence)
     appliedCompatRef.current = parts.compat
     setSuggestedInputSource(parts.inputSource)
-    setReferenceContext(parts.contextWindow)
-    setReferenceMaxTokens(parts.maxTokens)
     // The capacities also reach the row's own official inputs (fill-only, so a
     // number the user typed keeps its place): the official form's draft holds
     // them and its own Save persists them — the same single-writer rule the
     // modality echo follows, which is why they never ride the document write.
     // A suggestion carrying none is not worth a visit to the row's disclosure.
+    // The fields are then re-read rather than copied from the suggestion: what
+    // the official form actually holds is what this row shows.
     if (parts.contextWindow !== undefined || parts.maxTokens !== undefined) {
       api.fillCapacities?.(parts.contextWindow, parts.maxTokens)
+      const echoed = api.readCapacities?.()
+      setCapacityContext(capacityText(echoed?.contextWindow))
+      setCapacityMax(capacityText(echoed?.maxTokens))
     }
     setMessage({
       kind: 'info',
@@ -547,8 +625,14 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     setSuggestedConfidence('low')
     appliedCompatRef.current = undefined
     setSuggestedInputSource(undefined)
-    setReferenceContext(undefined)
-    setReferenceMaxTokens(undefined)
+    // The capacities are the official form's draft, which this card edits
+    // directly: discarding hands the row the values it mounted with, cleared
+    // fields included (a clear is how a field goes back to inheriting).
+    const seed = initialCapacity.current ?? {}
+    setCapacityContext(capacityText(seed.contextWindow))
+    setCapacityMax(capacityText(seed.maxTokens))
+    setCapacityFocus(undefined)
+    api.setCapacities?.({ contextWindow: seed.contextWindow, maxTokens: seed.maxTokens })
     setMessage(undefined)
     // Let the next edit report itself again: the collapsed signature belongs
     // to the intent that was just withdrawn.
@@ -588,6 +672,14 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     ? [...armedLevels, defaultEffort as (typeof LEVEL_ORDER)[number]]
     : armedLevels
 
+  // Output above the window is the upstream's refusal to make, not a rule this
+  // editor can enforce: the numbers are still written, and the note says why the
+  // save may bounce instead of silently correcting the user's arithmetic.
+  const capacityContextValue = parseCapacity(capacityContext)
+  const capacityMaxValue = parseCapacity(capacityMax)
+  const capacityWarn = capacityContextValue !== undefined
+    && capacityMaxValue !== undefined
+    && capacityMaxValue > capacityContextValue
   return (
     <div className="bre-effort-editor" data-plugin={PLUGIN_ID}>
       {/* The one-line head: the master switch, the state it implies, and the
@@ -732,9 +824,9 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                     title={t('modalityText')}
                     onClick={() => { if (modality.declared) clearModality(); else patchImage(false) }}
                   >
+                    <Glyph paths={TEXT_PATHS} />
                     {t('modalityText')}
-                  </button>
-                  <button
+                  </button>                  <button
                     type="button"
                     className={modality.declared && modality.image ? 'bre-lvl is-on' : 'bre-lvl'}
                     disabled={disabled}
@@ -743,6 +835,7 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                     title={t('modalityImage')}
                     onClick={() => { patchImage(!(modality.declared && modality.image)) }}
                   >
+                    <Glyph paths={IMAGE_PATHS} />
                     {t('modalityImage')}
                   </button>
                 </div>
@@ -751,6 +844,52 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
             )}
           </div>
           {staged ? <p className="bre-effort-note">{t('stagedHint')}</p> : null}
+          <div className="bre-effort-caps">
+            <label className="bre-cap">
+              <span className="bre-effort-label">{t('contextWindowLabel')}</span>
+              <span className="bre-cap-box">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="bre-cap-input"
+                  value={capacityFocus === 'context' ? capacityContext : capacityText(capacityContextValue)}
+                  disabled={disabled}
+                  placeholder={t('capacityBlank')}
+                  aria-label={t('contextWindowLabel') + ' ' + String(index + 1)}
+                  onFocus={() => { setCapacityFocus('context') }}
+                  onBlur={() => { setCapacityFocus(undefined) }}
+                  onChange={(event) => { patchCapacity('context', event.target.value) }}
+                />
+                <span className="bre-cap-unit">{t('tokensUnit')}</span>
+              </span>
+            </label>
+            <label className="bre-cap">
+              <span className="bre-effort-label">{t('maxTokensLabel')}</span>
+              <span className="bre-cap-box">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="bre-cap-input"
+                  value={capacityFocus === 'output' ? capacityMax : capacityText(capacityMaxValue)}
+                  disabled={disabled}
+                  placeholder={t('capacityBlank')}
+                  aria-label={t('maxTokensLabel') + ' ' + String(index + 1)}
+                  onFocus={() => { setCapacityFocus('output') }}
+                  onBlur={() => { setCapacityFocus(undefined) }}
+                  onChange={(event) => { patchCapacity('output', event.target.value) }}
+                />
+                <span className="bre-cap-unit">{t('tokensUnit')}</span>
+              </span>
+            </label>
+          </div>
+          {capacityWarn
+            ? (
+              <p className="bre-effort-note bre-warn">
+                <Glyph paths={WARN_PATHS} />
+                {t('capacityRule')}
+              </p>
+            )
+            : null}
           {initialEfforts === false ? <p className="bre-effort-note">{t('reasoningDisabled')}</p> : null}
           {wireRisk === undefined
             ? null
@@ -774,21 +913,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                         ? t('inputHintKnowledge')
                         : t('inputHintHeuristic')}
                   </p>
-                )}
-              {referenceContext === undefined && referenceMaxTokens === undefined
-                ? null
-                : (
-                  <div className="bre-reference">
-                    <span className="bre-reference-title">{t('referenceTitle')}</span>
-                    <span className="bre-reference-values">
-                      {referenceContext === undefined ? null : (
-                        <span>{t('contextWindowLabel')} <b>{COUNT.format(referenceContext)}</b></span>
-                      )}
-                      {referenceMaxTokens === undefined ? null : (
-                        <span>{t('maxTokensLabel')} <b>{COUNT.format(referenceMaxTokens)}</b></span>
-                      )}
-                    </span>
-                  </div>
                 )}
             </div>
           )}

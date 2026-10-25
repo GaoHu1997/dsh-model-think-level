@@ -130,9 +130,10 @@ describe('the seat', () => {
     expect(fixture.keyField.classList.contains('bre-key-managed')).toBe(true)
     const host = seatHostOf(fixture)
     expect(host).not.toBeNull()
-    // The list itself: the draft pane's add entry, from the same component the
-    // edit card renders.
-    expect(host?.querySelector('.bre-keys-add')).not.toBeNull()
+    // The list itself: the draft pane's one open form, from the same component
+    // the edit card renders. A card with no key has nothing to wait for, so the
+    // form is already up rather than hiding behind an add link.
+    expect(host?.querySelector('.bre-keys-form')).not.toBeNull()
 
     // The id and base-URL fields are not key fields: no host, no handover.
     const routeField = fixture.routeInput.parentElement as HTMLElement
@@ -217,8 +218,13 @@ describe('the pane’s staging', () => {
 
   /** Add one key through the list's own form, the way a user does. */
   async function addKey(fixture: Fixture, value: string, alias: string): Promise<void> {
-    buttonByText(fixture.customPanel, en.keysAdd).click()
-    await flush()
+    // The draft pane opens its one form by itself (a card with no key shows the
+    // field it is waiting for, not a link to it), so the add entry is only there
+    // once the form has been dismissed.
+    if (fixture.customPanel.querySelector('.bre-keys-form') === null) {
+      buttonByText(fixture.customPanel, en.keysAdd).click()
+      await flush()
+    }
     const form = fixture.customPanel.querySelector('.bre-keys-form') as HTMLElement
     const inputs = Array.from(form.querySelectorAll('input')) as HTMLInputElement[]
     if (alias.length > 0) type(inputs[0]!, alias)

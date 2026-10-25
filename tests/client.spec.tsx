@@ -536,10 +536,10 @@ describe('client apply()', () => {
        await waitFor(() => trigger.dataset['breProvider'] === 'Aliyun')
        expect(trigger.textContent).toBe('Qwen Max')
 
-      // The level pill is moved onto the session's level by a passive effect, so
-      // it exists one commit BEFORE it carries the value: wait for it rather
-      // than racing the commit.
-      await waitFor(() => wrapper.querySelector('.bre-menu-head .bre-pill')?.textContent === 'Medium')
+      // The level sits under the menu, in the footer's own head: it is moved
+      // onto the session's level by a passive effect, so it exists one commit
+      // BEFORE it carries the value — wait for it rather than racing the commit.
+      await waitFor(() => wrapper.querySelector('.bre-menu-foot .bre-effort-slider-head-value')?.textContent === 'Medium')
        await directory.select({ provider: 'dashscope', model: 'qwen-max' })
        await waitFor(() => trigger.dataset['breProvider'] === 'dashscope')
        await waitFor(() => wrapper.querySelector('.bre-menu-name')?.textContent === 'qwen-max')

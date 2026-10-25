@@ -102,6 +102,17 @@ function hostOf(field: HTMLElement): HTMLDivElement | undefined {
  * field with no key input is handed to {@link resetCreateKeySeat}.
  */
 export function enhanceCreateKeySeat(field: HTMLElement, deps: CreateKeySeatDeps): void {
+  // A field that lives inside a list this module mounted is the plugin's own
+  // rendering — the draft form's key box — and never the page's to adopt.
+  // Seating it would mount a list under that field, whose own form carries
+  // another key box, and so on: one nested host per pass until the card is
+  // metres tall ("点开新增供应商，出现了无限向下扩展", 2026-10-25). `add-card`
+  // filters these out of its field scan as well; this is the seat's own guard,
+  // so no future caller can re-open the hole.
+  if (field.closest(`[${CREATE_KEYS_HOST_ATTR}]`) !== null) {
+    resetCreateKeySeat(field)
+    return
+  }
   const input = keyInputOf(field)
   if (input === undefined) {
     resetCreateKeySeat(field)

@@ -7,7 +7,9 @@
  * provider's two wires, and which one a key should use is a question about the
  * models behind it, not about the acronym. The menu therefore renders its own
  * list: one row per protocol, the protocol's name, and the line that says what
- * it is for, with the one in force ticked (user request, 参考图).
+ * it is for. The row in force takes the accent tint and accent ink — and no
+ * tick: a tick makes the picked row wider than its neighbours, so the list would
+ * shift under the pointer at the very moment of the pick (选中只高亮，不加对勾).
  *
  * It is portalled onto `<body>`: the key list clips its own overflow, so a menu
  * drawn inside the row would be cut off by the panel it belongs to. Fixed
@@ -47,9 +49,6 @@ export interface ProtocolMenuProps {
   readonly onClose: () => void
 }
 
-/** The tick drawn on the option in force. */
-const CHECK_PATH = 'M3.6 8.4 6.4 11.2 12.4 5.2'
-
 /** The gap between the trigger and the menu, in pixels. */
 const MENU_GAP = 6
 
@@ -60,29 +59,7 @@ const MENU_WIDTH = 292
 const MENU_MARGIN = 8
 
 /** The room one option takes, used to decide whether the menu fits below. */
-const OPTION_HEIGHT = 56
-
-/** One stroke glyph, on the same 16px grid the key list draws on. */
-function Glyph({ paths }: { paths: readonly string[] }): ReactNode {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      width={12}
-      height={12}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-    >
-      {paths.map(d => (
-        <path key={d} d={d} />
-      ))}
-    </svg>
-  )
-}
+const OPTION_HEIGHT = 52
 
 /** Where the menu sits: its left edge on the trigger's, below unless it would hang off. */
 function place(anchor: HTMLElement, count: number): { left: number; top: number } {
@@ -215,9 +192,6 @@ export function ProtocolMenu(props: ProtocolMenuProps): ReactNode {
                   onPick(option.value)
                 }}
               >
-                <span className="bre-protocol-option-mark" aria-hidden="true">
-                  {active ? <Glyph paths={[CHECK_PATH]} /> : null}
-                </span>
                 <span className="bre-protocol-option-text">
                   <span className="bre-protocol-option-title">{option.title}</span>
                   <span className="bre-protocol-option-hint">{option.hint}</span>

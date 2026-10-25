@@ -152,8 +152,10 @@ function scopeText(row: KeyRow, t: Translate): string {
   return t('keysScopeCount', { count: row.models.length })
 }
 
-/** The protocols a key may pin, in the picker's order (undefined = any). */
-const PROTOCOL_CHOICES: readonly RouteProtocol[] = ['anthropic-messages', 'openai-completions', 'openai-responses', 'google-generative-ai']
+/** The protocols a key may pin, in the picker's order (undefined = any). The
+ *  order is the one the menus show: the two OpenAI wires first (they are the
+ *  same provider's two APIs, and the common case), then Anthropic, then Gemini. */
+const PROTOCOL_CHOICES: readonly RouteProtocol[] = ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai']
 
 /** The addresses nothing is known about yet. */
 const NO_ENDPOINTS: KeyEndpoints = { openai: null, anthropic: null, gemini: null }
@@ -246,6 +248,23 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   const [nameDraft, setNameDraft] = useState('')
   const [valueDraft, setValueDraft] = useState('')
   const [scopeDraft, setScopeDraft] = useState<readonly string[]>([])
+  /**
+   * The protocol a NEW key pins while its form is open (undefined = automatic).
+   * It rides the create rather than the row's picker because a key's wire is
+   * part of what the user is choosing when they add it: the endpoint family it
+   * signs against decides which address that key uses.
+   */
+  const [protocolDraft, setProtocolDraft] = useState<RouteProtocol | undefined>(undefined)
+
+  /**
+   * A create card opens with its key form already unfolded: a provider with no
+   * key is a card that cannot save, so the one field it must have waits for no
+   * click. It is a mount-time default only — closing the form stays closed.
+   */
+  useEffect(() => {
+    if (draft !== true) return
+    setEditing({ kind: 'add' })
+  }, [draft])
   const [confirming, setConfirming] = useState<string | undefined>(undefined)
   /** Which row's protocol menu is open, and the trigger it hangs off. */
   const [protocolMenu, setProtocolMenu] = useState<{ ref: string; anchor: HTMLElement } | undefined>(undefined)
@@ -329,6 +348,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     setNameDraft('')
     setValueDraft('')
     setScopeDraft([])
+    setProtocolDraft(undefined)
   }
 
   const openForm = (kind: 'alias' | 'value' | 'scope', row: KeyRow): void => {
@@ -337,6 +357,9 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     setValueDraft('')
     // The scope chips are seeded with the model list the row currently holds.
     setScopeDraft(row.models ?? [])
+    // Only a create carries a protocol pin; once the key exists its own picker
+    // owns the protocol, so an edit form must not silently re-pin it.
+    setProtocolDraft(undefined)
     setConfirming(undefined)
   }
 
@@ -353,13 +376,32 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     // An alias-only edit accepts an empty field: that is how a label is cleared.
     if (kind !== 'alias' && kind !== 'scope' && !isLegalKeyValue(valueDraft)) return
     const alias = normalizeKeyAlias(nameDraft)
+    // Captured before the await: the form may be re-rendered (or cleared) while
+    // the create is in flight, and the pin must ride the protocol the user saw.
+    const pinnedProtocol = protocolDraft
     setBusy(true)
     void (async () => {
       try {
         if (kind === 'add') {
+          // The reference is minted by the host, so only the answer names it:
+          // the new row is the one this list did not already hold.
+          const before = new Set((rows ?? []).map(row => row.ref))
           const answer = await client.add(route, valueDraft, alias)
-          adopt(answer, t('keysAdded'))
-          if (answer.ok) closeForm()
+          if (!answer.ok) {
+            adopt(answer, t('keysAdded'))
+            return
+          }
+          // A protocol chosen in the form rides the create: a key's wire is part
+          // of what is being chosen here, and pinning it in the same gesture
+          // spares the user a second trip through the row's picker.
+          const created = pinnedProtocol === undefined
+            ? undefined
+            : answer.entries.find(entry => !before.has(entry.ref))
+          const pinned = created === undefined
+            ? answer
+            : await client.setProtocol(route, created.ref, pinnedProtocol)
+          adopt(pinned, t('keysAdded'))
+          if (pinned.ok) closeForm()
           return
         }
         if (ref === undefined) return
@@ -424,11 +466,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                     disabled={busy}
                     onClick={() => toggleModel(model)}
                   >
-                    {selected ? (
-                      <span className="bre-keys-chip-mark" aria-hidden="true">
-                        <Glyph paths={[CHECK_PATH]} />
-                      </span>
-                    ) : null}
                     {model}
                   </button>
                 )
@@ -466,6 +503,28 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
             ) : null}
           </div>
         )}
+        {kind === 'add' ? (
+          <div className="bre-keys-chips" role="group" aria-label={t('keysProtocolCreate')}>
+            {protocolOptions(endpoints, undefined, t, draft === true).map(option => {
+              const value = option.value === '' ? undefined : (option.value as RouteProtocol)
+              const selected = protocolDraft === value
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={selected ? 'bre-keys-chip is-selected' : 'bre-keys-chip'}
+                  aria-pressed={selected}
+                  title={option.hint}
+                  disabled={busy}
+                  onClick={() => setProtocolDraft(value)}
+                >
+                  {option.title}
+                </button>
+              )
+            })}
+          </div>
+        ) : null}
+        {kind === 'add' ? <p className="bre-keys-hint">{t('keysProtocolCreateHint')}</p> : null}
         {wantsScope ? <p className="bre-keys-hint">{t('keysScopeHint')}</p> : null}
         {illegal ? (
           <p className="bre-effort-message bre-error" role="alert">
@@ -597,7 +656,11 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                 <span className={row.alias === undefined ? 'bre-keys-mask bre-keys-mask-plain' : 'bre-keys-mask'}>
                   {previewOf(row, t)}
                 </span>
-                <span className="bre-keys-actions">
+                <span
+                  className={
+                    confirming === row.ref ? 'bre-keys-actions is-confirming' : 'bre-keys-actions'
+                  }
+                >
                   {confirming === row.ref ? (
                     <>
                       <button
@@ -676,7 +739,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                       {draft === true ? null : (
                         <button
                           type="button"
-                          className="bre-link-button"
+                          className="bre-link-button bre-keys-scope"
                           disabled={busy}
                           title={t('keysScope', { name })}
                           onClick={() => openForm('scope', row)}

@@ -234,6 +234,13 @@ function inputsOf(root: HTMLElement): HTMLInputElement[] {
   return Array.from(form.querySelectorAll('input'))
 }
 
+/** The chips in the open form, in the order they are drawn. */
+function chipsOf(root: HTMLElement): HTMLButtonElement[] {
+  const form = formRowOf(root)
+  if (form === null) throw new Error('no form is open')
+  return Array.from(form.querySelectorAll<HTMLButtonElement>('.bre-keys-chip'))
+}
+
 /** Type into a React-controlled input the way a browser does. */
 function type(input: HTMLInputElement, value: string): void {
   const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
@@ -636,10 +643,11 @@ describe('the actions on a row', () => {
       'Follows the provider’s own protocol.',
       'Anthropic API · Claude models',
     ])
-    // The choice in force is ticked, and only it.
+    // The choice in force is worn as a tint, never a tick: a tick would widen
+    // the selected row and shift the list under the pointer as it is clicked.
     expect(options.map((option) => option.getAttribute('aria-selected'))).toEqual(['true', 'false'])
-    expect(options[0].querySelector('.bre-protocol-option-mark svg')).not.toBeNull()
-    expect(options[1].querySelector('.bre-protocol-option-mark svg')).toBeNull()
+    expect(options[0].querySelector('.bre-protocol-option-mark')).toBeNull()
+    expect(options[1].querySelector('.bre-protocol-option-mark')).toBeNull()
 
     options[1].click()
     await flush()
@@ -717,8 +725,9 @@ describe('the actions on a row', () => {
     // Only the OpenAI family has an address, so only its two wires are on offer.
     expect(await values('key3')).toEqual(['', 'openai-completions', 'openai-responses'])
     // The pinned key keeps its own protocol even though that family has no address
-    // any more: the row must not come back reading as "Default protocol".
-    expect(await values('key2')).toEqual(['', 'anthropic-messages', 'openai-completions', 'openai-responses'])
+    // any more: the row must not come back reading as "Default protocol". It sits
+    // last because the offered families come first, in the picker's own order.
+    expect(await values('key2')).toEqual(['', 'openai-completions', 'openai-responses', 'anthropic-messages'])
   })
 
   it('offers Gemini once the gemini address is configured, and pins it', async () => {
@@ -960,6 +969,92 @@ describe('adding a key', () => {
     expect(panel.root.querySelector('.bre-status')?.textContent).toBe('Key stored.')
   })
 
+  it('carries the protocol chosen in the form onto the key it just created', async () => {
+    const { client, calls } = recorder({
+      list: async () =>
+        state({
+          entries: [],
+          // All three families have an address, so all four wires are on offer:
+          // the pin chips follow the addresses the provider actually holds.
+          endpoints: {
+            openai: 'https://openai.example/v1',
+            anthropic: 'https://anthropic.example/v1',
+            gemini: 'https://gemini.example/v1',
+          },
+        }),
+      add: async () => state({ entries: [row({ ref: 'key-2' })] }),
+    })
+    const panel = mount({ client })
+    await flush()
+    buttonByText(panel.root, 'Add another key').click()
+    await flush()
+
+    // The chips under the secret name the wires a new key may pin, automatic
+    // first, in the order the menu is read.
+    expect(chipsOf(panel.root).map((chip) => chip.textContent)).toEqual([
+      'Default protocol',
+      'Chat Completions',
+      'Responses',
+      'Anthropic',
+      'Gemini',
+    ])
+    expect(chipsOf(panel.root).map((chip) => chip.getAttribute('aria-pressed'))).toEqual([
+      'true',
+      'false',
+      'false',
+      'false',
+      'false',
+    ])
+
+    chipsOf(panel.root)[2]?.click()
+    await flush()
+    expect(chipsOf(panel.root).map((chip) => chip.getAttribute('aria-pressed'))).toEqual([
+      'false',
+      'false',
+      'true',
+      'false',
+      'false',
+    ])
+    // A tint says which chip is chosen; no tick is drawn, so no chip changes
+    // width as the choice moves.
+    expect(chipsOf(panel.root)[2]?.className).toContain('is-selected')
+    expect(chipsOf(panel.root)[0]?.querySelector('.bre-keys-chip-mark')).toBeNull()
+
+    const secret = inputsOf(panel.root)[1]
+    if (secret !== undefined) type(secret, 'sk-live-1234')
+    await flush()
+    buttonByText(formRowOf(panel.root) as HTMLElement, 'Add').click()
+    await flush()
+
+    expect(calls.filter((call) => call.op === 'add')).toEqual([{ op: 'add', args: ['ofox', 'sk-live-1234', undefined] }])
+    // The pin rides the create: the reference the host just minted is told the
+    // wire the form showed, in the same gesture.
+    expect(calls.filter((call) => call.op === 'setProtocol')).toEqual([
+      { op: 'setProtocol', args: ['ofox', 'key-2', 'openai-responses'] },
+    ])
+  })
+
+  it('creates the key without a pin when the automatic chip stays chosen', async () => {
+    const { client, calls } = recorder({
+      list: async () => state({ entries: [] }),
+      add: async () => state({ entries: [row({ ref: 'key-2' })] }),
+    })
+    const panel = mount({ client })
+    await flush()
+    buttonByText(panel.root, 'Add another key').click()
+    await flush()
+
+    const secret = inputsOf(panel.root)[1]
+    if (secret !== undefined) type(secret, 'sk-live-1234')
+    await flush()
+    buttonByText(formRowOf(panel.root) as HTMLElement, 'Add').click()
+    await flush()
+
+    expect(calls.filter((call) => call.op === 'add')).toHaveLength(1)
+    // Automatic is the absence of a pin, not a pin to '' — nothing is written.
+    expect(calls.filter((call) => call.op === 'setProtocol')).toEqual([])
+  })
+
   it('leaves the label out when only a value was given', async () => {
     const { client, calls } = recorder()
     const panel = mount({ client })
@@ -1127,13 +1222,29 @@ describe('the draft list (the create card)', () => {
     rowOf(panel.root, 'sk-a...z9').querySelector<HTMLButtonElement>('.bre-keys-protocol')?.click()
     await flush()
 
-    // Auto plus all four pins, even though no endpoint family is configured.
+    // Auto plus all four pins, even though no endpoint family is configured,
+    // in the order the picker reads: the two OpenAI wires, then Anthropic, then
+    // Gemini.
     expect(menuValues()).toEqual([
       '',
-      'anthropic-messages',
       'openai-completions',
       'openai-responses',
+      'anthropic-messages',
       'google-generative-ai',
     ])
+  })
+
+  it('opens its key form by itself — a card with no key still has its one field', async () => {
+    const { client } = recorder({ list: async () => state({ entries: [] }) })
+    const panel = mount({ client, draft: true })
+    await flush()
+
+    expect(formRowOf(panel.root)).not.toBeNull()
+    // Closing it stays closed: the unfolded form is a mount-time default, not a
+    // mode the list keeps pushing back open.
+    buttonByText(panel.root, COPY.keysCancel).click()
+    await flush()
+    expect(formRowOf(panel.root)).toBeNull()
+    expect(panel.root.querySelector('.bre-keys-add-row')).not.toBeNull()
   })
 })

@@ -24,9 +24,14 @@ const COPY: Record<string, string> = {
   keysProtocolShortResponses: 'Responses',
   keysProtocolShortAnthropic: 'Anthropic',
   keysMoreEndpoints: 'More endpoints',
+  keysEndpointsCount: '{count} more',
 }
 
-const t = (key: string): string => COPY[key] ?? key
+const t = (key: string, params?: Record<string, string | number>): string => {
+  const raw = COPY[key] ?? key
+  if (params === undefined) return raw
+  return raw.replace(/\{(\w+)\}/g, (_match, name: string) => String(params[name] ?? ''))
+}
 
 /** A stand-in transport that records what was persisted. */
 function fakeClient(stored: { openai: string | null; anthropic: string | null; gemini?: string | null } = { openai: null, anthropic: null, gemini: null }) {
@@ -242,6 +247,30 @@ describe('the reshaped provider card', () => {
     // It is not a sibling of the field group any more, and not in the rows.
     expect(toggle.previousElementSibling).not.toBe(urlGroup)
     expect(card.querySelector('[data-bre-endpoint-rows]')?.contains(toggle)).toBe(false)
+  })
+
+  it('holds the label line still as the rows unfold, so the link cannot slide', () => {
+    // User report: the folded-row tally sat between the label and the link, so
+    // unfolding deleted a text run and dragged 更多端点 sideways by its width.
+    // The tally rides the link's tooltip now; the line's contents are identical
+    // in both states, which is exactly what keeps the button in place.
+    const card = buildCard({ protocol: 'openai-completions' })
+    decorateProviderCard(card, LABELS, { t })
+    const toggle = card.querySelector<HTMLButtonElement>('[data-bre-endpoint-toggle]')
+    if (toggle === null) throw new Error('no disclosure')
+    const title = toggle.parentElement
+    if (title === null) throw new Error('no label line')
+
+    const folded = { children: title.children.length, text: title.textContent }
+    // The label text and the link, and nothing between them to take up room.
+    expect(folded.children).toBe(1)
+    expect(folded.text).toBe('Base URLMore endpoints')
+    // The count still reaches the user, out of the line's flow.
+    expect(toggle.getAttribute('title')).toBe('2 more')
+
+    toggle.click()
+    expect({ children: title.children.length, text: title.textContent }).toEqual(folded)
+    expect(toggle.getAttribute('title')).toBe('2 more')
   })
 
   it('keeps the extra address rows out of the way until they are asked for', () => {

@@ -7,6 +7,77 @@
 
 /** The stylesheet text, inserted once into <head> by the client apply(). */
 export const STYLES = `
+/* ---- Quiet Precision: the plugin's own token layer ----
+   Every value below is a HOST design-platform token (--dsw-*) with the light
+   theme's literal as the fallback, so the plugin inherits a theme switch for
+   free instead of carrying a second palette. The few values the platform has no
+   name for (a 10% accent tint, the slider's track grey) are declared here once
+   and re-declared under the host's dark attribute — the plugin never hard-codes
+   a colour in a component rule.
+
+   The layer is declared on BOTH :root and body on purpose. A custom property
+   resolves var() where it is DECLARED, not where it is used: declared on :root
+   alone, --bre-ink would read the alias chain as the <html> element sees it, and
+   the host republishes its dark aliases on body[data-ds-dark-theme] — a
+   descendant — so every value here would stay frozen at the light fallback.
+   Declaring it again on body makes each var() resolve against the element that
+   actually carries the theme. */
+:root,
+body {
+  --bre-ink: var(--dsw-alias-label-primary, #0f1115);
+  --bre-ink-2: var(--dsw-alias-label-secondary, #61666b);
+  --bre-ink-3: var(--dsw-alias-label-tertiary, #81858c);
+  /* label-dimmed is the host's disabled/skeleton tone — bluish-200 #e1e5ee on
+     white, bluish-750 #43454a on #292929. Invisible as body copy, and it was what
+     every placeholder and muted value inherited. Dimmed now stops at tertiary, and
+     hint copy gets its own token a step darker so descriptions read without
+     competing with real values. */
+  --bre-ink-4: var(--dsw-alias-label-tertiary, #81858c);
+  --bre-ink-hint: var(--dsw-alias-label-secondary, #61666b);
+  --bre-surface: var(--dsw-alias-bg-base, #ffffff);
+  --bre-sunken: var(--dsw-alias-bg-module-platform, #f5f6f7);
+  --bre-sunken-2: var(--dsw-alias-fill-tertiary, #f1f3f5);
+  --bre-track: #e9ecf2;
+  --bre-hover: var(--dsw-alias-interactive-bg-hover, #2631480f);
+  --bre-active: var(--dsw-alias-interactive-bg-active, #2631481a);
+  --bre-line-1: var(--dsw-alias-border-l1, #0000000a);
+  --bre-line-2: var(--dsw-alias-border-l2, #0000001a);
+  --bre-line-3: var(--dsw-alias-border-l3, #0000001f);
+  --bre-line-4: var(--dsw-alias-border-l4, #00000029);
+  --bre-accent: var(--dsw-alias-link, #4176e6);
+  --bre-accent-ink: #2f4c8f;
+  --bre-accent-weak: #edf3fe;
+  --bre-accent-line: #4176e640;
+  --bre-accent-glow: #4176e61f;
+  --bre-ok: var(--dsw-alias-state-success-primary, #22c55e);
+  --bre-warn: var(--dsw-alias-state-warn-label, #dd8629);
+  --bre-danger: var(--dsw-alias-state-error-primary, #ec1313);
+  --bre-danger-weak: #fef2f2;
+  --bre-r-xs: 4px;
+  --bre-r-sm: 8px;
+  --bre-r-md: 12px;
+  --bre-r-pill: 999px;
+  --bre-switch-track: #cfd3d6;
+  --bre-switch-knob: #ffffff;
+  --bre-ease: cubic-bezier(.4, 0, .2, 1);
+  --bre-t: .16s;
+  --bre-shadow-pop: 0 2px 5px #00000009, 0 12px 32px -8px #0f11151f;
+}
+body[data-ds-dark-theme] {
+  --bre-ink-4: var(--dsw-alias-label-tertiary, #adb2b8);
+  --bre-surface: #292929;
+  --bre-sunken: #353638;
+  --bre-sunken-2: #3d3e40;
+  --bre-track: #434446;
+  --bre-accent-ink: #d3e2ff;
+  --bre-accent-weak: #1e335c;
+  --bre-accent-line: #7aaaff40;
+  --bre-accent-glow: #7aaaff26;
+  --bre-danger-weak: #3a1b18;
+  --bre-switch-track: #4a4b4d;
+  --bre-shadow-pop: 0 2px 5px #00000059, 0 12px 32px -8px #000000a6;
+}
+
 /* The injector's mount wrapper. It — not the editor inside it — is the item
    placed into the official row disclosure's repeat(auto-fit, minmax(160px,1fr))
    grid (context window and max tokens take two cells), so the span belongs
@@ -108,65 +179,79 @@ export const STYLES = `
   flex-wrap: wrap;
   gap: 5px;
 }
+/* The level ladder and the modality pair share one pill face: 28px, an
+  8px corner and a hairline stroke, so a row of them reads as one control. The
+  armed pill is the DESIGN's selection — accent tint, accent edge, accent ink,
+  and NO tick (选中的档位高亮即可，无需对勾: a second glyph would also shift the
+  row's width every time a level is clicked). */
 .bre-lvl {
   appearance: none;
   display: inline-flex;
   align-items: center;
-  height: 25px;
-  padding: 0 9px;
-  border-radius: 999px;
-  border: 1px solid var(--dsw-alias-border-l3, #0000001f);
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: var(--bre-r-sm);
+  border: 1px solid var(--bre-line-3);
   background: transparent;
-  color: var(--dsw-alias-label-primary, #0f1115);
+  color: var(--bre-ink);
   font: inherit;
   font-size: 12px;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  transition: background var(--bre-t) var(--bre-ease), border-color var(--bre-t) var(--bre-ease), color var(--bre-t) var(--bre-ease);
 }
 .bre-lvl:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
+  background: var(--bre-hover);
 }
 .bre-lvl:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #4d6bfe);
+  border-color: var(--bre-accent);
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
 }
 .bre-lvl:disabled { opacity: 0.55; cursor: default; }
 .bre-lvl.is-on {
-  border-color: transparent;
-  background: var(--dsw-alias-brand-primary-muted, #eef2ff);
-  color: var(--dsw-alias-brand-primary, #3b82f6);
+  border-color: var(--bre-accent-line);
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
   font-weight: 500;
 }
+/* The modality pill's glyph follows its name's state: quiet ink when the
+  declaration does not carry it, the accent when it does. */
+.bre-lvl svg { flex: none; opacity: 0.75; }
+.bre-lvl.is-on svg { opacity: 1; }
 /* The slider's head, written above the track (进度条上方：思考等级 + 当前等级):
-   the section name, then the level under the thumb. The value's colour is the
-   INLINE ramp hue of that stop — the same hue the thumb and the name under the
-   active stop wear — so the head follows a drag preview live. */
+   the section name on the left, the level under the thumb on the right. One
+   accent, so the value reads as "this is the current setting", not as a rank. */
 .bre-effort-slider-head {
   display: flex;
   align-items: baseline;
-  gap: 6px;
-  margin-bottom: 4px;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
 }
 .bre-effort-slider-head-label {
-  font-size: 13px;
+  font-size: 11.5px;
   line-height: 18px;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--bre-ink-3);
 }
 .bre-effort-slider-head-value {
-  font-size: 13px;
+  font-size: 12.5px;
   line-height: 18px;
-  font-weight: 500;
-  /* A pre-style fallback only: the component always writes the active stop's
-     ramp hue inline. */
-  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+  letter-spacing: -.005em;
+  color: var(--bre-accent-ink);
 }
 /* The level slider: the composer menu's reasoning-level footer. A long ladder
    wrapped its capsule row inside the popover (思考等级选择换成进度条样式); a
    track is fixed-length whatever the ladder's size, the stop names written
-   below it, every stop on the cool→hot gradient ramp — the hue itself reads
-   as the effort's intensity (进度条渐变色，不同的等级不同的颜色). */
+   below it.
+
+   The rainbow ramp is GONE: a red stop read as "danger" where the interface
+   meant "more", and the seven-hue scale was the one place the plugin spoke a
+   colour language the host never uses. What is left is the host's own accent
+   for "where the thumb is" and tick marks for "how many stops there are". */
 .bre-effort-slider {
   position: relative;
   height: 18px;
@@ -179,64 +264,74 @@ export const STYLES = `
   left: 0;
   right: 0;
   top: 50%;
-  height: 4px;
+  height: 6px;
   transform: translateY(-50%);
   border-radius: 999px;
-  background: var(--dsw-alias-fill-tertiary, #ebeef2);
+  background: var(--bre-track);
 }
 .bre-effort-slider:focus-visible {
   outline: none;
   border-radius: 999px;
-  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #4d6bfe);
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
 }
 .bre-effort-slider-fill {
   position: absolute;
   left: 0;
   right: 0;
   top: 50%;
-  height: 4px;
+  height: 6px;
   transform: translateY(-50%);
   border-radius: 999px;
-  /* The gradient and the reveal are written INLINE: the fill spans the whole
-     track with its stops in track coordinates, and a clip-path opens it to the
-     thumb — a width-shrunk gradient would compress its hues as the level
-     moves. This solid brand colour is only the never-seen pre-style fallback. */
-  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  background: var(--bre-accent);
+  pointer-events: none;
+}
+/* The remaining stops, sunk into the track as 2px holes. Painted white on the
+   light theme and near-black on the dark one: they are holes, not dots, so they
+   take the surface colour rather than an ink colour. */
+.bre-effort-slider-tick {
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 2px;
+  margin-left: -1px;
+  margin-top: -1px;
+  border-radius: 50%;
+  background: var(--bre-surface);
+  opacity: .9;
   pointer-events: none;
 }
 .bre-effort-slider-thumb {
   position: absolute;
   top: 50%;
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   border-radius: 999px;
   transform: translate(-50%, -50%);
-  /* The thumb's own colour is the inline ramp hue of the stop under it; the
-     brand colour here is only the fallback. */
-  background: var(--dsw-alias-brand-primary, #4d6bfe);
-  box-shadow: 0 0 0 2px var(--dsw-alias-bg-primary, #fff);
+  background: var(--bre-surface);
+  box-shadow: 0 0 0 1px var(--bre-accent-line), 0 1px 3px #0f11152e;
   pointer-events: none;
 }
 /* The stops, written under the track: first left-aligned, last right-aligned,
    the middle ones centred on their stop, so the row never wraps. */
 .bre-effort-slider-labels {
   position: relative;
-  height: 16px;
-  margin-top: 2px;
+  height: 14px;
+  margin: 5px 2px 0;
 }
 .bre-effort-slider-label {
   position: absolute;
   transform: translateX(-50%);
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-secondary, #6b7280);
+  font-size: 9.5px;
+  line-height: 14px;
+  letter-spacing: -.02em;
+  color: var(--bre-ink-hint);
   white-space: nowrap;
 }
 .bre-effort-slider-label.is-first { transform: none; }
 .bre-effort-slider-label.is-last { transform: translateX(-100%); }
 .bre-effort-slider-label.is-on {
-  color: var(--dsw-alias-brand-primary, #4d6bfe);
-  font-weight: 500;
+  color: var(--bre-accent-ink);
+  font-weight: 600;
 }
 /* A section: its label row (label, hint, trailing action) and its body. */
 .bre-effort-sec { display: flex; flex-direction: column; }
@@ -397,7 +492,9 @@ export const STYLES = `
   font-size: 14px;
   line-height: 22px;
 }
-.bre-text-input::placeholder { color: var(--dsw-alias-label-dimmed); }
+/* Dimmed directly would be the host's skeleton tone (#e1e5ee) — the same trap the
+   ink tokens now route around; placeholders read at tertiary like every other one. */
+.bre-text-input::placeholder { color: var(--bre-ink-4); }
 .bre-select:focus, .bre-text-input:focus {
   outline: none;
   border-color: var(--dsw-alias-brand-primary);
@@ -426,20 +523,64 @@ export const STYLES = `
   flex-direction: column;
   gap: 3px;
 }
-.bre-reference {
-  /* The capacity reference is a footnote, not a block: no dashed box, no
-     padding of its own — it hangs under the section as quiet tertiary text
-     and never reads as a second panel inside the card. */
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 14px;
-  padding: 2px 0 0;
-  font-size: 11px;
-  color: var(--dsw-alias-label-tertiary);
+/* The two capacities are EDITABLE fields, not a footnote (user request: 上下文
+  参数/最大长度这两个参数需要可以配置): each is the row's own official input,
+  mirrored here, so the label sits above a sunken field with the unit inside it.
+  Blank is a value — 沿用目录值 — which is why the placeholder says so. */
+.bre-effort-caps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 18px;
 }
-.bre-reference-title { font-weight: 600; }
-.bre-reference-values { display: inline-flex; gap: 14px; }
+.bre-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.bre-cap-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: var(--bre-r-sm);
+  border: 1px solid transparent;
+  background: var(--bre-sunken);
+  transition: background var(--bre-t) var(--bre-ease), border-color var(--bre-t) var(--bre-ease), box-shadow var(--bre-t) var(--bre-ease);
+}
+.bre-cap-box:hover { background: var(--bre-sunken-2); }
+.bre-cap-box:focus-within {
+  background: var(--bre-surface);
+  border-color: var(--bre-accent);
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
+}
+.bre-cap-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--bre-ink);
+}
+.bre-cap-input::placeholder { color: var(--bre-ink-4); }
+.bre-cap-input:disabled { color: var(--bre-ink-4); cursor: default; }
+.bre-cap-unit {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--bre-ink-hint);
+}
+.bre-effort-note.bre-warn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--bre-warn);
+}
+.bre-effort-note.bre-warn svg { flex: none; }
 /* ---- Composer model menu (mounted inside the OFFICIAL menu) ----
    The body and host sizing follow HanaAyane's dsh-reasoning-effort (MIT).
    The model and reasoning-level rows below use the current row/list UI. */
@@ -483,30 +624,34 @@ export const STYLES = `
 }
 
 /* ---- Model switcher body ----
-   One quiet head names the current model and its level; the provider and model
-   columns are ALWAYS visible (no drill-in row); a resident search box sits
-   above the columns; the reasoning level is switched in place as a segmented
-   footer. No panel ever opens or closes, so the body's height is settled at
-   mount and the commit paths carry no re-measure dance. */
+   One quiet head names the current model; the provider and model columns are
+   ALWAYS visible (no drill-in row); a resident search box sits above them; the
+   reasoning level is switched in place on a single-accent track. No panel ever
+   opens or closes, so the body's height is settled at mount and the commit paths
+   carry no re-measure dance.
+
+   The redesign's two rules on this surface: no boxed-in-box (the only strokes
+   are the search's focus ring and one hairline between the columns), and one
+   accent, spent only on "this is the selection". */
 .bre-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
-/* The head: the row label on the left, the current model pushed right (name in
-   primary ink, the provider muted behind it) and the level pill at the far
-   right — the pill is the same brand tint every "selected" surface wears. */
+/* The head: a small caps-free label on the left, the current model pushed right
+   with its provider muted behind it. The level used to be repeated here as a
+   pill; it now lives once, in the footer, where it is also editable. */
 .bre-menu-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 24px;
+  height: 30px;
   padding: 0 2px;
 }
 .bre-menu-cur {
   display: inline-flex;
   align-items: baseline;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
   margin-left: auto;
 }
@@ -514,52 +659,43 @@ export const STYLES = `
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 150px;
   font-size: 13px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+  letter-spacing: -.005em;
+  color: var(--bre-ink);
 }
 .bre-menu-prov {
   flex: none;
-  font-size: 11px;
-  color: var(--dsw-alias-label-tertiary);
-  white-space: nowrap;
-}
-.bre-pill {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  height: 22px;
-  padding: 0 9px;
-  border-radius: 999px;
-  background: var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .12));
-  color: var(--dsw-alias-brand-primary, #4d6bfe);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
+  font-size: 10.5px;
+  color: var(--bre-ink-hint);
   white-space: nowrap;
 }
 /* The resident search. Deliberately its OWN class family (not the official
    pane's .bre-search-input-*): the replica and the official search box share a
    menu, and every probe that looks for the official box must not find the
-   replica's. The rules mirror the official box's look one to one. */
-.bre-menu-search { padding-bottom: 2px; }
+   replica's. The box is a sunken well, not an outlined field: the field's stroke
+   would be the second rectangle on a surface that already has the card's edge. */
+.bre-menu-search { padding: 0; }
 .bre-menu-search-box {
   display: flex;
   align-items: center;
   position: relative;
   width: 100%;
-  height: 32px;
-  padding: 0 8px;
+  height: 30px;
+  padding: 0 4px 0 8px;
   box-sizing: border-box;
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.06));
-  border: 0.5px solid var(--dsw-alias-border-l4, rgba(255, 255, 255, 0.12));
-  color: var(--dsw-alias-label-primary);
-  transition: border-color 150ms ease, box-shadow 150ms ease;
+  border-radius: var(--bre-r-sm);
+  background: var(--bre-sunken);
+  border: 1px solid transparent;
+  color: var(--bre-ink-4);
+  transition: background var(--bre-t) var(--bre-ease), border-color var(--bre-t) var(--bre-ease),
+    box-shadow var(--bre-t) var(--bre-ease);
 }
 .bre-menu-search-box:focus-within {
-  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
-  box-shadow: 0 0 0 3px var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .14));
+  background: var(--bre-surface);
+  border-color: var(--bre-accent);
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
 }
 .bre-menu-search-icon {
   display: flex;
@@ -569,10 +705,10 @@ export const STYLES = `
   width: 16px;
   height: 16px;
   margin-right: 6px;
-  color: var(--dsw-alias-label-tertiary, #81858c);
+  color: inherit;
   pointer-events: none;
 }
-.bre-menu-search-icon svg { width: 14px; height: 14px; }
+.bre-menu-search-icon svg { width: 13px; height: 13px; }
 .bre-menu-search-input {
   flex: 1 1 auto;
   min-width: 0;
@@ -581,34 +717,34 @@ export const STYLES = `
   border: none;
   outline: none;
   background: transparent;
-  color: inherit;
+  color: var(--bre-ink);
   font: inherit;
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 12.5px;
+  line-height: 18px;
 }
 .bre-menu-search-input::placeholder {
-  color: var(--dsw-alias-label-tertiary, #81858c);
-  opacity: 0.85;
+  color: var(--bre-ink-4);
+  opacity: 1;
 }
 .bre-menu-search-clear {
   display: flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
   margin-left: 4px;
   padding: 0;
   border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary, #81858c);
+  border-radius: 5px;
+  background: var(--bre-sunken-2);
+  color: var(--bre-ink-3);
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background var(--bre-t) var(--bre-ease), color var(--bre-t) var(--bre-ease);
 }
 .bre-menu-search-clear:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.1));
-  color: var(--dsw-alias-label-primary);
+  background: var(--bre-active);
+  color: var(--bre-ink);
 }
 .bre-menu-search-clear svg { width: 12px; height: 12px; }
 /* The provider cell's model count, where the drill chevron used to sit: the
@@ -616,21 +752,22 @@ export const STYLES = `
 .bre-provider-count {
   flex: none;
   margin-left: auto;
-  font-size: 11px;
-  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--bre-ink-hint);
 }
 /* While the search holds a query the model column lists matches across every
-   provider; the muted prefix says which one each row belongs to. */
-.bre-option-origin { color: var(--dsw-alias-label-tertiary); }
-/* The footer: the reasoning level switched IN PLACE — a head naming the section
-   and the current level (进度条上方：思考等级 + 当前等级) above the gradient
-   track, the stop names written below it. The track and the names span the full
+   provider; the muted prefix says which one each row belongs to. */ 
+.bre-option-origin { color: var(--bre-ink-hint); }
+/* The footer: the reasoning level switched IN PLACE — its name on the left and
+   the level under the thumb on the right, above a 6px track whose stops are
+   tick marks and whose names are written under it. The track spans the full
    width, so each name sits under its own stop whatever the ladder's size. */
 .bre-menu-foot {
   display: flex;
   flex-direction: column;
   padding-top: 8px;
-  border-top: 1px solid var(--dsw-alias-border-l4);
+  border-top: 1px solid var(--bre-line-1);
 }
 .bre-menu-slider {
   display: flex;
@@ -648,9 +785,11 @@ export const STYLES = `
    around it — two stacked surfaces where every other menu in the app has one. */
 .bre-row-label {
   flex: none;
-  font-size: 13px;
-  line-height: 20px;
-  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 18px;
+  font-weight: 500;
+  letter-spacing: .02em;
+  color: var(--bre-ink-hint);
 }
 .bre-row-value {
   flex: 1 1 auto;
@@ -659,16 +798,17 @@ export const STYLES = `
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: right;
-  font-size: 13px;
-  line-height: 20px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-primary);
+  font-size: 12.5px;
+  line-height: 18px;
+  font-weight: 600;
+  letter-spacing: -.005em;
+  color: var(--bre-accent-ink);
 }
-.bre-row-value.is-muted { font-weight: 400; color: var(--dsw-alias-label-tertiary); }
+.bre-row-value.is-muted { font-weight: 400; color: var(--bre-ink-hint); }
 .bre-panel {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   max-height: 220px;
   overflow-y: auto;
   padding: 2px 6px 8px;
@@ -679,70 +819,73 @@ export const STYLES = `
    BUDGETED: head + search + panel + footer must not exceed the height the
    official popover measured for the old two-row body, or the popover clips the
    footer's last line (切换模型下方被截断). The slider head above the track
-   (.bre-effort-slider-head: 18px of text + 4px of margin) is paid for OUT of
+   (.bre-effort-slider-head: 18px of text + 6px of margin) is paid for OUT of
    this height, so the card's total is unchanged. */
 .bre-panel-models {
   flex-direction: row;
   align-items: stretch;
   gap: 0;
-  height: 178px;
+  height: 196px;
   max-height: none;
   overflow: hidden;
-  padding: 4px 6px 8px;
+  padding: 0;
 }
 .bre-providers {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  width: 112px;
+  gap: 1px;
+  width: 104px;
   overflow-y: auto;
-  padding-right: 2px;
+  padding-right: 4px;
 }
 .bre-provider-models {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   overflow-y: auto;
   margin-left: 6px;
   padding-left: 6px;
-  border-left: 1px solid var(--dsw-alias-border-l4);
+  border-left: 1px solid var(--bre-line-1);
 }
 .bre-option,
 .bre-provider {
   appearance: none;
   box-sizing: border-box;
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
   min-height: 30px;
-  padding: 0 8px;
+  flex: none;
+  padding: 0 6px 0 8px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
-  color: inherit;
+  color: var(--bre-ink);
   font: inherit;
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 12.5px;
+  line-height: 18px;
   text-align: left;
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background var(--bre-t) var(--bre-ease), color var(--bre-t) var(--bre-ease);
 }
-/* The provider cell carries its chevron hard against the right edge. */
-.bre-provider { gap: 4px; padding: 0 4px 0 8px; }
+/* The provider cell reads one step quieter than its models: it is the index, the
+   models are the content. */
+.bre-provider { gap: 4px; color: var(--bre-ink-2); }
 .bre-option:hover:not(:disabled),
 .bre-provider:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(120, 125, 140, .09));
+  background: var(--bre-hover);
 }
 .bre-option:disabled,
-.bre-provider:disabled { cursor: default; opacity: .6; }
+.bre-provider:disabled { cursor: default; opacity: .55; }
 .bre-option:focus-visible,
 .bre-provider:focus-visible {
-  outline: none;
-  box-shadow: inset 0 0 0 2px var(--dsw-alias-border-l3);
+  outline: 2px solid var(--bre-accent);
+  outline-offset: -2px;
 }
 .bre-option-name {
   flex: 1 1 auto;
@@ -751,34 +894,48 @@ export const STYLES = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The selection: one accent tint, accent ink, and a 2px bar on the column's own
+   edge — the bar is what keeps "open provider" readable once the row is tinted
+   (a tint alone at 10% is a whisper in a 104px column). */
 .bre-option.is-active {
-  color: var(--dsw-static-deepseek-500, #4d70ff);
-  font-weight: 500;
-  /* The selected row wears the accent's own tint, not a grey fill: the tint is
-     the one background that says "selected" (the redesign's single-accent
-     rule), and it keeps the row's name as the brightest thing on it. */
-  background: var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .1));
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
+  font-weight: 600;
 }
-/* The open provider is the highlighted one; the provider of the CURRENT model
-   keeps the accent so the column says where the selection lives. */
-.bre-provider.is-open { background: var(--dsw-alias-fill-tertiary, rgba(120, 125, 140, .09)); }
-.bre-provider.is-current .bre-option-name {
-  color: var(--dsw-static-deepseek-500, #4d70ff);
-  font-weight: 500;
+.bre-provider.is-open {
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
 }
+.bre-provider.is-open::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--bre-accent);
+}
+.bre-provider.is-open .bre-provider-count { color: var(--bre-accent); opacity: .7; }
+/* The provider of the CURRENT model keeps its name at full weight, so the column
+   says where the selection lives even when another provider is open. */
+.bre-provider.is-current .bre-option-name { font-weight: 600; color: var(--bre-ink); }
+.bre-provider.is-open.is-current .bre-option-name { color: var(--bre-accent-ink); }
 /* Capability badges on a model row (image input / thinking). Muted so the name
    stays the brightest thing in the row; the badge's own title carries the copy. */
 .bre-option-tags {
   flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  color: var(--dsw-alias-label-tertiary);
+  gap: 5px;
+  color: var(--bre-ink-3);
+  opacity: .78;
 }
-.bre-option.is-active .bre-option-tags { color: var(--dsw-static-deepseek-500, #4d70ff); }
+.bre-option.is-active .bre-option-tags { color: var(--bre-accent); opacity: .9; }
 .bre-tag { display: inline-flex; align-items: center; }
 .bre-tag-icon { display: block; width: 13px; height: 13px; }
-.bre-empty { padding: 6px 8px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+.bre-empty { padding: 8px; font-size: 12px; color: var(--bre-ink-hint); }
+
 /* ---- Truncated-label tooltip (custom, replaces the native title) ----
    A self-drawn bubble instead of the OS tooltip, which the page cannot style
    and which reads harsh next to the menu. Fixed-positioned on <body> so the
@@ -2837,6 +2994,439 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 
 .bre-keys-endpoint-actions { display: flex; justify-content: flex-end; }
+
+/* ============================================================================
+   Quiet Precision — the settings surfaces, stated once.
+
+   The blocks below re-describe the key list, the protocol picker, the address
+   rows and the provider card's protocol strip in the redesign's language. They
+   are APPENDED rather than woven into the rules above on purpose: those rules
+   still say what each control IS (a toggle, a menu, a row), and this block only
+   says how it should look, so the two can be diffed when the plugin is next
+   touched. Later rules win, so nothing above needs deleting.
+
+   Three habits it enforces:
+     1. Grouping is spacing and a heading's job. A box inside a box inside a box
+        is what the old panels read as, so the key list loses its outer rule and
+        keeps only the hairline between rows.
+     2. One accent, and it only ever means "this one". Chosen states are a tint
+        plus accent ink — never a solid fill, never a tick.
+     3. Nothing moves when a state changes: no control grows a glyph on select,
+        because a list that widens under the pointer is a list that misclicks.
+   ========================================================================= */
+
+/* The provider card's protocol strip: four wires, each with a share of the row's
+   whole width, so the chosen one reads as a segment of the field rather than a
+   chip floating in it. */
+.bre-protocol-cards {
+  display: flex;
+  width: 100%;
+  box-sizing: border-box;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--bre-r-sm);
+  background: var(--bre-sunken);
+}
+
+.bre-protocol-card {
+  flex: 1 1 0;
+  height: 28px;
+  min-width: 0;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--bre-ink-2);
+  font-size: 12px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bre-protocol-card:hover {
+  color: var(--bre-ink);
+  background: var(--bre-hover);
+}
+
+.bre-protocol-card.is-selected {
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
+  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--bre-accent-line);
+}
+
+.bre-protocol-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
+}
+
+/* The address field: the endpoint's name and its input on ONE line, the name
+   column measured against the longest name it can hold (Anthropic) rather than
+   padded out — a wider column only buys empty space between the two. */
+[data-bre-endpoint-field] {
+  grid-template-columns: 76px minmax(0, 1fr);
+  column-gap: 6px;
+  row-gap: 6px;
+}
+
+.bre-endpoint-family {
+  width: 76px;
+  height: 24px;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--bre-ink-3);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+/* The dot names the endpoint's state without a second word: filled once that
+   family has an address, hollow while it is still unset. */
+.bre-endpoint-family::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--bre-line-4);
+}
+
+.bre-endpoint-family[data-bre-endpoint-filled='1']::before { background: var(--bre-ok); }
+
+.bre-endpoint-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  column-gap: 6px;
+  align-items: center;
+}
+
+.bre-endpoint-url {
+  height: 30px;
+  border-radius: var(--bre-r-sm);
+}
+
+/* 更多端点 and the tally that rides beside it: two quiet words on the field's
+   label line, never a control that looks like another field. */
+.bre-endpoint-toggle {
+  height: 18px;
+  margin: 0 0 0 4px;
+  padding: 0 4px;
+  border-radius: 5px;
+  color: var(--bre-accent);
+  font-size: 11.5px;
+}
+
+.bre-endpoint-toggle:hover {
+  color: var(--bre-accent-ink);
+  background: var(--bre-accent-weak);
+}
+
+/* The key list: rows on a quiet surface, separated by a hairline, with no rule
+   drawn round the whole block. */
+.bre-keys-list {
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+}
+
+.bre-keys-list > li + li { border-top: 1px solid var(--bre-line-1); }
+
+.bre-keys-row {
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: var(--bre-r-sm);
+  transition: background var(--bre-t) var(--bre-ease);
+}
+
+.bre-keys-row:hover { background: var(--bre-hover); }
+
+/* The enable check: a ring that fills. Filled is accent with a white tick, empty
+   is a grey ring with nothing in it — the two readings of a checkbox, drawn at
+   the list's own scale. (The tick is the STATE of one control, which is why it
+   survives the no-glyph-on-select rule above: it lives inside the switch, so
+   lighting it cannot change the row's width.) */
+.bre-keys-toggle-mark {
+  width: 18px;
+  height: 18px;
+  box-shadow: inset 0 0 0 1.5px var(--bre-line-4);
+  transition: background var(--bre-t) var(--bre-ease), box-shadow var(--bre-t) var(--bre-ease);
+}
+
+.bre-keys-toggle-mark svg {
+  width: 11px;
+  height: 11px;
+}
+
+.bre-keys-toggle.is-on .bre-keys-toggle-mark {
+  background: var(--bre-accent);
+  box-shadow: inset 0 0 0 1.5px var(--bre-accent);
+  color: #ffffff;
+}
+
+.bre-keys-toggle:focus-visible {
+  box-shadow: none;
+}
+
+.bre-keys-toggle:focus-visible .bre-keys-toggle-mark {
+  box-shadow: inset 0 0 0 1.5px var(--bre-line-4), 0 0 0 3px var(--bre-accent-glow);
+}
+
+/* The last enabled key cannot be switched off; it stays lit but stands back, so
+   the refusal is visible before the click rather than after it. */
+.bre-keys-toggle:disabled .bre-keys-toggle-mark { opacity: 0.45; }
+
+/* A switched-off key stays listed but reads as idle through its ink alone: the
+   row is still workable, so nothing about it is made fainter than text. */
+.bre-keys-row.is-off .bre-keys-alias,
+.bre-keys-row.is-off .bre-keys-mask {
+  opacity: 1;
+  color: var(--bre-ink-4);
+}
+
+.bre-keys-alias {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--bre-ink);
+}
+
+.bre-keys-mask {
+  padding: 1px 6px;
+  border-radius: var(--bre-r-xs);
+  background: var(--bre-sunken);
+  color: var(--bre-ink-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.bre-keys-mask-plain {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--bre-ink);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+/* The row's tray: the protocol and the model scope are STATE and stay on the
+   row; the verbs fade in on hover, so a resting list reads as names and nothing
+   else. The split is made here rather than in the markup — the tray stays
+   mounted (its width never changes, so hovering cannot shift the row), and only
+   the VERBS inside it are painted away, picked out by :not(.bre-keys-scope):
+   the scope is a <button> too, but its label is a count, not an action. */
+.bre-keys-actions {
+  gap: 6px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.bre-keys-actions .bre-link-button:not(.bre-keys-scope) {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.bre-keys-row:hover .bre-keys-actions .bre-link-button:not(.bre-keys-scope),
+.bre-keys-row:focus-within .bre-keys-actions .bre-link-button:not(.bre-keys-scope) {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* A row waiting on "confirm remove / cancel" must never hide its own question. */
+.bre-keys-actions.is-confirming .bre-link-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .bre-keys-actions .bre-link-button:not(.bre-keys-scope) {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.bre-keys-protocol {
+  height: 20px;
+  padding: 0 5px;
+  gap: 3px;
+  border-radius: 5px;
+  background: var(--bre-sunken);
+  color: var(--bre-ink-2);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.bre-keys-protocol:hover {
+  background: var(--bre-sunken-2);
+  color: var(--bre-ink);
+}
+
+.bre-keys-protocol[aria-expanded='true'] {
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
+}
+
+.bre-keys-protocol-caret { font-size: 11px; opacity: 0.6; }
+
+.bre-keys-scope {
+  color: var(--bre-ink-3);
+  font-family: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* Verbs are quieter than state: ink-3 at rest, ink on hover, danger for the one
+   that removes a key. */
+.bre-keys-actions .bre-link-button {
+  color: var(--bre-ink-3);
+  font-size: 11.5px;
+}
+
+.bre-keys-actions .bre-link-button:hover { color: var(--bre-ink); }
+
+.bre-keys-actions .bre-keys-danger { color: var(--bre-danger); }
+
+.bre-keys-actions .bre-keys-danger:hover { color: var(--bre-danger); }
+
+/* The inline form: a sunken panel inside the list, never a dialog. */
+.bre-keys-form-row { padding: 0 0 8px; }
+
+.bre-keys-form {
+  gap: 8px;
+  padding: 10px;
+  border: none;
+  border-radius: var(--bre-r-sm);
+  background: var(--bre-sunken);
+}
+
+.bre-keys-form-fields { gap: 6px; }
+
+.bre-keys-hint,
+.bre-keys-note {
+  margin: 0;
+  color: var(--bre-ink-hint);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.bre-keys-form-actions { gap: 6px; }
+
+.bre-keys-form-actions .bre-primary-button {
+  height: 26px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+/* The chips — the models a key serves, and the wire a new key pins: one shape
+   for every choice set in the settings. Selected is a tint, never a tick (see
+   the no-movement rule at the top of this block). */
+.bre-keys-chips { gap: 6px; }
+
+.bre-keys-chip {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--bre-line-3);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--bre-ink-2);
+  font-size: 11.5px;
+}
+
+.bre-keys-chip:hover {
+  border-color: var(--bre-line-4);
+  color: var(--bre-ink);
+}
+
+.bre-keys-chip.is-selected {
+  background: var(--bre-accent-weak);
+  border-color: var(--bre-accent-line);
+  color: var(--bre-accent-ink);
+  font-weight: 500;
+}
+
+.bre-keys-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
+}
+
+/* Adding a key is the list's last line: a dashed invitation, not a button that
+   competes with the row actions. */
+.bre-keys-add {
+  height: 34px;
+  border: 1px dashed var(--bre-line-3);
+  border-radius: var(--bre-r-sm);
+  color: var(--bre-ink-3);
+  font-size: 12px;
+}
+
+.bre-keys-add:hover {
+  border-color: var(--bre-line-4);
+  background: var(--bre-sunken);
+  color: var(--bre-ink);
+}
+
+/* The protocol menu: roomy rows, each naming a wire and saying what it signs.
+   The one in force wears the accent tint; no tick, so the rows keep one width
+   and the list cannot shuffle under the pointer. */
+.bre-protocol-menu {
+  padding: 6px;
+  border: 1px solid var(--bre-line-1);
+  border-radius: var(--bre-r-md);
+  background: var(--bre-surface);
+  box-shadow: var(--bre-shadow-pop);
+}
+
+.bre-protocol-menu-title {
+  padding: 4px 8px 6px;
+  color: var(--bre-ink-hint);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.bre-protocol-option {
+  gap: 8px;
+  min-height: 52px;
+  padding: 8px 10px;
+  border-radius: var(--bre-r-sm);
+}
+
+.bre-protocol-option:hover { background: var(--bre-hover); }
+
+.bre-protocol-option[aria-selected='true'],
+.bre-protocol-option[aria-selected='true']:hover {
+  background: var(--bre-accent-weak);
+}
+
+.bre-protocol-option-title {
+  color: var(--bre-ink);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.bre-protocol-option[aria-selected='true'] .bre-protocol-option-title {
+  color: var(--bre-accent-ink);
+}
+
+.bre-protocol-option-hint {
+  color: var(--bre-ink-hint);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+
+.bre-protocol-option[aria-selected='true'] .bre-protocol-option-hint {
+  color: var(--bre-accent-ink);
+  opacity: 0.78;
+}
+
+.bre-protocol-option:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
+}
 
 @media (prefers-reduced-motion: reduce) {
   .bre-editor-tab { transition: none; }

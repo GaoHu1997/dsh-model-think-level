@@ -1345,17 +1345,78 @@ export function echoOfficialCapacities(
     if (input === undefined || input.disabled) return false
     if (value === undefined || !Number.isFinite(value) || value <= 0) return false
     if (Number(input.value) > 0) return false
-    // React controls this input: assigning `value` directly would be undone by
-    // the next render, so the write goes through the prototype's setter and a
-    // bubbled input event — the change reaches the card's draft and stays.
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-    setter?.call(input, String(value))
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-    return true
+    return landCapacity(input, String(value))
   }
   return {
     contextWindow: fill(inputs.contextWindow, values.contextWindow),
     maxOutput: fill(inputs.maxOutput, values.maxTokens),
+  }
+}
+
+/**
+ * Put one text into an official capacity input through React's own path.
+ *
+ * React controls these inputs: assigning `value` directly would be undone by the
+ * next render, so the write goes through the prototype's setter and a bubbled
+ * input event — the change reaches the card's draft and stays.
+ */
+function landCapacity(input: HTMLInputElement, next: string): boolean {
+  if (input.disabled) return false
+  if (input.value === next) return true
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+  setter?.call(input, next)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  return true
+}
+
+/**
+ * Read the official capacity inputs as the row's form currently holds them.
+ *
+ * The editor's two fields seed from this rather than from a suggestion: the
+ * numbers belong to the form's draft (the catalogue's value, the user's own
+ * typing, or a suggestion already echoed into it), and the draft is the only
+ * place they exist before the card is saved.
+ */
+export function readOfficialCapacities(
+  scope: HTMLElement,
+  labels: HostLabels,
+): { contextWindow?: number; maxTokens?: number } {
+  const inputs = officialCapacityInputsOf(scope, labels)
+  const read = (input: HTMLInputElement | undefined): number | undefined => {
+    if (input === undefined) return undefined
+    const digits = input.value.replace(/[^\d]/g, '')
+    if (digits === '') return undefined
+    const value = Number(digits)
+    return Number.isFinite(value) && value > 0 ? value : undefined
+  }
+  const contextWindow = read(inputs.contextWindow)
+  const maxTokens = read(inputs.maxOutput)
+  return {
+    ...(contextWindow === undefined ? {} : { contextWindow }),
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+  }
+}
+
+/**
+ * Write the editor's capacity fields into the official inputs — the USER's own
+ * typing, so unlike {@link echoOfficialCapacities} this one overwrites, and
+ * `undefined` empties the field (a capacity that inherits the catalogue value
+ * again instead of being pinned). A key the caller omits is left untouched.
+ * @returns which of the two fields the write actually changed.
+ */
+export function writeOfficialCapacities(
+  scope: HTMLElement,
+  labels: HostLabels,
+  next: { contextWindow?: number | undefined; maxTokens?: number | undefined },
+): { contextWindow: boolean; maxOutput: boolean } {
+  const inputs = officialCapacityInputsOf(scope, labels)
+  const write = (input: HTMLInputElement | undefined, value: number | undefined): boolean => {
+    if (input === undefined) return false
+    return landCapacity(input, value === undefined || !Number.isFinite(value) || value <= 0 ? '' : String(value))
+  }
+  return {
+    contextWindow: 'contextWindow' in next ? write(inputs.contextWindow, next.contextWindow) : false,
+    maxOutput: 'maxTokens' in next ? write(inputs.maxOutput, next.maxTokens) : false,
   }
 }
 
@@ -3215,6 +3276,12 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
               ...(maxTokens === undefined ? {} : { maxTokens }),
             })
           },
+          // The editor's own two capacity fields read and write THESE inputs:
+          // the official form stays the single writer, so its Save remains the
+          // only persistence path and the plugin's document write never grows a
+          // second writer for the same field.
+          readCapacities: () => readOfficialCapacities(container, labels),
+          setCapacities: next => { writeOfficialCapacities(container, labels, next) },
         },
         readOnly: join.writable !== true,
         t: deps.t,

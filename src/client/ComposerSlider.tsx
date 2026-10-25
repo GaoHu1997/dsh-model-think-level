@@ -604,19 +604,9 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   /** The truncated-name tooltip wiring, shared by the head and the columns. */
   const { tip, onEnter, onLeave } = useTruncatedTip()
 
-  // One hue per declared stop, sampled along the cool→hot ramp. The fill
-  // carries the whole gradient in TRACK coordinates — full width, revealed to
-  // the thumb by clip-path — because a gradient on a width-clipped element
-  // would compress its hues as the level moves; the thumb and the name under
-  // the active stop wear the current hue, so the colour alone names the level.
-  const stopColors = levels.map((_, at) => effortRampColor(levels.length > 1 ? at / (levels.length - 1) : 0))
-  const trackGradient = `linear-gradient(to right, ${stopColors
-    .map((color, at) => `${color} ${(at / Math.max(1, levels.length - 1)) * 100}%`)
-    .join(', ')})`
-
-  // The head: the label, the current model and its provider pushed right, and
-  // the level pill at the far right — the body's own rest state, the same facts
-  // the trigger below carries, readable without opening anything.
+  // The head: the label, the current model and its provider pushed right. The
+  // level used to be repeated here as a pill; it now appears once, in the
+  // footer, where it can also be changed.
   const head = createElement(
     'div',
     { className: 'bre-menu-head' },
@@ -638,9 +628,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
       ),
       providerName === '' ? null : createElement('span', { className: 'bre-menu-prov' }, providerName),
     ),
-    available ? createElement('span', { className: 'bre-pill' }, effortLabel) : null,
   )
-
   // The resident search box, the same shape the official pane's search wears.
   const search = createElement(
     'div',
@@ -800,17 +788,14 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
         // The head echoes what the slider itself announces (its aria-label and
         // valuetext), so it is hidden from assistive tech like the stop names
         // below the track; the value follows the drag preview, not only the
-        // committed level, and wears the stop's hue like the thumb does.
+        // committed level.
         createElement(
           'div',
           { className: 'bre-effort-slider-head', 'aria-hidden': true },
           createElement('span', { className: 'bre-effort-slider-head-label' }, t('effortRowLabel')),
           createElement(
             'span',
-            {
-              className: 'bre-effort-slider-head-value',
-              style: { color: stopColors[Math.min(shownStop, stopColors.length - 1)] },
-            },
+            { className: 'bre-effort-slider-head-value' },
             levels[shownStop]?.name ?? effortLabel,
           ),
         ),
@@ -835,17 +820,20 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
           },
           createElement('span', {
             className: 'bre-effort-slider-fill',
-            style: {
-              background: trackGradient,
-              clipPath: `inset(0 ${100 - effortPct}% 0 0)`,
-            },
+            style: { clipPath: `inset(0 ${100 - effortPct}% 0 0)` },
           }),
+          // Every stop but the one under the thumb: a 2px hole in the track, so
+          // the ladder's size is legible without a hue per stop.
+          ...levels.map((level, at) => at === shownStop
+            ? null
+            : createElement('span', {
+              key: 'tick-' + level.id,
+              className: 'bre-effort-slider-tick',
+              style: { left: levels.length > 1 ? `${(at / (levels.length - 1)) * 100}%` : '0%' },
+            })),
           createElement('span', {
             className: 'bre-effort-slider-thumb',
-            style: {
-              left: `${effortPct}%`,
-              background: stopColors[Math.min(shownStop, stopColors.length - 1)],
-            },
+            style: { left: `${effortPct}%` },
           }),
         ),
         createElement(
@@ -859,10 +847,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
                 + (at === 0 ? ' is-first' : '')
                 + (at === levels.length - 1 ? ' is-last' : '')
                 + (at === shownStop ? ' is-on' : ''),
-              style: {
-                left: levels.length > 1 ? `${(at / (levels.length - 1)) * 100}%` : '0%',
-                ...(at === shownStop ? { color: stopColors[at] } : {}),
-              },
+              style: { left: levels.length > 1 ? `${(at / (levels.length - 1)) * 100}%` : '0%' },
             },
             level.name,
           )),
