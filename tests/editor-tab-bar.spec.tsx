@@ -166,7 +166,11 @@ describe('EditorTabBar', () => {
     expect(STYLES).toContain(
       ".bre-tabbed[data-bre-tab='advanced'] .bre-headers {\n  margin-top: 12px;\n  padding: 12px;\n  border-top: none;",
     )
-    expect(STYLES).toContain('background: var(--dsw-alias-bg-module-platform, #f5f6f7);')
+    // User item 6: the pane is no longer a tinted slab inside the card. The
+    // card, the pane and the page share one fill, so a stack of cards reads as
+    // cards rather than as grey blocks; the pane still draws its own surface, it
+    // is just the page's background instead of the module platform's tint.
+    expect(STYLES).toContain('background: var(--dsw-alias-bg-base, #ffffff);')
   })
 
   it('keeps a marked commit row on the advanced tab, and only that', () => {

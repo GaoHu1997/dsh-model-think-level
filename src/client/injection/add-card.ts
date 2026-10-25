@@ -31,7 +31,8 @@ import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { setClass } from './dom.js'
 import { CreateCardPane } from './create-card-pane.js'
 import { enhanceCreateKeySeat, resetCreateKeySeat, teardownCreateKeySeats } from './create-key-seat.js'
-import { revealKeyField, resetKeyField, KEY_FIELD_CLASS } from './key-reveal.js'
+import { markKeyField, resetKeyField, KEY_FIELD_CLASS } from './key-reveal.js'
+import { suppressScrollAnchoring } from './models-page-editor.js'
 import { mountReact, unmountReact, type ForeignMount } from './mount.js'
 import type { StagedHeadersState } from './staged-headers.js'
 import type { StagedKeysState } from './staged-keys.js'
@@ -139,8 +140,8 @@ export function reconcileAddCards(root: HTMLElement, deps: AddCardDeps, state: A
 
 /** The bar's mount and the mode switch, for the one card this pass knows. */
 function applyAddCard(card: HTMLElement, deps: AddCardDeps, state: AddCardState): void {
-  const custom = panelWithSuffix(card, CUSTOM_PANEL_SUFFIX)
-  if (custom === undefined) {
+  let custom = panelWithSuffix(card, CUSTOM_PANEL_SUFFIX)
+  if (custom === undefined || custom.hidden) {
     // The official page mounts each half the first time its mode is visited, so
     // on the card's first scan there is no custom half to find — only the
     // option that opens it. Clicking that option IS the switch, and it is why
@@ -148,25 +149,26 @@ function applyAddCard(card: HTMLElement, deps: AddCardDeps, state: AddCardState)
     // would leave is not up yet. A card the option cannot be found on (no API
     // protocol to declare, or no namespace to declare one into) is left exactly
     // as the official page built it.
+    //
+    // User item 1: the click is read again in this same pass instead of being
+    // left for the next observer callback. A click is a discrete React event,
+    // so the custom half is committed by the time it returns — mounting into it
+    // now makes the bar and the form arrive in ONE frame, where the early
+    // return made the form paint and then grow the bar on the visit after.
     chooseCustomMode(card)
-    return
-  }
-  if (custom.hidden) {
-    // Visited and switched away again: the official control owns the mode, so
-    // the mode is switched by clicking it. The form itself appears on the
-    // render that click schedules; this pass dresses it on the visit after.
-    chooseCustomMode(card)
-    return
+    custom = panelWithSuffix(card, CUSTOM_PANEL_SUFFIX)
+    if (custom === undefined || custom.hidden) return
   }
   ensureHost(card, custom, deps, state)
-  // User item 7: the add-provider form's API-key field is dressed exactly like
-  // the edit-provider form's — same field wrapper, same masked input padding,
-  // same reveal eye. There is no route yet, so the eye is a plain mask toggle
-  // (it never asks the host for a stored key). The whole card is walked, not
-  // just the visible half, because which half the official page puts the key
-  // field in is the host's business; a hidden panel's field is simply dressed
-  // out of sight.
-  dressKeyFields(card, deps)
+  // User item 9: the add-provider form gets the key field MARKED, not a second
+  // eye. The official API-key box already draws its own reveal button inside
+  // the box (`inset: 1px 1px 1px auto`) as soon as it holds text — and this card
+  // has no stored credential to fetch, so the plugin's eye could only ever
+  // toggle the mask the official one toggles. Two eyes, one of them hanging
+  // under the field, is exactly what the report described. The mark stays
+  // because the key list below has to keep finding the input after the official
+  // toggle flips its type.
+  markKeyFields(card)
   // The key FIELD is dressed card-wide, but the key LIST — the draft list the
   // edit card's key manager mirrors — seats only the custom form's field: the
   // card keeps its other half mounted, and a second seat there would stage a
@@ -221,21 +223,50 @@ function keyFieldsOf(scope: HTMLElement): HTMLElement[] {
 }
 
 /**
- * Give every API-key field in the card the edit card's dressing.
+ * Mark every API-key input in the card, without hanging an eye on it.
  *
  * The create card is not one of the editor cards the tab takeover walks (it only
- * carries a plugin mount for the bar), so nothing else dresses its key field.
- * Without this the same input looks like an ordinary official box here and like
- * the plugin's managed field one card above.
+ * carries a plugin mount for the bar), so nothing else marks its key field —
+ * and the key list below needs the mark to still find the input once the
+ * official reveal button has flipped it to plain text. See `markKeyField` for
+ * why this card gets no eye of its own.
  */
-function dressKeyFields(scope: HTMLElement, deps: AddCardDeps): void {
+function markKeyFields(scope: HTMLElement): void {
   for (const field of keyFieldsOf(scope)) {
     try {
-      revealKeyField(field, { t: deps.t })
+      markKeyField(field)
     } catch (error) {
       // A form the official page restructured mid-scan is not worth a card: the
-      // eye is an affordance, and the field it decorates still works without it.
-      console.warn('[bre] add provider card: could not dress a key field:', error)
+      // mark is bookkeeping, and the field still works without it.
+      console.warn('[bre] add provider card: could not mark a key field:', error)
+    }
+  }
+}
+
+/**
+ * Give the custom form's key field the edit card's draft key list.
+ *
+ * The list runs over an in-memory store (there is no route to read), and its
+ * drafts wait in the session ledger until this card's own 保存 declares the
+ * provider they belong to — see `staged-keys`. A field with no key input is
+ * reset, so a card the page restructured sheds any list whose field is gone.
+ */
+function seatKeyFields(scope: HTMLElement, deps: AddCardDeps): void {
+  for (const field of keyFieldsOf(scope)) {
+    try {
+      enhanceCreateKeySeat(field, {
+        t: deps.t,
+        api: deps.api,
+        routeIdLabels: deps.routeIdLabels,
+        staged: deps.stagedKeys,
+        refreshed: deps.refreshed,
+      })
+    } catch (error) {
+      // The list is an affordance the official form works without: a field it
+      // could not seat keeps the official input (the managed mark goes with
+      // the reset the enhancer never reached, so the box stays usable).
+      resetCreateKeySeat(field)
+      console.warn('[bre] add provider card: could not mount the key list:', error)
     }
   }
 }
@@ -322,9 +353,10 @@ function hostOf(panel: HTMLElement): HTMLElement | undefined {
  * The mount is created here rather than by the slot because the official card
  * renders the provider-card slot only in its catalogue half. It is a plain
  * block the panel's own flex column then spaces like every other row of the
- * form, and it is inserted at the FRONT of that column: React only ever
- * inserts its own children relative to the siblings it knows, so the mount
- * stays where it is put for as long as the form is up.
+ * form, and it is inserted at the FRONT of that column: the tab bar belongs
+ * above the fields it switches between, and React only ever inserts its own
+ * children relative to the siblings it knows, so the mount stays where it is
+ * put for as long as the form is up.
  */
 function ensureHost(card: HTMLElement, panel: HTMLElement, deps: AddCardDeps, state: AddCardState): void {
   const known = state.hosts.get(card)
@@ -341,6 +373,15 @@ function ensureHost(card: HTMLElement, panel: HTMLElement, deps: AddCardDeps, st
   const host = card.ownerDocument.createElement('div')
   host.className = CREATE_HOST_CLASS
   panel.insertBefore(host, panel.firstChild)
+  // User item 1: the card grows over the next few frames (the pane, then the
+  // key list it seats), and the browser's own scroll anchoring reacts to every
+  // one of those frames by moving the scroll container to keep an anchor still.
+  // The anchor it picks lands inside the card that is growing — pushing the
+  // configured provider above it up the viewport — so anchoring is taken out of
+  // the decision for the duration. This only writes `overflow-anchor`; it never
+  // moves the scroll position itself, so the growth stays growth and everything
+  // above the card keeps its place.
+  suppressScrollAnchoring(card)
   // `sync`: the card's height is what the settings scroller measures, so the
   // bar (and the pane under it) must be in the tree before this microtask ends,
   // exactly like the editor seats the official card's own render measures.

@@ -97,39 +97,123 @@ body[data-ds-dark-theme] {
   gap: 8px;
   margin: 8px 0 4px;
 }
-/* The 思考强度 card proper — rendered only while the master switch is on.
-   The redesign's 去装饰 rule for a nested card: one hairline on the card's own
-   stroke, no fill of its own — grouping is the border's job, not a second
-   grey panel stacked inside the host card. */
+/* The 思考强度 panel proper — rendered only while the master switch is on.
+   User item 8: this is the DESIGN's card (board-2), and the board's first rule
+   for it is that the 0.5px outline goes away — 框里画框, a frame drawn inside a
+   frame, was the complaint. What draws the panel instead is a flat fill one
+   step below the page plus a 12px corner, with the inner padding set to line up
+   with the official row body's own 12px. */
 .bre-effort-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 0.5px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dsw-radius-md, 12px);
-  background: transparent;
+  gap: 13px;
+  padding: 13px 15px 12px;
+  border: none;
+  border-radius: var(--bre-r-md);
+  background: var(--bre-sunken);
   box-sizing: border-box;
 }
-/* The editor's one-line head: switch + title, the declared state, and the
-   applied suggestion's provenance pill. */
+/* The editor's one-line head: the master switch with its title, the declared
+   state, and the applied suggestion's provenance pill. */
 .bre-effort-top {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 10px;
+  gap: 9px;
 }
 .bre-effort-state {
   font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--bre-ink-3);
 }
 .bre-effort-title {
-  /* The section title reads as the card's own heading: primary ink at the
+  /* The section title reads as the panel's own heading: primary ink at the
      design's 13/500, not a grey caption — it names the row, the hints under
-     it carry the explanation. */
+     it carry the explanation. The headers pane borrows the same face. */
   font-size: 13px;
   font-weight: 500;
-  color: var(--dsw-alias-label-primary);
+  letter-spacing: -0.005em;
+  color: var(--bre-ink);
+}
+/* The master switch, at the board's small size: a 28x16 track with a 12px knob.
+   The native checkbox stays — it is the accessible control, it keeps the row
+   keyboard-operable, and it is what the tests click — but it is transparent and
+   stretched over the track it drives. */
+.bre-thinking-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  margin: 0;
+  cursor: pointer;
+}
+.bre-thinking-switch input[type='checkbox'] {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  z-index: 1;
+  width: 28px;
+  height: 16px;
+  margin: -8px 0 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.bre-effort-switch-track {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 16px;
+  border-radius: var(--bre-r-pill);
+  background: var(--bre-switch-track);
+  transition: background var(--bre-t) var(--bre-ease);
+}
+.bre-effort-switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bre-switch-knob);
+  box-shadow: 0 1px 2px #0f111533;
+  transition: transform var(--bre-t) var(--bre-ease);
+}
+.bre-thinking-switch input:checked + .bre-effort-switch-track {
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
+}
+.bre-thinking-switch input:checked + .bre-effort-switch-track::after {
+  transform: translateX(12px);
+}
+.bre-thinking-switch input:focus-visible + .bre-effort-switch-track {
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
+}
+.bre-thinking-switch input:disabled + .bre-effort-switch-track {
+  opacity: 0.4;
+  cursor: default;
+}
+/* The applied suggestion, as the board's pill: 22px, a hairline, quiet ink, and
+   the accent glyph that marks it as advice rather than state. */
+.bre-effort-suggest {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--bre-r-pill);
+  border: 1px solid var(--bre-line-2);
+  background: var(--bre-surface);
+  font-size: 11px;
+  color: var(--bre-ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bre-effort-suggest svg {
+  flex: none;
+  color: var(--bre-accent);
 }
 .bre-link-button {
   background: none;
@@ -177,7 +261,7 @@ body[data-ds-dark-theme] {
 .bre-pillrow {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
+  gap: 6px;
 }
 /* The level ladder and the modality pair share one pill face: 28px, an
   8px corner and a hairline stroke, so a row of them reads as one control. The
@@ -188,22 +272,23 @@ body[data-ds-dark-theme] {
   appearance: none;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   height: 28px;
-  padding: 0 11px;
+  padding: 0 10px;
   border-radius: var(--bre-r-sm);
   border: 1px solid var(--bre-line-3);
-  background: transparent;
-  color: var(--bre-ink);
+  background: var(--bre-surface);
+  color: var(--bre-ink-2);
   font: inherit;
   font-size: 12px;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: background var(--bre-t) var(--bre-ease), border-color var(--bre-t) var(--bre-ease), color var(--bre-t) var(--bre-ease);
+  transition: all var(--bre-t) var(--bre-ease);
 }
 .bre-lvl:hover:not(:disabled) {
-  background: var(--bre-hover);
+  border-color: var(--bre-line-4);
+  color: var(--bre-ink);
 }
 .bre-lvl:focus-visible {
   outline: none;
@@ -217,10 +302,15 @@ body[data-ds-dark-theme] {
   color: var(--bre-accent-ink);
   font-weight: 500;
 }
-/* The modality pill's glyph follows its name's state: quiet ink when the
-  declaration does not carry it, the accent when it does. */
-.bre-lvl svg { flex: none; opacity: 0.75; }
-.bre-lvl.is-on svg { opacity: 1; }
+/* A level the stored ladder names but this draft leaves unarmed: still
+   clickable, simply standing back (the board's is-dim state). */
+.bre-lvl.is-dim { opacity: 0.45; }
+/* The modality pair: the glyph is the identity, so it takes the wider padding
+   and carries its own ink — quiet when the declaration does not include it, the
+   accent when it does. */
+.bre-lvl--opt { gap: 6px; padding: 0 11px; }
+.bre-lvl--opt svg { flex: none; color: var(--bre-ink-3); }
+.bre-lvl--opt.is-on svg { color: var(--bre-accent); }
 /* The slider's head, written above the track (进度条上方：思考等级 + 当前等级):
    the section name on the left, the level under the thumb on the right. One
    accent, so the value reads as "this is the current setting", not as a rank. */
@@ -310,6 +400,17 @@ body[data-ds-dark-theme] {
   background: var(--bre-surface);
   box-shadow: 0 0 0 1px var(--bre-accent-line), 0 1px 3px #0f11152e;
   pointer-events: none;
+  /* User item 4: a committed level used to teleport the thumb. The two settling
+     nodes glide instead — and the glide is switched off the moment the pointer
+     takes the track, or the drag itself would lag one frame behind the finger. */
+  transition: left var(--bre-t) var(--bre-ease);
+}
+.bre-effort-slider-fill {
+  transition: clip-path var(--bre-t) var(--bre-ease);
+}
+.bre-effort-slider[data-bre-dragging='true'] .bre-effort-slider-thumb,
+.bre-effort-slider[data-bre-dragging='true'] .bre-effort-slider-fill {
+  transition: none;
 }
 /* The stops, written under the track: first left-aligned, last right-aligned,
    the middle ones centred on their stop, so the row never wraps. */
@@ -333,89 +434,162 @@ body[data-ds-dark-theme] {
   color: var(--bre-accent-ink);
   font-weight: 600;
 }
-/* A section: its label row (label, hint, trailing action) and its body. */
-.bre-effort-sec { display: flex; flex-direction: column; }
+/* A section of the panel: the label row, the hint that explains it, and the
+   control group. The board spaces the three at 9px, and gives the label row a
+   22px floor so a section with a trailing action still lines up with one that
+   has none. */
+.bre-effort-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
 .bre-effort-labelrow {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  min-height: 22px;
 }
 .bre-effort-label {
   font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  color: var(--bre-ink-2);
 }
-.bre-effort-labelhint {
-  font-style: normal;
+/* User item 8: the explanation moved OUT of the label row. As an ellipsised
+   fragment beside the label it was unreadable at the disclosure's width; on its
+   own line at 11/16 the whole sentence fits, which is what the board draws. */
+.bre-effort-hint {
   font-size: 11px;
-  color: var(--dsw-alias-label-tertiary);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 16px;
+  color: var(--bre-ink-4);
 }
-.bre-effort-adapt { margin-left: auto; flex: none; }
-/* The quiet link that unfolds the armed levels' wire spellings. It sits right
-   under the decision pills, sized like the label hints — the spelling row is
-   an editor's aside, not a form row of its own. */
-.bre-effort-wiretoggle {
-  align-self: flex-start;
-  margin: 2px 0 0 -6px;
-  padding: 2px 6px;
-  font-size: 11px;
-  color: var(--dsw-alias-label-secondary);
-}
-/* The wire spellings, compact: label + small input pairs that
-   read as the bytes row under the decision row. */
-.bre-wire-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  margin-top: 4px;
-}
-.bre-wire-item {
+.bre-effort-grow { flex: 1 1 auto; min-width: 0; }
+/* The label row's trailing action (自动适配): the board's quiet button — 26px,
+   a hairline, quiet ink — not a link. */
+.bre-effort-adapt {
+  flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  margin-left: auto;
+  border: 1px solid var(--bre-line-2);
+  border-radius: var(--bre-r-sm);
+  background: var(--bre-surface);
+  color: var(--bre-ink-2);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background var(--bre-t) var(--bre-ease), border-color var(--bre-t) var(--bre-ease), color var(--bre-t) var(--bre-ease);
+}
+.bre-effort-adapt:hover:not(:disabled) {
+  border-color: var(--bre-line-4);
+  color: var(--bre-ink);
+}
+.bre-effort-adapt:disabled { opacity: 0.5; cursor: default; }
+.bre-effort-adapt svg { flex: none; color: var(--bre-accent); }
+/* The quiet link that unfolds the armed levels' wire spellings: 22px tall at
+   11.5px, hanging at the left edge of the group it opens. */
+.bre-effort-wiretoggle {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  margin: 0;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--bre-ink-3);
+  cursor: pointer;
+}
+.bre-effort-wiretoggle:hover:not(:disabled) { color: var(--bre-ink); }
+.bre-effort-wiretoggle:disabled { opacity: 0.5; cursor: default; }
+.bre-effort-wiretoggle svg { flex: none; }
+/* The wire spellings: the board's own block — a white sheet on the sunken panel,
+   one 92px name column and one value column per armed level, the value set in
+   the code face so a spelling's punctuation is legible. */
+.bre-wire {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--bre-line-1);
+  border-radius: var(--bre-r-sm);
+  background: var(--bre-surface);
+}
+.bre-wire-grid {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 6px 10px;
+  align-items: center;
 }
 .bre-wire-name {
   font-size: 11px;
-  color: var(--dsw-alias-label-tertiary);
+  letter-spacing: 0.01em;
+  color: var(--bre-ink-4);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-/* The sections BELOW the ladder stack full-width: the default-effort slider
-   needs the whole row's length (a squeezed half-column is what wrapped its
-   pills and its hint), and the modality pills read fine on their own line. */
+/* The sections below the ladder sit in two columns on a wide disclosure and
+   stack on a narrow one: the board's 1fr 1fr, floored so a squeezed column
+   never wraps a note into three lines. */
 .bre-effort-cols {
   display: grid;
-  /* The 0 floor stands the track's auto minimum down: the default-effort hint
-     is one nowrap line whose min-content width would otherwise price the track
-     past the disclosure's width — overflow, with the ellipsis never engaged. */
-  grid-template-columns: minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 18px;
+  align-items: start;
 }
 .bre-effort-wire {
   box-sizing: border-box;
+  width: 100%;
   min-width: 0;
-  height: 24px;
-  padding: 0 6px;
-  border: 0.5px solid var(--dsw-alias-border-l4);
-  border-radius: 4px;
-  background: var(--dsw-alias-bg-layer-1);
-  color: var(--dsw-alias-label-primary);
-  font: inherit;
-  font-size: 12px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--bre-line-2);
+  border-radius: 6px;
+  background: var(--bre-surface);
+  color: var(--bre-ink-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
 }
+.bre-effort-wire::placeholder { color: var(--bre-ink-4); }
 .bre-effort-wire:focus {
   outline: none;
-  border-color: var(--dsw-alias-brand-primary);
-  box-shadow: 0 0 0 3px var(--dsw-alias-brand-primary-muted, rgba(77, 112, 255, .14));
+  border-color: var(--bre-accent);
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
 }
-.bre-effort-empty { min-height: 24px; }
+/* A hairline between the panel's groups (the board's eff-sep). */
+.bre-effort-sep {
+  height: 1px;
+  margin: 0;
+  border: none;
+  background: var(--bre-line-1);
+}
 .bre-effort-actions {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+/* The panel's only action is 放弃修改, and the board draws it as a ghost — no
+   border, no fill, quiet ink — so the row does not end on a second button-shaped
+   promise beside the card's own 保存. */
+.bre-effort-actions .bre-secondary-button {
+  height: 28px;
+  padding: 0 10px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--bre-ink-2);
+  font-size: 12px;
+}
+.bre-effort-actions .bre-secondary-button:hover:not(:disabled) {
+  background: var(--bre-hover);
+  color: var(--bre-ink);
 }
 .bre-secondary-button {
   height: 26px;
@@ -430,54 +604,57 @@ body[data-ds-dark-theme] {
 .bre-effort-message { font-size: 12px; margin: 0; }
 .bre-effort-message.bre-error { color: #c62828; }
 .bre-effort-message.bre-info { color: var(--dsw-alias-link); }
-.bre-effort-note { font-size: 11px; margin: 0; color: var(--dsw-alias-label-tertiary); }
-/* The one-line variant: the default-effort hint under the pick's form row. The
-   row disclosure is narrow, and a wrapped explanation read as a broken layout
-   (说明文字也换行了); the headers pane keeps its own wrapping notes. */
-.bre-effort-note-oneline {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* The note under a control: the board's third level of explanation — 11/16 in
+   the faintest ink, an optional 12px glyph hanging in the left margin. Kept as
+   flowing text (not a flex row) because the headers pane writes whole sentences
+   through this same class and a flex container would make every text run its own
+   unwrappable item. */
+.bre-effort-note {
+  font-size: 11px;
+  line-height: 16px;
+  margin: 0;
+  color: var(--bre-ink-4);
 }
-/* The default-effort dropdown: sized by its longest option, matching the wire
-   inputs' quiet box. It sits BESIDE the row's label (选择框贴近“默认思考强度”) —
-   the row is a form row, not a two-ended header, so no auto margin pushes the
-   pick to the disclosure's far edge. */
+.bre-effort-note svg {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 6px;
+  flex: none;
+  color: var(--bre-ink-4);
+}
+/* The default-effort dropdown, drawn as the board's mini-select: a 30px white
+   box with a hairline and the same 12px chevron the other selects use, so it
+   reads as one of the panel's controls rather than a form field dropped in.
+   It stays a REAL select (aria-label included) because that is what the row
+   stores a level into. */
 .bre-effort-select {
   flex: none;
-  height: 28px;
-  min-width: 128px;
-  padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-l3, #0000001f);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-primary, #fff);
-  color: var(--dsw-alias-label-primary, #0f1115);
+  width: 100%;
+  max-width: 260px;
+  height: 30px;
+  min-width: 0;
+  padding: 0 30px 0 9px;
+  border: 1px solid var(--bre-line-3);
+  border-radius: var(--bre-r-sm);
+  background-color: var(--bre-surface);
+  color: var(--bre-ink);
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 12px 12px;
+  transition: border-color var(--bre-t) var(--bre-ease), box-shadow var(--bre-t) var(--bre-ease);
 }
+.bre-effort-select:hover:not(:disabled) { border-color: var(--bre-line-4); }
 .bre-effort-select:focus-visible {
   outline: none;
-  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
-  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #4d6bfe);
+  border-color: var(--bre-accent);
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
 }
 .bre-effort-select:disabled { opacity: 0.55; cursor: default; }
-/* The master thinking switch, which lives OUTSIDE the card it gates: with it
-   off that card is not rendered at all, so nothing here has to be hidden. */
-.bre-thinking-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-  cursor: pointer;
-}
-.bre-thinking-switch input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--dsw-alias-brand-primary);
-  cursor: pointer;
-}
 .bre-select, .bre-text-input {
   box-sizing: border-box;
   width: 100%;
@@ -529,29 +706,28 @@ body[data-ds-dark-theme] {
   Blank is a value — 沿用目录值 — which is why the placeholder says so. */
 .bre-effort-caps {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 18px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 18px;
 }
 .bre-cap {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 7px;
   min-width: 0;
 }
 .bre-cap-box {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   height: 30px;
   padding: 0 9px;
   border-radius: var(--bre-r-sm);
-  border: 1px solid transparent;
-  background: var(--bre-sunken);
-  transition: background var(--bre-t) var(--bre-ease), border-color var(--bre-t) var(--bre-ease), box-shadow var(--bre-t) var(--bre-ease);
-}
-.bre-cap-box:hover { background: var(--bre-sunken-2); }
-.bre-cap-box:focus-within {
+  border: 1px solid var(--bre-line-3);
   background: var(--bre-surface);
+  transition: border-color var(--bre-t) var(--bre-ease), box-shadow var(--bre-t) var(--bre-ease);
+}
+.bre-cap-box:hover { border-color: var(--bre-line-4); }
+.bre-cap-box:focus-within {
   border-color: var(--bre-accent);
   box-shadow: 0 0 0 3px var(--bre-accent-glow);
 }
@@ -572,15 +748,16 @@ body[data-ds-dark-theme] {
 .bre-cap-unit {
   flex: none;
   font-size: 10.5px;
-  color: var(--bre-ink-hint);
+  letter-spacing: 0.02em;
+  color: var(--bre-ink-4);
 }
+/* A warning note: the board keeps the sentence in quiet ink and puts the colour
+   on the glyph alone, so a panel with two warnings does not read as two alarms.
+   The headers pane has no glyph in its notes and re-colours them for itself. */
 .bre-effort-note.bre-warn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--bre-warn);
+  color: var(--bre-ink-3);
 }
-.bre-effort-note.bre-warn svg { flex: none; }
+.bre-effort-note.bre-warn svg { color: var(--bre-warn); }
 /* ---- Composer model menu (mounted inside the OFFICIAL menu) ----
    The body and host sizing follow HanaAyane's dsh-reasoning-effort (MIT).
    The model and reasoning-level rows below use the current row/list UI. */
@@ -871,7 +1048,10 @@ body[data-ds-dark-theme] {
   line-height: 18px;
   text-align: left;
   cursor: pointer;
-  transition: background var(--bre-t) var(--bre-ease), color var(--bre-t) var(--bre-ease);
+  transition:
+    background var(--bre-t) var(--bre-ease),
+    color var(--bre-t) var(--bre-ease),
+    opacity var(--bre-t) var(--bre-ease);
 }
 /* The provider cell reads one step quieter than its models: it is the index, the
    models are the content. */
@@ -880,8 +1060,13 @@ body[data-ds-dark-theme] {
 .bre-provider:hover:not(:disabled) {
   background: var(--bre-hover);
 }
+/* User item 4 (the model list "went grey and flashed"): the row dim used to land
+   and lift with no transition, so it read as a hard blink on every pick. It is
+   also a gentler step now — .55 read as "disabled", which is not what a pick
+   in flight means. Opacity is in the transition list above, so the fade is the
+   same 160ms every other state change on the row uses. */
 .bre-option:disabled,
-.bre-provider:disabled { cursor: default; opacity: .55; }
+.bre-provider:disabled { cursor: default; opacity: .72; }
 .bre-option:focus-visible,
 .bre-provider:focus-visible {
   outline: 2px solid var(--bre-accent);
@@ -1789,6 +1974,25 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   display: block;
 }
 
+/* User item 6: every card on the settings page carried a tinted base fill — the
+   configured row's card, the add/setup card, the editor body inside it, the
+   advanced pane — so a stack of cards read as a stack of grey blocks on a white
+   page. The card's own hairline is what draws it here; the fill steps back to
+   the page's background, which is the one value that is "no colour" in both
+   themes (bg-base is the content surface the page itself paints).
+   The marks are the plugin's own where it has one (data-bre-editor-body is the
+   tag this takeover puts on the official editor), and the official module card
+   stems where it does not: those class names carry a build hash, so they are
+   matched by stem and never spelled out. */
+.bre-tabbed [class*='rowCard'],
+.bre-tabbed [class*='addCard'],
+.bre-tabbed [class*='setupCard'],
+.bre-tabbed [data-bre-editor-body] {
+  background: var(--dsw-alias-bg-base, #ffffff);
+}
+
+/* The advanced pane is whitened where its own rule is defined, further down. */
+
 /* With the custom API form the only way left to add a provider, the official
    "How to add" switch has nothing to switch. The pass hides it ONLY once that
    form is really up: a card that has no custom form to offer, or a takeover
@@ -1935,21 +2139,21 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-tabbed[data-bre-tab='advanced'] .bre-headers { display: flex; }
 
 /* The pane is a card, and the section draws it. On the advanced tab the section
-   is not an appendage to the fields above it any more — it is the whole surface
-   — so it takes the inset fill the official module cards use (the add and setup
-   cards): the one fill in this system that stays visible on the content card's
-   own white in the light theme and reads as raised in the dark one, where every
-   theme layer token collapses onto the same value. The hairline goes with it: it
-   divided this section from those fields, and here the bar above ends the pane.
-   The 12px top margin sets the card off the tab bar above it — the same gap the
-   provider and models panes put between the bar and their own cards — and the
-   12px padding is the card's inner inset, not the separator. */
+   is not an appendage to the fields above it any more — it is the whole surface.
+   The hairline goes: it divided this section from those fields, and here the bar
+   above ends the pane. The 12px top margin sets the card off the tab bar above
+   it — the same gap the provider and models panes put between the bar and their
+   own cards — and the 12px padding is the card's inner inset, not the separator.
+   User item 6: the fill is the page's own background, not the tinted module
+   platform. The pane sits on a white card; a grey slab there was a second card
+   drawn inside the first. Its inset is carried by the padding and the bar's
+   hairline, so dropping the fill costs no structure. */
 .bre-tabbed[data-bre-tab='advanced'] .bre-headers {
   margin-top: 12px;
   padding: 12px;
   border-top: none;
   border-radius: var(--dsw-radius-lg, 16px);
-  background: var(--dsw-alias-bg-module-platform, #f5f6f7);
+  background: var(--dsw-alias-bg-base, #ffffff);
 }
 
 /* The pane's heading is not a fold head. The grey pill, its hover state and
@@ -2197,6 +2401,13 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   display: block;
   min-width: 0;
   margin-top: 4px;
+  /* User item 5: room for one key row plus the add row, reserved before the list
+     answers. The panel renders nothing while its read is in flight, so without
+     this the card painted at its short height and then grew by a row's height
+     when the keys arrived — the card visibly re-flowing just after it opened.
+     The reservation is the height the list settles at (40px row + 8px gap + 34px
+     add row + the list's own two 1px rules), so nothing moves once it lands. */
+  min-height: 84px;
 }
 
 .bre-keys { display: flex; flex-direction: column; gap: 8px; }
@@ -3123,21 +3334,25 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   background: var(--bre-accent-weak);
 }
 
-/* The key list: rows on a quiet surface, separated by a hairline, with no rule
-   drawn round the whole block. */
+/* The key list: rows kept apart by a hairline round the block and between the
+   rows. User item 2: with the block's rule removed and the divider at line-1
+   (a 4% black, invisible on white), a resting list read as loose text floating
+   in the card — the row only existed while the pointer was on it. The box is
+   back, in the same hairline the other groups use, so the extent of a row is
+   legible before it is hovered. */
 .bre-keys-list {
-  border: none;
-  border-radius: 0;
-  overflow: visible;
+  border: 1px solid var(--bre-line-2);
+  border-radius: var(--bre-r-sm);
+  overflow: hidden;
 }
 
-.bre-keys-list > li + li { border-top: 1px solid var(--bre-line-1); }
+.bre-keys-list > li + li { border-top: 1px solid var(--bre-line-2); }
 
 .bre-keys-row {
   gap: 8px;
   min-height: 40px;
   padding: 0 10px;
-  border-radius: var(--bre-r-sm);
+  border-radius: 0;
   transition: background var(--bre-t) var(--bre-ease);
 }
 
@@ -3211,11 +3426,18 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 
 /* The row's tray: the protocol and the model scope are STATE and stay on the
-   row; the verbs fade in on hover, so a resting list reads as names and nothing
-   else. The split is made here rather than in the markup — the tray stays
-   mounted (its width never changes, so hovering cannot shift the row), and only
-   the VERBS inside it are painted away, picked out by :not(.bre-keys-scope):
-   the scope is a <button> too, but its label is a count, not an action. */
+   row; the verbs appear on hover. The split is made here rather than in the
+   markup — the tray stays mounted and only the VERBS inside it are taken out of
+   the line, picked out by :not(.bre-keys-scope): the scope is a <button> too,
+   but its label is a count, not an action.
+   User item 2: they used to be kept in the line and painted away with opacity,
+   to stop the row shifting under the pointer. On a row with no alias that left
+   the two things that ARE always visible — the protocol pill and the scope
+   count — held apart by the width of three invisible buttons, so a resting list
+   read as scattered words. A verb that is not showing now takes no room: the
+   state stays together at the row's right edge, and the three actions open in
+   place on hover. The row keeps its own width either way (it is the list's
+   column), so nothing outside the row moves. */
 .bre-keys-actions {
   gap: 6px;
   opacity: 1;
@@ -3223,25 +3445,24 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 
 .bre-keys-actions .bre-link-button:not(.bre-keys-scope) {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease;
+  display: none;
 }
 
 .bre-keys-row:hover .bre-keys-actions .bre-link-button:not(.bre-keys-scope),
 .bre-keys-row:focus-within .bre-keys-actions .bre-link-button:not(.bre-keys-scope) {
-  opacity: 1;
-  pointer-events: auto;
+  display: inline-flex;
 }
 
 /* A row waiting on "confirm remove / cancel" must never hide its own question. */
 .bre-keys-actions.is-confirming .bre-link-button {
+  display: inline-flex;
   opacity: 1;
   pointer-events: auto;
 }
 
 @media (hover: none) {
   .bre-keys-actions .bre-link-button:not(.bre-keys-scope) {
+    display: inline-flex;
     opacity: 1;
     pointer-events: auto;
   }

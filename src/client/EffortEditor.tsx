@@ -5,18 +5,19 @@
  * everything arrives through a plain props face, so it stays testable in
  * isolation. The draft/intent rules live in the client/effort module.
  *
- * The redesign's shape: one head line (the master switch, the "declared N ·
- * default X" state, and the applied suggestion's provenance pill), the level
- * ladder as a row of toggle pills with the armed levels' wire spellings in a
- * compact row beneath, and the default pick and input modality as pill rows in
- * two columns. The capacities are editable here: the two fields mirror the
- * official row's own context-window / max-output inputs and write straight back
- * into them, so this card and the official disclosure are one draft with one
- * Save (a blank field hands the model back to the catalogue value). The
- * apply/reset actions sit at the very bottom and own every section.
+ * The shape is the design board's: one head line (the switch, the "declared N ·
+ * default X" state, and the applied suggestion's provenance pill) over a sunk
+ * panel with no outline of its own. Inside it, each decision is a section — a
+ * label row with its trailing action, the hint on its own line, and the control
+ * group under both: the level ladder as 28px chips, the armed levels' wire
+ * spellings folded behind a link into their own white sheet, then the default
+ * pick and the input modality side by side, then the two capacity fields. A
+ * hairline separates the declaration from the numbers. The only action is
+ * 放弃修改: the edits land with the official card's own Save, so this panel
+ * never grows a second commit button.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { PLUGIN_ID } from '../constants.js'
 import type {
@@ -49,6 +50,13 @@ const IMAGE_PATHS: readonly string[] = [
   'M2.9 11.2 6.1 8.4l2.1 1.9 1.8-1.5 2.7 2.4',
 ]
 const WARN_PATHS: readonly string[] = ['M8 3.2 13.6 12.8H2.4L8 3.2Z', 'M8 6.9v2.5', 'M8 11.3h.01']
+/** The sparkle on 自动适配, and the chevrons on the wire block's disclosure. */
+const SPARK_PATHS: readonly string[] = [
+  'M8 2.6 9.1 6.4 12.9 7.5 9.1 8.6 8 12.4 6.9 8.6 3.1 7.5 6.9 6.4Z',
+  'M12.3 2.4v1.9M11.35 3.35h1.9',
+]
+const CHEV_DOWN_PATHS: readonly string[] = ['M4.5 6.5 8 10 11.5 6.5']
+const CHEV_RIGHT_PATHS: readonly string[] = ['M6.5 4.5 10 8 6.5 11.5']
 
 /** One 12px stroke glyph, beside a modality pill's name or a warning note. */
 function Glyph({ paths }: { paths: readonly string[] }): ReactNode {
@@ -685,7 +693,9 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
       {/* The one-line head: the master switch, the state it implies, and the
           applied suggestion's provenance pill. With the switch off there is no
           ladder to configure, so the card below is not rendered at all — one
-          row is everything an un-thinking model shows. */}
+          row is everything an un-thinking model shows. The switch is the board's
+          28x16 track; the native checkbox rides on top of it, transparent, so
+          the row stays keyboard-operable and the drawn knob follows :checked. */}
       <div className="bre-effort-top">
         <label className="bre-thinking-switch">
           <input
@@ -695,11 +705,12 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
             aria-label={t('thinkingMode') + ' ' + String(index + 1)}
             onChange={(event) => { patchThinking(event.target.checked) }}
           />
+          <span className="bre-effort-switch-track" aria-hidden="true" />
           <span className="bre-effort-title">{t('thinkingMode')}</span>
         </label>
         <span className="bre-effort-state">{stateText}</span>
         {suggested === undefined ? null : (
-          <span className="bre-pill bre-effort-suggest" role="status">
+          <span className="bre-effort-suggest" role="status">
             {t('appliedHint', { source: suggestedSource, confidence: t('confidence_' + suggestedConfidence) })}
           </span>
         )}
@@ -709,16 +720,20 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
           <div className="bre-effort-sec">
             <div className="bre-effort-labelrow">
               <span className="bre-effort-label">{t('levelsLabel')}</span>
-              <em className="bre-effort-labelhint">{t('levelsHint')}</em>
+              <span className="bre-effort-grow" />
               <button
                 type="button"
-                className="bre-link-button bre-effort-adapt"
+                className="bre-effort-adapt"
                 disabled={disabled}
                 onClick={() => { void autoAdapt() }}
               >
+                <Glyph paths={SPARK_PATHS} />
                 {t('autoAdapt')}
               </button>
             </div>
+            {/* The explanation owns its line. Wedged into the label row as an
+                ellipsised fragment it was unreadable at the disclosure's width. */}
+            <p className="bre-effort-hint">{t('levelsHint')}</p>
             <div className="bre-pillrow" role="group" aria-label={t('levelsLabel')}>
               {LEVEL_ORDER.map(level => {
                 const cell = draft[level]
@@ -743,62 +758,64 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                 OpenAI none spelling, or the deepseek/zai explicit disabled
                 object); an empty one sends nothing. Conventional spellings are
                 folded behind the link — the pills are the decision, the wire
-                row is the bytes, and the bytes only interest an editor who
+                block is the bytes, and the bytes only interest an editor who
                 changed them. */}
             {armedLevels.length === 0 ? null : (
               <button
                 type="button"
-                className="bre-link-button bre-effort-wiretoggle"
+                className="bre-effort-wiretoggle"
                 disabled={disabled}
                 aria-expanded={wireOpen}
                 onClick={() => { setWireOpen(!wireOpen) }}
               >
+                <Glyph paths={wireOpen ? CHEV_DOWN_PATHS : CHEV_RIGHT_PATHS} />
                 {wireOpen ? t('wireHide') : t('wireShow')}
               </button>
             )}
             {armedLevels.length === 0 || !wireOpen ? null : (
-              <div className="bre-wire-row">
-                {armedLevels.map(level => (
-                  <label key={level} className="bre-wire-item">
-                    <span className="bre-wire-name">{t('level_' + level)}</span>
-                    <input
-                      type="text"
-                      className="bre-effort-wire"
-                      value={draft[level].wire}
-                      disabled={disabled}
-                      placeholder={t('wirePlaceholder')}
-                      aria-label={t('level_' + level) + ' ' + t('wireValue')}
-                      onChange={(event) => { patchWire(level, event.target.value) }}
-                    />
-                  </label>
-                ))}
+              <div className="bre-wire">
+                <div className="bre-wire-grid">
+                  {armedLevels.map(level => (
+                    <Fragment key={level}>
+                      <span className="bre-wire-name">{t('level_' + level)}</span>
+                      <input
+                        type="text"
+                        className="bre-effort-wire"
+                        value={draft[level].wire}
+                        disabled={disabled}
+                        placeholder={t('wirePlaceholder')}
+                        aria-label={t('level_' + level) + ' ' + t('wireValue')}
+                        onChange={(event) => { patchWire(level, event.target.value) }}
+                      />
+                    </Fragment>
+                  ))}
+                </div>
+                <p className="bre-effort-note">{t('wireHint')}</p>
               </div>
             )}
           </div>
           <div className="bre-effort-cols">
             {armedLevels.length === 0 ? null : (
               <div className="bre-effort-sec">
-                {/* One form row: the title names it on the left, the pick
-                    answers on the right. The default-effort pick is a DROPDOWN:
-                    one line however long the ladder, and the leading option is
-                    the memory chain itself (跟随记忆), so clearing the pick is
-                    an ordinary selection instead of a hidden gesture. */}
-                <div className="bre-effort-labelrow">
-                  <span className="bre-effort-label">{t('defaultEffortLabel')}</span>
-                  <select
-                    className="bre-effort-select"
-                    value={defaultEffort}
-                    disabled={disabled}
-                    aria-label={t('defaultEffortLabel')}
-                    onChange={(event) => { patchDefaultEffort(event.target.value) }}
-                  >
-                    <option value="">{t('followMemory')}</option>
-                    {pickLevels.map(level => (
-                      <option key={level} value={level}>{t('level_' + level)}</option>
-                    ))}
-                  </select>
-                </div>
-                <p className="bre-effort-note bre-effort-note-oneline">{t('defaultEffortHint')}</p>
+                {/* Label above the pick, as the board draws a section's control:
+                    the label row is the section's heading, and the pick is its
+                    body. The pick stays a real dropdown — one line however long
+                    the ladder — whose leading option is the memory chain itself
+                    (跟随记忆), so clearing it is an ordinary selection. */}
+                <span className="bre-effort-label">{t('defaultEffortLabel')}</span>
+                <select
+                  className="bre-effort-select"
+                  value={defaultEffort}
+                  disabled={disabled}
+                  aria-label={t('defaultEffortLabel')}
+                  onChange={(event) => { patchDefaultEffort(event.target.value) }}
+                >
+                  <option value="">{t('followMemory')}</option>
+                  {pickLevels.map(level => (
+                    <option key={level} value={level}>{t('level_' + level)}</option>
+                  ))}
+                </select>
+                <p className="bre-effort-note">{t('defaultEffortHint')}</p>
               </div>
             )}
             {/* The official page owns input types from 0.1.6-alpha.2 on (its
@@ -807,9 +824,7 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                 stands down. Older kernels keep it. */}
             {officialInputTypes ? null : (
               <div className="bre-effort-sec">
-                <div className="bre-effort-labelrow">
-                  <span className="bre-effort-label">{t('inputModality')}</span>
-                </div>
+                <span className="bre-effort-label">{t('inputModality')}</span>
                 <div className="bre-pillrow" role="group" aria-label={t('inputModality')}>
                   {/* Text is the declaration's floor: a declared row always
                       carries it, so the pill toggles DECLARED — clicking it
@@ -817,7 +832,7 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                       declared clears the declaration entirely. */}
                   <button
                     type="button"
-                    className={modality.declared ? 'bre-lvl is-on' : 'bre-lvl'}
+                    className={modality.declared ? 'bre-lvl bre-lvl--opt is-on' : 'bre-lvl bre-lvl--opt'}
                     disabled={disabled}
                     aria-pressed={modality.declared}
                     aria-label={t('modalityText') + ' ' + String(index + 1)}
@@ -826,9 +841,10 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                   >
                     <Glyph paths={TEXT_PATHS} />
                     {t('modalityText')}
-                  </button>                  <button
+                  </button>
+                  <button
                     type="button"
-                    className={modality.declared && modality.image ? 'bre-lvl is-on' : 'bre-lvl'}
+                    className={modality.declared && modality.image ? 'bre-lvl bre-lvl--opt is-on' : 'bre-lvl bre-lvl--opt'}
                     disabled={disabled}
                     aria-pressed={modality.declared && modality.image}
                     aria-label={t('modalityImage') + ' ' + String(index + 1)}
@@ -839,49 +855,12 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                     {t('modalityImage')}
                   </button>
                 </div>
-                {!modality.declared ? <p className="bre-effort-note">{t('modalityInherit')}</p> : null}
+                <p className="bre-effort-note">{modality.declared ? t('modalityDeclared') : t('modalityInherit')}</p>
               </div>
             )}
           </div>
+          <span className="bre-effort-sep" />
           {staged ? <p className="bre-effort-note">{t('stagedHint')}</p> : null}
-          <div className="bre-effort-caps">
-            <label className="bre-cap">
-              <span className="bre-effort-label">{t('contextWindowLabel')}</span>
-              <span className="bre-cap-box">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  className="bre-cap-input"
-                  value={capacityFocus === 'context' ? capacityContext : capacityText(capacityContextValue)}
-                  disabled={disabled}
-                  placeholder={t('capacityBlank')}
-                  aria-label={t('contextWindowLabel') + ' ' + String(index + 1)}
-                  onFocus={() => { setCapacityFocus('context') }}
-                  onBlur={() => { setCapacityFocus(undefined) }}
-                  onChange={(event) => { patchCapacity('context', event.target.value) }}
-                />
-                <span className="bre-cap-unit">{t('tokensUnit')}</span>
-              </span>
-            </label>
-            <label className="bre-cap">
-              <span className="bre-effort-label">{t('maxTokensLabel')}</span>
-              <span className="bre-cap-box">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  className="bre-cap-input"
-                  value={capacityFocus === 'output' ? capacityMax : capacityText(capacityMaxValue)}
-                  disabled={disabled}
-                  placeholder={t('capacityBlank')}
-                  aria-label={t('maxTokensLabel') + ' ' + String(index + 1)}
-                  onFocus={() => { setCapacityFocus('output') }}
-                  onBlur={() => { setCapacityFocus(undefined) }}
-                  onChange={(event) => { patchCapacity('output', event.target.value) }}
-                />
-                <span className="bre-cap-unit">{t('tokensUnit')}</span>
-              </span>
-            </label>
-          </div>
           {capacityWarn
             ? (
               <p className="bre-effort-note bre-warn">
@@ -901,6 +880,46 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
               stays hidden there exactly as the write does. */}
           {buildIntent(draft) === undefined && initialEfforts !== undefined
             ? <p className="bre-effort-note">{t('bareHint')}</p> : null}
+          <div className="bre-effort-cols">
+            <div className="bre-effort-sec">
+              <span className="bre-effort-label">{t('contextWindowLabel')}</span>
+              <span className="bre-cap-box">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="bre-cap-input"
+                  value={capacityFocus === 'context' ? capacityContext : capacityText(capacityContextValue)}
+                  disabled={disabled}
+                  placeholder={t('capacityBlank')}
+                  aria-label={t('contextWindowLabel') + ' ' + String(index + 1)}
+                  onFocus={() => { setCapacityFocus('context') }}
+                  onBlur={() => { setCapacityFocus(undefined) }}
+                  onChange={(event) => { patchCapacity('context', event.target.value) }}
+                />
+                <span className="bre-cap-unit">{t('tokensUnit')}</span>
+              </span>
+              <p className="bre-effort-note">{t('capacityInherit')}</p>
+            </div>
+            <div className="bre-effort-sec">
+              <span className="bre-effort-label">{t('maxTokensLabel')}</span>
+              <span className="bre-cap-box">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="bre-cap-input"
+                  value={capacityFocus === 'output' ? capacityMax : capacityText(capacityMaxValue)}
+                  disabled={disabled}
+                  placeholder={t('capacityBlank')}
+                  aria-label={t('maxTokensLabel') + ' ' + String(index + 1)}
+                  onFocus={() => { setCapacityFocus('output') }}
+                  onBlur={() => { setCapacityFocus(undefined) }}
+                  onChange={(event) => { patchCapacity('output', event.target.value) }}
+                />
+                <span className="bre-cap-unit">{t('tokensUnit')}</span>
+              </span>
+              <p className="bre-effort-note">{t('capacityRule')}</p>
+            </div>
+          </div>
           {suggested === undefined ? null : (
             <div className="bre-suggestion">
               {suggestedInputSource === undefined

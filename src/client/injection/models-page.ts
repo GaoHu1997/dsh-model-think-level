@@ -477,6 +477,16 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // session switch lands as a DOM mutation, and the new session's
       // directory must be watched before its projection can read as Default.
       onComposerMutation()
+      // User item 5: the editor injector runs HERE too, synchronously. Its scan
+      // head is DOM-only work — the label read, the row query, the provider
+      // card's field order, the disclosure buttons' re-pins — and it was left
+      // in the debounced scan only, so a card opened by a click painted in the
+      // official shape and then had its fields re-sorted a frame or more later.
+      // That re-sort is the "click Edit and the provider card flickers" report.
+      // Its wire reads are folded behind ??= and land in a later microtask, so
+      // nothing here waits on the network, and it leads the tab pass below
+      // because that pass classifies the fields this one has just ordered.
+      safely('editor reconcile', () => { reconcile(panelRoot(), injectorDeps, scanState) })
       // The tab pass runs HERE too, synchronously, for the same reason: it is
       // pure DOM work (attribute writes, no wire reads), and it must land in
       // the microtask that carries the official commit. Deferred to the

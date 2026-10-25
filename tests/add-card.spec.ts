@@ -365,10 +365,12 @@ describe('the create-provider card', () => {
     expect(state.hosts.size).toBe(0)
   })
 
-  it('dresses the add form key field exactly like the edit form does', () => {
-    // User item 7: the same input must look the same on both cards. On the edit
-    // card the key field comes out of the tab takeover (`revealKeyField`); here
-    // nothing else walks this form, so this pass has to dress it itself.
+  it('marks the add form key field without giving it a second eye', () => {
+    // User item 9: the official API-key box already draws its own reveal button
+    // INSIDE the box whenever it holds text, so a plugin eye hanging under the
+    // field was a second control for the same mask. The field is still MARKED —
+    // the mark is what keeps the input findable after the official toggle flips
+    // its type — but no eye is created here.
     const fixture = buildCard('shown')
 
     reconcileAddCards(fixture.root, deps(), state)
@@ -377,8 +379,7 @@ describe('the create-provider card', () => {
     const keyField = fixture.customPanel.querySelector<HTMLElement>('input[aria-label="API key"]')?.parentElement
     expect(keyField).not.toBeNull()
     expect(keyField?.classList.contains('bre-key-field')).toBe(true)
-    // Exactly one eye per key field, however many scans ran.
-    expect(keyField?.querySelectorAll('.bre-key-eye')).toHaveLength(1)
+    expect(keyField?.querySelectorAll('.bre-key-eye')).toHaveLength(0)
     // The other fields of the form are not key fields and are left alone.
     const routeField = fixture.customPanel.querySelector<HTMLElement>('input[aria-label="Provider ID"]')?.parentElement
     expect(routeField?.classList.contains('bre-key-field')).toBe(false)

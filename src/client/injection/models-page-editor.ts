@@ -2273,6 +2273,51 @@ const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'Ar
  * doing all the work and the delta was always 0 — drives the card the wrong way
  * whenever the page really did move it.
  */
+/**
+ * Let a growing card keep its place on screen without the browser buying the
+ * growth back.
+ *
+ * User item 1: opening 添加供应商 makes three things taller at once — the
+ * official page opens the first provider's editor above the new card, the
+ * create-card pass adds the tab bar, and the card's own key list lands a moment
+ * later. Scroll anchoring answers any of those by scrolling the page by the
+ * height that grew, which reads as the new card jumping and shoving the
+ * configured provider above it upward. Anchoring is switched off for a short
+ * window instead: no scroll write of ours, no compensation by the browser, and
+ * the card simply extends downward.
+ *
+ * Unlike {@link pinCardTop} this never writes a scroll offset — it only stops
+ * the browser from writing one — so it cannot fight a pin that is already
+ * running, and it releases itself on the same deadline a mount pin uses.
+ * @param node - an element whose ancestors' scroll containers should hold still.
+ * @param windowMs - how long to hold them still.
+ */
+export function suppressScrollAnchoring(node: HTMLElement, windowMs: number = REPIN_MOUNT_MS): void {
+  for (const target of scrollChainOf(node)) {
+    const known = ANCHOR_HOLDS.get(target)
+    if (known !== undefined) {
+      window.clearTimeout(known.timer)
+      known.timer = window.setTimeout(() => releaseAnchoring(target), windowMs)
+      continue
+    }
+    ANCHOR_HOLDS.set(target, {
+      saved: target.style.overflowAnchor,
+      timer: window.setTimeout(() => releaseAnchoring(target), windowMs),
+    })
+    target.style.overflowAnchor = 'none'
+  }
+}
+
+/** One held scroll container: its own value, and the deadline that gives it back. */
+const ANCHOR_HOLDS = new Map<HTMLElement, { saved: string; timer: number }>()
+
+function releaseAnchoring(target: HTMLElement): void {
+  const known = ANCHOR_HOLDS.get(target)
+  if (known === undefined) return
+  ANCHOR_HOLDS.delete(target)
+  target.style.overflowAnchor = known.saved
+}
+
 function pinCardTop(card: HTMLElement, windowMs: number): void {
   // The whole chain, not just the nearest scrollable ancestor: a card's place
   // on screen is the sum of every offset between it and the document, and a

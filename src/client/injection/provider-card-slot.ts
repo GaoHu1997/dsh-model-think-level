@@ -21,7 +21,7 @@
  * @module dsh-model-think-level/client/injection/provider-card-slot
  */
 
-import { createElement, useCallback, useEffect, useRef } from 'react'
+import { createElement, useCallback, useLayoutEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { PI_AI_NS, PLUGIN_ID } from '../../constants.js'
@@ -92,7 +92,13 @@ export function ProviderCardSlot({ provider, api, t }: ProviderCardSlotProps): R
 
   // An occurrence can acquire its route after its first render, or lose it
   // and mount a new wrapper later. Rebind whenever that route changes.
-  useEffect(() => {
+  // User item 5: `useLayoutEffect`, not `useEffect`. The first `sync()` below is
+  // what publishes `data-edit`, and `data-edit` is what reveals the tabbed
+  // section; from a passive effect that write lands after the frame the card was
+  // painted in, so the opened card showed the official one-column editor and
+  // then re-flowed into the tabbed one — the flash reported when the provider
+  // card is opened. A layout effect runs in the same commit, before paint.
+  useLayoutEffect(() => {
     const wrapper = host.current
     // No card row around us (a bare render) means no card state to observe:
     // leaving `data-edit` off keeps the section hidden, which is the only safe

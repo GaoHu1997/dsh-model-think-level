@@ -95,6 +95,22 @@ export interface KeyRevealDeps {
  */
 const DEPS = new WeakMap<HTMLElement, KeyRevealDeps>()
 
+/**
+ * The stored value each field's eye BORROWED into the input, if any.
+ *
+ * This lives on the FIELD and not in the eye's closure, which is what fixes
+ * user item 7 ("switching the protocol sometimes lost the typed API key"). A
+ * protocol switch re-renders the card, the tab pass re-dresses the field, and
+ * the eye the pass kept is not always the same node — while the value it
+ * borrowed is still sitting in the input, in the official draft. A closure copy
+ * died with the old eye and the new one had no way to know the text in the box
+ * was a borrowed secret rather than something the user typed, so hiding wrote
+ * nothing back and the borrowed value stayed in the form, ready to be saved as
+ * a brand-new credential. Keyed by the field, the knowledge outlives every eye
+ * the pass swaps in, and `resetKeyField` can still take the value back out.
+ */
+const BORROWED = new WeakMap<HTMLElement, string>()
+
 /** The key input of a field, when the field is the key field: the masked input
  * on a first pass, and — once revealed, where a `[type=password]` probe would
  * no longer find it — the input this pass marked. */
@@ -122,12 +138,34 @@ function eyeOf(field: HTMLElement): HTMLButtonElement | undefined {
  * how a takeover that has moved on (a provider whose key field is gone) drops
  * the affordance it no longer needs.
  */
+/**
+ * Mark a field's key input without giving it an eye.
+ *
+ * The official page already draws its own reveal button INSIDE the API-key box
+ * (`position: absolute; inset: 1px 1px 1px auto`) whenever the box holds text,
+ * so on the add-provider form — where there is no stored credential for an eye
+ * to fetch anyway — a second button hanging under the field was pure redundancy
+ * drawn twice (user item 9). The mark is still worth making: it is what keeps
+ * the input findable after the official toggle unmasks it, so the key list below
+ * survives the click.
+ */
+export function markKeyField(field: HTMLElement): void {
+  const input = keyInputOf(field)
+  if (input === undefined) return
+  setAttr(input, KEY_INPUT_ATTR, '')
+  setClass(field, KEY_FIELD_CLASS, true)
+}
+
 export function revealKeyField(field: HTMLElement, deps: KeyRevealDeps): void {
   const input = keyInputOf(field)
   if (input === undefined) {
     resetKeyField(field)
     return
   }
+  // A field the pass now dresses for a DIFFERENT provider is a different field
+  // as far as a borrowed value goes: what one card's eye fetched has nothing to
+  // do with the route the next card edits, so the record does not travel.
+  if (DEPS.get(field)?.route !== deps.route) BORROWED.delete(field)
   DEPS.set(field, deps)
   setAttr(input, KEY_INPUT_ATTR, '')
   setClass(field, KEY_FIELD_CLASS, true)
@@ -148,6 +186,16 @@ export function resetKeyField(field: HTMLElement): void {
   if (input instanceof HTMLInputElement) {
     input.removeAttribute(KEY_INPUT_ATTR)
     input.type = 'password'
+  }
+  // A borrowed secret left in a field this pass no longer dresses is a value
+  // nobody can take back out any more: the eye that knew it had been fetched
+  // from the store is gone, so the box would read as a draft the user typed and
+  // the NEXT eye would leave it there — where the official Save stores it under
+  // a brand-new reference (user item 7). Give it back the way hiding would have.
+  const borrowed = BORROWED.get(field)
+  BORROWED.delete(field)
+  if (borrowed !== undefined && input instanceof HTMLInputElement && input.value === borrowed) {
+    writeInputValue(input, '')
   }
 }
 
@@ -218,26 +266,25 @@ function createEye(field: HTMLElement): HTMLButtonElement {
   eye.type = 'button'
   eye.className = KEY_EYE_CLASS
   eye.append(svgIcon('eye'), svgIcon('eye-off'))
-  /** The stored value this eye wrote into the field, so hiding can take it
-   * back out. Held in the closure, not in an attribute: the value is already in
-   * the input, and a second copy in the DOM would outlive the reveal. */
-  let borrowed: string | undefined
-
+  // The stored value this pass borrowed into the field is tracked per FIELD
+  // (`BORROWED`), not per eye: the pass re-dresses a card on every re-render and
+  // an eye can be replaced while the value it fetched is still in the box.
   const toggle = async (): Promise<void> => {
     const input = keyInputOf(field)
     const deps = DEPS.get(field)
     if (input === undefined || deps === undefined) return
     if (input.type !== 'password') {
-      // Hiding: give back a value this eye borrowed. A value the user edited
+      // Hiding: give back a value this pass borrowed. A value the user edited
       // after revealing is theirs, and stays.
+      const borrowed = BORROWED.get(field)
+      BORROWED.delete(field)
       if (borrowed !== undefined && input.value === borrowed) writeInputValue(input, '')
-      borrowed = undefined
       input.type = 'password'
       syncEye(eye, input)
       return
     }
     const route = deps.route
-    if (route !== undefined && borrowed === undefined && input.value.length === 0) {
+    if (route !== undefined && BORROWED.get(field) === undefined && input.value.length === 0) {
       setAttr(eye, 'aria-busy', 'true')
       let key: string | undefined
       try {
@@ -254,11 +301,16 @@ function createEye(field: HTMLElement): HTMLButtonElement {
         setAttr(eye, 'title', failed)
         return
       }
-      // A draft typed while the host was answering wins over the stored key.
-      if (keyInputOf(field) === input && input.value.length === 0) {
-        borrowed = key
-        writeInputValue(input, key)
-      }
+      // The answer arrives a wire round trip later, and the card may have been
+      // re-dressed in between: this eye may no longer be the one on the field
+      // (a protocol switch re-renders the card and the pass drops the eye), and
+      // the value it is holding may now belong to a field nobody asked about.
+      // Writing it anyway is how a stale reveal re-filled a box the user had
+      // just emptied — and the next Save stored the secret again (item 7).
+      if (eyeOf(field) !== eye || !eye.isConnected) return
+      if (keyInputOf(field) !== input || input.value.length > 0) return
+      BORROWED.set(field, key)
+      writeInputValue(input, key)
     }
     input.type = 'text'
     syncEye(eye, input)

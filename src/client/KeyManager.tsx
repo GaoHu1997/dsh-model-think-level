@@ -328,21 +328,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     }
   }, [adopt, client, route])
 
-  /** Run one mutation, then take the host's word for the new list. */
-  const run = useCallback(
-    async (action: () => Promise<KeyAnswer>, okText: string | undefined): Promise<void> => {
-      setBusy(true)
-      setConfirming(undefined)
-      setEditing(undefined)
-      try {
-        adopt(await action(), okText)
-      } finally {
-        setBusy(false)
-      }
-    },
-    [adopt],
-  )
-
   const closeForm = (): void => {
     setEditing(undefined)
     setNameDraft('')
@@ -350,6 +335,38 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     setScopeDraft([])
     setProtocolDraft(undefined)
   }
+
+  /**
+   * Run one mutation, then take the host's word for the new list.
+   *
+   * User item 7 (the second way a typed key went missing): this used to close
+   * the open form on the way in, whatever the mutation was. So switching a
+   * row's protocol — or toggling one, or removing another — threw away a key
+   * the user had already typed into an add or replace form, with no message.
+   * The form now survives its own row's verbs; it closes only when the answer
+   * no longer lists the row it belongs to (the row was removed), because a
+   * form for a row that is gone has nothing left to write to. A create card's
+   * add form has no ref yet and survives everything, which is what it should
+   * do: it is the first key of a provider that does not exist yet.
+   */
+  const run = useCallback(
+    async (action: () => Promise<KeyAnswer>, okText: string | undefined): Promise<void> => {
+      const held = editing
+      setBusy(true)
+      setConfirming(undefined)
+      try {
+        const answer = await action()
+        adopt(answer, okText)
+        if (answer.ok && held !== undefined && held.kind !== 'add'
+          && !answer.entries.some(entry => entry.ref === held.ref)) {
+          closeForm()
+        }
+      } finally {
+        setBusy(false)
+      }
+    },
+    [adopt, editing],
+  )
 
   const openForm = (kind: 'alias' | 'value' | 'scope', row: KeyRow): void => {
     setEditing({ kind, ref: row.ref })

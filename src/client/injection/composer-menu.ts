@@ -407,8 +407,21 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
     syncTriggerDirectory()
     const menu = menuOf()
     if (menu === undefined) {
-      unmountReact(sliderMount)
-      sliderMount = undefined
+      // User item 4: the host closes the popover on a successful pick, and the
+      // mount goes with it. Unmounting the React root here threw away the whole
+      // body — its search text, the column that was open and, worst, the level
+      // it had settled on — so the next open rebuilt a root whose first frame
+      // painted the thumb at the ladder's left end and only then corrected
+      // itself. The root is DETACHED instead; the next reconcile re-inserts the
+      // same wrapper into the new menu (see reconcileSliderInto), state intact.
+      // A disabled preference still unmounts: that root has nothing to keep.
+      if (sliderMount !== undefined) {
+        if (sliderEnabled()) sliderMount.wrapper.remove()
+        else {
+          unmountReact(sliderMount)
+          sliderMount = undefined
+        }
+      }
       unmountSearch()
       lastModelPane = undefined
       lastOwnedSurface = undefined

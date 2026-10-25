@@ -6,11 +6,10 @@
  * differences the create card forces. First, there is no route to key the
  * list by — the id is being typed, and the drafts wait in the session ledger
  * (`staged-keys`) for the route the card's own 保存 declares — so the list is
- * the draft pane (`create-keys-pane`), not the host-backed one. Second, a
- * value the user had already typed into the official box when this seat
- * appears is SEED: taken out of the official form — which would otherwise save
- * it as the provider's single key beside the list — and shown as the first
- * draft row it becomes.
+ * the draft pane (`create-keys-pane`), not the host-backed one. Second, the
+ * official box keeps what the user typed into it: the create card is a FORM,
+ * and its own 保存 is what stores the provider's first key. The list below is
+ * for adding further keys, and lands once the route is declared.
  *
  * The field keeps the edit card's managed-field handover: `bre-key-managed`
  * stands the official input down (the list below says the same thing once per
@@ -26,7 +25,6 @@ import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { CreateKeysPane } from './create-keys-pane.js'
 import { setAttr, setClass } from './dom.js'
 import { KEY_MANAGED_CLASS } from './key-manager.js'
-import { writeInputValue } from './key-reveal.js'
 import { EffortBoundary, mountReact, unmountReact, type ForeignMount } from './mount.js'
 import type { DraftKeyStore, StagedKeysState } from './staged-keys.js'
 import type { RemoteApi } from '../types.js'
@@ -144,16 +142,20 @@ export function enhanceCreateKeySeat(field: HTMLElement, deps: CreateKeySeatDeps
 
   if (known !== undefined && known.host === host) return
   if (known !== undefined) drop(field, known)
-  // A value typed into the official box before this seat appeared is the first
-  // draft: the official form would save it as the provider's single key beside
-  // the list, so it comes OUT of the form (the way the user's own edit would)
-  // and becomes the row the user sees it as.
+  // User items 9 and 10: the official key box keeps whatever was typed into it.
+  //
+  // This seat used to pour that value into the draft list and empty the box (so
+  // the official form would not save it as the provider's single key beside the
+  // list). Two things went wrong with that. The official create card fetches its
+  // models with the key the FORM currently shows — `probe.apiKey` is literally
+  // its own draft — so an emptied box made 获取模型 ask the endpoint with no
+  // credential at all and the upstream answered 401 (user item 10). And the
+  // official in-field eye only exists while the box has text, so emptying it
+  // also took the eye away and left this plugin's own button hanging under the
+  // field instead (user item 9). The value stays where the user put it: the
+  // official box saves the provider's key, and the list below is an OPTIONAL
+  // extra for adding more keys, which land once the route is declared.
   const store: DraftKeyStore = { drafts: [] }
-  if (input.value.length > 0) {
-    store.drafts = [{ ref: 'key-1', value: input.value, enabled: true }]
-    writeInputValue(input, '')
-    console.info('[bre] create card: moved the typed key into the draft list')
-  }
   // `sync`: the card's height is what the settings scroller measures, so the
   // list must be in the tree before this microtask ends. The host is bound to a
   // const here: the pane holds it in a ref, and the closure must not see a

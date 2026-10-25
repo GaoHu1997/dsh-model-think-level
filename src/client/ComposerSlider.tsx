@@ -25,6 +25,7 @@ import {
   createElement,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -356,7 +357,16 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     () => configuredInputs?.getSnapshot() ?? EMPTY_CONFIGURED_INPUTS,
   )
   const levels = sliderLevels(state)
-  const [effort, setEffort] = useState('')
+  // User item 4 (level switching jumped): the footer used to seed itself EMPTY
+  // and paint the thumb at stop 0 until a post-paint effect corrected it. That
+  // first frame is the jump — worst on a remount, where every fresh root started
+  // the ladder's thumb at its left end. The store already knows the answer when
+  // the body mounts, so it is taken from there instead.
+  const [effort, setEffort] = useState(() => {
+    const snapshot = directory.store.getSnapshot()
+    const ladder = sliderLevels(snapshot)
+    return ladder[effectiveEffortIndex(ladder, snapshot)]?.id ?? ''
+  })
   const [query, setQuery] = useState('')
   const [openProvider, setOpenProvider] = useState<string | null>(null)
   const [committing, setCommitting] = useState(false)
@@ -365,7 +375,13 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const committedRef = useRef('')
   const committingRef = useRef(false)
   const available = state.current !== null && levels.length >= 2
-  const busy = committing || state.status === 'selecting'
+  // The two columns go quiet only while THIS body is committing a pick. The
+  // host's own `selecting` status used to dim them too, and the host dims on
+  // every wire step (including the effort-memory restore that follows a model
+  // switch), so one pick produced dim/undim/dim/undim — the blink user item 4
+  // reports. What the columns must not do is accept a second pick while one is
+  // in flight, and that is exactly what `committing` says.
+  const locked = committing
   const error = localError ?? state.error
   const select = directory.select as unknown as (
     input: SelectInput,
@@ -373,13 +389,19 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
 
   // The store is the single source of truth: every settled snapshot pulls the
   // selection back onto the level the session actually reports. Skipped while a
-  // commit is in flight so the optimistic pick is not yanked back mid-round-trip.
-  useEffect(() => {
-    if (committingRef.current) return
+  // commit is in flight (the optimistic pick must not be yanked back mid-round
+  // trip) and while the pointer holds the thumb (the drag owns the position).
+  //
+  // User item 4: this used to run in `useEffect`, i.e. after paint — a fresh
+  // mount painted its first frame from whatever the initializer said and only
+  // then corrected itself, which is the visible jump. A layout effect settles the
+  // level in the same commit, so no wrong frame is ever painted.
+  useLayoutEffect(() => {
+    if (committingRef.current || effortDraggingRef.current) return
     const index = effectiveEffortIndex(levels, state)
     const next = levels[index]?.id ?? ''
     committedRef.current = next
-    setEffort(next)
+    setEffort(current => (current === next ? current : next))
     setLocalError(null)
   }, [available, levels, state])
 
@@ -549,32 +571,100 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   // 条样式), and a track is fixed-length whatever the ladder's size. Dragging
   // only moves a PREVIEW stop; the commit fires on release, so one drag is one
   // select() round-trip, exactly one capsule click used to be.
+  //
+  // User item 4 (the slider was not smooth): the preview used to be an integer
+  // stop held in React state, re-rendered on every `pointermove` — so the thumb
+  // could only sit at N positions and moved at React's rate, not the pointer's.
+  // The preview is now a continuous RATIO painted straight onto the two nodes
+  // through their refs, coalesced into one animation frame; React state is only
+  // touched when the pointer crosses onto a different stop, which is all the
+  // ticks, the head label and the ARIA value need.
   const effortTrackRef = useRef<HTMLDivElement | null>(null)
+  const effortFillRef = useRef<HTMLSpanElement | null>(null)
+  const effortThumbRef = useRef<HTMLSpanElement | null>(null)
   const effortDraggingRef = useRef(false)
+  const dragStopRef = useRef<number | null>(null)
+  const dragRatioRef = useRef<number | null>(null)
+  const dragFrameRef = useRef<number | null>(null)
   const [dragStop, setDragStop] = useState<number | null>(null)
+  const [dragRatio, setDragRatio] = useState<number | null>(null)
   const effortIndex = Math.max(0, levels.findIndex(level => level.id === effort))
   const shownStop = dragStop ?? effortIndex
-  const effortPct = levels.length > 1 ? (shownStop / (levels.length - 1)) * 100 : 0
-  const stopFromX = (clientX: number): number => {
+  const effortPct = (dragRatio ?? (levels.length > 1 ? shownStop / (levels.length - 1) : 0)) * 100
+
+  /** Where along the track a client X sits, as a fraction of its width. */
+  const ratioFromX = (clientX: number): number => {
     const track = effortTrackRef.current
-    if (track === null || levels.length === 0) return effortIndex
+    if (track === null) return 0
     const rect = track.getBoundingClientRect()
-    if (rect.width <= 0) return effortIndex
-    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
-    return Math.round(ratio * (levels.length - 1))
+    if (rect.width <= 0) return 0
+    return Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
   }
+
+  /** The stop a fraction of the track lands on. */
+  const stopOfRatio = (ratio: number): number =>
+    levels.length > 1 ? Math.round(ratio * (levels.length - 1)) : 0
+
+  /** Paint one preview frame without a React render: the two nodes move. */
+  const paintPreview = (ratio: number): void => {
+    dragRatioRef.current = ratio
+    const pct = ratio * 100
+    if (effortFillRef.current !== null) {
+      effortFillRef.current.style.clipPath = `inset(0 ${100 - pct}% 0 0)`
+    }
+    if (effortThumbRef.current !== null) effortThumbRef.current.style.left = `${pct}%`
+  }
+
+  const previewFromX = (clientX: number): void => {
+    if (levels.length === 0) return
+    const ratio = ratioFromX(clientX)
+    // One paint per frame, whatever the pointer's rate is.
+    if (dragFrameRef.current === null) {
+      dragFrameRef.current = requestAnimationFrame(() => {
+        dragFrameRef.current = null
+        if (effortDraggingRef.current && dragRatioRef.current !== null) paintPreview(dragRatioRef.current)
+      })
+    }
+    dragRatioRef.current = ratio
+    // React state only when the crossed stop changes: that is what the ticks,
+    // the head label and the ARIA value read.
+    const stop = stopOfRatio(ratio)
+    if (stop !== dragStopRef.current) {
+      dragStopRef.current = stop
+      setDragStop(stop)
+      setDragRatio(ratio)
+    }
+  }
+
+  /** Drop the preview and let the settled level take the thumb back. */
+  const clearPreview = (): void => {
+    dragStopRef.current = null
+    dragRatioRef.current = null
+    if (dragFrameRef.current !== null) {
+      cancelAnimationFrame(dragFrameRef.current)
+      dragFrameRef.current = null
+    }
+    setDragStop(null)
+    setDragRatio(null)
+  }
+
   const onEffortPointerDown = (event: PointerEventLike): void => {
-    if (busy || !available) return
+    if (!available) return
     event.preventDefault()
     effortDraggingRef.current = true
     if (typeof event.currentTarget.setPointerCapture === 'function') {
       try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* capture is best-effort */ }
     }
-    setDragStop(stopFromX(event.clientX))
+    dragStopRef.current = stopOfRatio(ratioFromX(event.clientX))
+    previewFromX(event.clientX)
+    setDragStop(dragStopRef.current)
+    setDragRatio(dragRatioRef.current)
   }
   const onEffortPointerMove = (event: PointerEventLike): void => {
-    if (!effortDraggingRef.current || busy) return
-    setDragStop(stopFromX(event.clientX))
+    // No `busy` here: a store notification mid-drag used to freeze the thumb
+    // under the finger. The commit paths guard themselves.
+    if (!effortDraggingRef.current) return
+    previewFromX(event.clientX)
   }
   const onEffortPointerUp = (event: PointerEventLike): void => {
     if (!effortDraggingRef.current) return
@@ -583,13 +673,18 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
       && event.currentTarget.hasPointerCapture?.(event.pointerId) === true) {
       try { event.currentTarget.releasePointerCapture(event.pointerId) } catch { /* capture is best-effort */ }
     }
-    const at = stopFromX(event.clientX)
-    setDragStop(null)
+    const at = stopOfRatio(ratioFromX(event.clientX))
     const next = levels[at]
-    if (next !== undefined) void chooseEffort(next.id)
+    if (next === undefined) {
+      clearPreview()
+      return
+    }
+    // The preview stays up until the commit settles: dropping it first made a
+    // guarded no-op snap the thumb back to where it started.
+    void chooseEffort(next.id).finally(clearPreview)
   }
   const onEffortKeyDown = (event: KeyboardEventLike): void => {
-    if (busy || !available) return
+    if (!available) return
     let at: number | undefined
     if (event.key === 'ArrowRight' || event.key === 'ArrowUp') at = Math.min(levels.length - 1, shownStop + 1)
     else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') at = Math.max(0, shownStop - 1)
@@ -696,7 +791,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
           className: 'bre-provider'
             + (provider === shownProvider ? ' is-open' : '')
             + (provider === current?.provider ? ' is-current' : ''),
-          disabled: busy,
+          disabled: locked,
           'aria-expanded': provider === shownProvider,
           onMouseLeave: onLeave,
           onClick: () => { setOpenProvider(provider); setQuery('') },
@@ -744,7 +839,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
             key,
             type: 'button',
             className: 'bre-option' + (active ? ' is-active' : ''),
-            disabled: busy,
+            disabled: locked,
             'aria-pressed': active,
             onMouseLeave: onLeave,
             onClick: () => { void chooseModel(provider, choice.id) },
@@ -811,7 +906,10 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
             'aria-valuemax': levels.length - 1,
             'aria-valuenow': shownStop,
             'aria-valuetext': levels[shownStop]?.name,
-            'aria-disabled': busy || undefined,
+            'aria-disabled': locked || undefined,
+            // The drag owns the thumb while it is held: the stylesheet reads
+            // this to switch off the settle transition (user item 4).
+            'data-bre-dragging': dragStop === null ? undefined : 'true',
             onPointerDown: onEffortPointerDown,
             onPointerMove: onEffortPointerMove,
             onPointerUp: onEffortPointerUp,
@@ -820,6 +918,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
           },
           createElement('span', {
             className: 'bre-effort-slider-fill',
+            ref: effortFillRef,
             style: { clipPath: `inset(0 ${100 - effortPct}% 0 0)` },
           }),
           // Every stop but the one under the thumb: a 2px hole in the track, so
@@ -833,6 +932,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
             })),
           createElement('span', {
             className: 'bre-effort-slider-thumb',
+            ref: effortThumbRef,
             style: { left: `${effortPct}%` },
           }),
         ),
