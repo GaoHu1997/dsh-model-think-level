@@ -69,6 +69,8 @@ export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPanePro
   const [rows, setRows] = useState<readonly Row[]>([])
   const [records, setRecords] = useState<ReadonlyMap<string, FingerprintRecord>>(new Map())
   const [loadError, setLoadError] = useState<string | undefined>(undefined)
+  /** 运输层失败：没有记录可看，只能把原因说出来。 */
+  const [runError, setRunError] = useState<{ model: string; error: string } | undefined>(undefined)
 
   const runner = useMemo(() => (create ? undefined : fingerprintRunner(route)), [create, route])
   const runnerState = useSyncExternalStore(
@@ -82,11 +84,21 @@ export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPanePro
   useEffect(() => {
     if (runner === undefined) return
     return runner.onRecord((record) => {
+      setRunError(undefined)
       setRecords((current) => {
         const next = new Map(current)
         next.set(record.model, record)
         return next
       })
+    })
+  }, [runner])
+
+  // 500 / 断网 / 流半路断掉：这次没有结论。把原因留在页面上，直到下一次成功
+  // 或下一次点击；否则按钮转一圈复位，用户无法区分"没跑"和"没测出来"。
+  useEffect(() => {
+    if (runner === undefined) return
+    return runner.onFailure((model, error) => {
+      setRunError({ model, error })
     })
   }, [runner])
 
@@ -173,6 +185,13 @@ export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPanePro
     createElement('p', { className: 'bre-fp-intro' }, t('fpIntro')),
     loadError !== undefined
       ? createElement('p', { className: 'bre-fp-error' }, t('fpLoadFailed', { error: loadError }))
+      : null,
+    runError !== undefined
+      ? createElement(
+          'p',
+          { className: 'bre-fp-error', role: 'alert' },
+          t('fpRunFailed', { error: `${runError.model}: ${runError.error}` }),
+        )
       : null,
     createElement(
       'div',

@@ -443,7 +443,7 @@ describe('HeadersEditor', () => {
 
       // Drop the stored row: its remove button carries the row name in its label.
       const remove = Array.from(editor.container.querySelectorAll<HTMLButtonElement>('button'))
-        .find(button => button.getAttribute('aria-label') === `${en.headersClear} x-drop`)
+        .find(button => button.getAttribute('aria-label') === `${en.headersRemove} x-drop`)
       await act(async () => { remove!.click() })
 
       await act(async () => { buttonByText(editor.container, en.headersSave).click() })
@@ -473,7 +473,7 @@ describe('HeadersEditor', () => {
 
       // Clear only the appended row: the loaded pair must survive.
       const addedRemove = Array.from(editor.container.querySelectorAll<HTMLButtonElement>('button'))
-        .find(button => button.getAttribute('aria-label') === `${en.headersClear} x-added`)
+        .find(button => button.getAttribute('aria-label') === `${en.headersRemove} x-added`)
       await act(async () => { addedRemove!.click() })
       expect(rowNames()).toEqual(['x-first', 'x-second'])
 
@@ -491,7 +491,7 @@ describe('HeadersEditor', () => {
       await expand(editor.container)
       await act(async () => { buttonByText(editor.container, en.headersEdit).click() })
       const remove = Array.from(editor.container.querySelectorAll<HTMLButtonElement>('button'))
-        .find(button => button.getAttribute('aria-label') === `${en.headersClear} x-company`)
+        .find(button => button.getAttribute('aria-label') === `${en.headersRemove} x-company`)
       await act(async () => { remove!.click() })
       await act(async () => { buttonByText(editor.container, en.headersSave).click() })
 

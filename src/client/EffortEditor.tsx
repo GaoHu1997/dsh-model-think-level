@@ -37,10 +37,8 @@ import {
 import { defaultWireRisk } from './wire-preview.js'
 import { suggestEfforts } from '../knowledge.js'
 import { listenAutoEffort, queueAutoEffort } from './auto-effort.js'
+import { capacityText, parseCapacity } from './capacity.js'
 import type { EffortEditorApi, EffortWriteIntent, PendingWrite, PendingWriteParts } from './types.js'
-
-/** Thousands-grouped token counts, matching the official capacity inputs. */
-const COUNT = new Intl.NumberFormat('en-US')
 
 /** The glyphs this editor draws, on the 16px grid the injected controls use. */
 const TEXT_PATHS: readonly string[] = ['M3.4 4.2h9.2', 'M8 4.2v8.2', 'M5.9 12.4h4.2']
@@ -80,24 +78,6 @@ function Glyph({ paths }: { paths: readonly string[] }): ReactNode {
   )
 }
 
-/**
- * A capacity field's token count, or `undefined` for a blank field.
- *
- * The official inputs take plain digits, so the draft keeps the digits alone and
- * the display groups them: one parser for both directions keeps "1,048,576"
- * the number the official form already held.
- */
-function parseCapacity(text: string): number | undefined {
-  const digits = text.replace(/\D/g, '')
-  if (digits === '') return undefined
-  const value = Number(digits)
-  return Number.isFinite(value) && value > 0 ? value : undefined
-}
-
-/** A capacity count as the field shows it when it is not being typed into. */
-function capacityText(value: number | undefined): string {
-  return value === undefined ? '' : COUNT.format(value)
-}
 /** One model row's data the editor needs. */
 export interface EffortModel {
   /** Model id (the settings key). */
@@ -148,13 +128,19 @@ export interface EffortEditorProps {
    */
   staged?: boolean
   /**
-   * Whether the official Models page owns input types for this row (the
-   * 0.1.6-alpha.2 `ModelInputTypes` control was sniffed in the disclosure).
-   * True hides the modality section: the official editor is the single
-   * surface, so showing a second one would be duplicate UI. Older kernels
-   * have no such control and keep the section.
+   * Whether the official Models page owns input types for this row. The
+   * injector now hides that official control and always shows this card's
+   * modality section, so the prop is kept only to document the old kernel
+   * split and is no longer read.
    */
   officialInputTypes?: boolean
+  /**
+   * Report whether this card currently covers the official capacity and
+   * input-type chrome. The card exists only while the thinking switch is on;
+   * when it is off the row's own official controls have to come back, or a
+   * model that declares no reasoning would lose every way to edit its window.
+   */
+  onCoverageChange?: (covered: boolean) => void
   /** The write seam (settings.mutate plus the suggestion engine). */
   api: EffortEditorApi
   /** Read-only (settings document not writable). */
@@ -249,7 +235,7 @@ export function pendingWriteOf(parts: PendingWriteParts): PendingWrite {
  * checkboxes, the modality toggle, the auto-adapt action, and the
  * apply/reset actions that own both sections.
  */
-export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName, efforts: initialEfforts, effortsUnset = false, input: initialInput, compat: initialCompat, defaultEffort: initialDefaultEffort, index, staged = false, officialInputTypes = false, api, readOnly, t }: EffortEditorProps): ReactNode {
+export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName, efforts: initialEfforts, effortsUnset = false, input: initialInput, compat: initialCompat, defaultEffort: initialDefaultEffort, index, staged = false, officialInputTypes = false, onCoverageChange, api, readOnly, t }: EffortEditorProps): ReactNode {
   const [draft, setDraft] = useState<DraftLevels>(() => draftFrom(initialEfforts))
   const [modality, setModality] = useState<DraftModality>(() => modalityFrom(initialInput))
   // The master thinking switch. OFF reports the ladder as `false` — the row's
@@ -258,6 +244,16 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   // starts ON unless the stored row already says `false`, so a row nobody
   // touches never gains a declaration it did not have.
   const [thinking, setThinking] = useState<boolean>(() => initialEfforts !== false)
+  // The host owns the official capacity/input-type fields; this card stands in
+  // for them only while the thinking switch is on. Report the switch so the
+  // injector can hand them back the moment the card steps aside, and take them
+  // over again when it returns. A ref keeps the effect keyed on the switch
+  // alone: the injector rebuilds its callbacks on every scan.
+  const coverageRef = useRef(onCoverageChange)
+  coverageRef.current = onCoverageChange
+  useEffect(() => {
+    coverageRef.current?.(thinking)
+  }, [thinking])
   // The per-model default-effort pick (issue #4), as the level id or '' for
   // "follow the memory chain". The pick lives in the same Apply as the ladder
   // so one mutate carries both.
@@ -515,17 +511,25 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
    *
    * Write-through, not a draft: the two fields ARE the official form's fields,
    * so every keystroke becomes that form's value and the card's own Save
-   * persists it. A cleared field hands the number back to the catalogue (the
-   * official input is emptied rather than pinned to the old value).
+   * persists it. The text is kept verbatim while the caret is in the field, so
+   * the catalogue's `1M`/`128K` shorthand survives typing and is expanded to
+   * the plain token count only on the way into the official form.
    */
   const patchCapacity = (which: 'context' | 'output', text: string): void => {
-    const digits = text.replace(/\D/g, '').slice(0, 12)
-    const nextContext = which === 'context' ? digits : capacityContext
-    const nextMax = which === 'output' ? digits : capacityMax
+    const typed = text.slice(0, 20)
+    const nextContext = which === 'context' ? typed : capacityContext
+    const nextMax = which === 'output' ? typed : capacityMax
     setCapacityFocus(which)
-    if (which === 'context') setCapacityContext(digits)
-    else setCapacityMax(digits)
+    if (which === 'context') setCapacityContext(typed)
+    else setCapacityMax(typed)
     api.setCapacities?.({ contextWindow: parseCapacity(nextContext), maxTokens: parseCapacity(nextMax) })
+  }
+
+  /** Leave a field: fold the typed shorthand back into grouped digits. */
+  const normalizeCapacity = (which: 'context' | 'output'): void => {
+    if (which === 'context') setCapacityContext((current) => capacityText(parseCapacity(current)))
+    else setCapacityMax((current) => capacityText(parseCapacity(current)))
+    setCapacityFocus(undefined)
   }
 
   const applySuggestion = (
@@ -818,12 +822,10 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                 <p className="bre-effort-note">{t('defaultEffortHint')}</p>
               </div>
             )}
-            {/* The official page owns input types from 0.1.6-alpha.2 on (its
-                ModelInputTypes control was sniffed in this row's disclosure):
-                the official editor is the single surface then, so this section
-                stands down. Older kernels keep it. */}
-            {officialInputTypes ? null : (
-              <div className="bre-effort-sec">
+            {/* The injector hides the official ModelInputTypes control and
+                keeps exactly one modality surface: this one. It writes both the
+                legacy document declaration and the official checkbox state. */}
+            <div className="bre-effort-sec">
                 <span className="bre-effort-label">{t('inputModality')}</span>
                 <div className="bre-pillrow" role="group" aria-label={t('inputModality')}>
                   {/* Text is the declaration's floor: a declared row always
@@ -857,7 +859,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                 </div>
                 <p className="bre-effort-note">{modality.declared ? t('modalityDeclared') : t('modalityInherit')}</p>
               </div>
-            )}
           </div>
           <span className="bre-effort-sep" />
           {staged ? <p className="bre-effort-note">{t('stagedHint')}</p> : null}
@@ -886,14 +887,14 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
               <span className="bre-cap-box">
                 <input
                   type="text"
-                  inputMode="numeric"
+                  inputMode="text"
                   className="bre-cap-input"
                   value={capacityFocus === 'context' ? capacityContext : capacityText(capacityContextValue)}
                   disabled={disabled}
                   placeholder={t('capacityBlank')}
                   aria-label={t('contextWindowLabel') + ' ' + String(index + 1)}
                   onFocus={() => { setCapacityFocus('context') }}
-                  onBlur={() => { setCapacityFocus(undefined) }}
+                  onBlur={() => { normalizeCapacity('context') }}
                   onChange={(event) => { patchCapacity('context', event.target.value) }}
                 />
                 <span className="bre-cap-unit">{t('tokensUnit')}</span>
@@ -905,19 +906,19 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
               <span className="bre-cap-box">
                 <input
                   type="text"
-                  inputMode="numeric"
+                  inputMode="text"
                   className="bre-cap-input"
                   value={capacityFocus === 'output' ? capacityMax : capacityText(capacityMaxValue)}
                   disabled={disabled}
                   placeholder={t('capacityBlank')}
                   aria-label={t('maxTokensLabel') + ' ' + String(index + 1)}
                   onFocus={() => { setCapacityFocus('output') }}
-                  onBlur={() => { setCapacityFocus(undefined) }}
+                  onBlur={() => { normalizeCapacity('output') }}
                   onChange={(event) => { patchCapacity('output', event.target.value) }}
                 />
                 <span className="bre-cap-unit">{t('tokensUnit')}</span>
               </span>
-              <p className="bre-effort-note">{t('capacityRule')}</p>
+              <p className="bre-effort-note">{t('capacityUnitsHint')}</p>
             </div>
           </div>
           {suggested === undefined ? null : (

@@ -98,11 +98,11 @@ body[data-ds-dark-theme] {
   margin: 8px 0 4px;
 }
 /* The 思考强度 panel proper — rendered only while the master switch is on.
-   User item 8: this is the DESIGN's card (board-2), and the board's first rule
-   for it is that the 0.5px outline goes away — 框里画框, a frame drawn inside a
-   frame, was the complaint. What draws the panel instead is a flat fill one
-   step below the page plus a 12px corner, with the inner padding set to line up
-   with the official row body's own 12px. */
+   User item 8: the 0.5px outline goes away — 框里画框, a frame drawn inside a
+   frame, was the complaint. User item 3 then dropped the tinted fill too: the
+   editor sits INSIDE the official card, so a grey slab read as a second card
+   nested in the first. The panel now paints the same fill as the host's own
+   row cards and takes its structure from spacing alone. */
 .bre-effort-card {
   display: flex;
   flex-direction: column;
@@ -110,7 +110,7 @@ body[data-ds-dark-theme] {
   padding: 13px 15px 12px;
   border: none;
   border-radius: var(--bre-r-md);
-  background: var(--bre-sunken);
+  background: var(--dsw-alias-settings-card-fill, #ffffff);
   box-sizing: border-box;
 }
 /* The editor's one-line head: the master switch with its title, the declared
@@ -793,7 +793,7 @@ body[data-ds-dark-theme] {
    gets the prefix. */
 [data-composer-card] button[data-bre-provider]::before,
 [data-slot="conversation.input.model"] button[data-bre-provider]::before {
-  content: attr(data-bre-provider) " · ";
+  content: attr(data-bre-provider) " \xB7 ";
   flex: none;
   color: var(--dsw-alias-label-secondary);
   font-weight: 400;
@@ -1446,60 +1446,111 @@ body:not([data-ds-dark-theme]) .bre-tip {
   line-height: 16px;
   text-align: center;
 }
+/* The head is a plain title row on the card's own white — the tinted strip it
+   used to be drew a second bar inside the card (user item 3). 全部清空 sits at
+   the far right, blue like the host's other text actions. */
 .bre-headers-head {
   display: flex;
   align-items: center;
-  min-height: 32px;
-  padding: 0 8px;
-  border-radius: var(--dsw-radius-sm, 8px);
-  background: var(--dsw-alias-interactive-bg-hover, #2631480f);
+  gap: 8px;
+  min-height: 28px;
+  padding: 0;
+  background: none;
 }
 .bre-headers-head .bre-effort-title {
   color: var(--dsw-alias-label-primary, #0f1115);
   font-weight: 600;
 }
+.bre-headers-clear {
+  margin-left: auto;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: var(--dsw-alias-link, #4d6bfe);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.bre-headers-clear:hover:not(:disabled) { text-decoration: underline; }
+.bre-headers-clear:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 .bre-headers-edit, .bre-headers-rows {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
+/* Columns and rows share one grid so the captions sit over their inputs. The
+   row itself is bare: the inputs are the boxes, a second border around the
+   pair was the old "framed row" look (board image 4). */
 .bre-headers-columns,
 .bre-headers-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.9fr) minmax(180px, 1.5fr) 28px;
+  grid-template-columns: minmax(120px, 1fr) minmax(180px, 1.6fr) 28px;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 .bre-headers-columns {
-  padding: 0 10px;
+  padding: 0 2px;
   color: var(--dsw-alias-label-tertiary, #81858c);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: 12px;
+  line-height: 18px;
 }
 .bre-headers-row {
-  min-height: 40px;
-  padding: 4px 6px;
-  border: 1px solid var(--dsw-alias-border-l2, #0000001a);
-  border-radius: var(--dsw-radius-sm, 8px);
-  background: var(--dsw-alias-bg-layer-1, #fff);
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: none;
 }
+.bre-headers-edit .bre-headers-row { min-height: 38px; }
 .bre-headers-add {
   align-self: flex-start;
-  min-height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--dsw-alias-border-l2, #0000001a);
-  border-radius: var(--dsw-radius-sm, 8px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 14px;
+  border: 1px dashed var(--dsw-alias-border-l3, #0000001f);
+  border-radius: var(--dsw-radius-md, 12px);
+  background: transparent;
   color: var(--dsw-alias-label-primary, #0f1115);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.bre-headers-add::before {
+  content: '+';
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  font-size: 17px;
+  line-height: 1;
 }
 .bre-headers-add:hover:not(:disabled) {
+  border-color: var(--dsw-alias-border-l4, #00000033);
   background: var(--dsw-alias-interactive-bg-hover, #2631480f);
 }
+.bre-headers-add:disabled { opacity: 0.5; cursor: default; }
 .bre-headers-remove {
-  width: 28px;
-  padding: 0;
   justify-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
 }
+.bre-headers-remove:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, #2631480f);
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+.bre-headers-remove:disabled { opacity: 0.5; cursor: default; }
 .bre-headers-rows .bre-headers-name {
   color: var(--dsw-alias-label-secondary, #61666b);
   font-size: 12px;
@@ -1589,10 +1640,12 @@ body:not([data-ds-dark-theme]) .bre-tip {
   font-size: 12px;
 }
 
-/* The section's own fields, on the official input box. */
+/* The section's own fields, on the official input box: 38px tall and full
+   width, so the pair reads as one table row like board image 4. */
 .bre-headers-edit input.bre-text-input {
-  height: 32px;
-  padding: 0 10px;
+  max-width: none;
+  height: 38px;
+  padding: 0 12px;
   border: 1px solid var(--dsw-alias-border-l3, #0000001f);
   border-radius: var(--dsw-radius-md, 12px);
   background: var(--dsw-alias-bg-layer-1, #fff);
@@ -1987,8 +2040,12 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-tabbed [class*='rowCard'],
 .bre-tabbed [class*='addCard'],
 .bre-tabbed [class*='setupCard'],
-.bre-tabbed [data-bre-editor-body] {
-  background: var(--dsw-alias-bg-base, #ffffff);
+.bre-tabbed [data-bre-editor-body],
+/* The add-provider card is not a DESCENDANT of the takeover: the takeover sits
+   inside it. The add-card pass marks the card itself, and this pair of
+   selectors is what turns its module-platform fill into the page's white. */
+[class*='addCard'][data-bre-add-card='1'] {
+  background: var(--dsw-alias-settings-card-fill, #ffffff);
 }
 
 /* The advanced pane is whitened where its own rule is defined, further down. */
@@ -2145,7 +2202,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    above ends the pane. The 12px top margin sets the card off the tab bar above
    it — the same gap the provider and models panes put between the bar and their
    own cards — and the 12px padding is the card's inner inset, not the separator.
-   User item 6: the fill is the page's own background, not the tinted module
+   User item 3: the fill is the page's own background, not the tinted module
    platform. The pane sits on a white card; a grey slab there was a second card
    drawn inside the first. Its inset is carried by the padding and the bar's
    hairline, so dropping the fill costs no structure. */

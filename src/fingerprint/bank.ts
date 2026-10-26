@@ -6,7 +6,7 @@
 // 这个模块是宿主侧（Node）专用：它要读包里的 assets/unified_bank.json。
 // 前端只需要 summarizeBank() 的产物，走 /fingerprint-state 拿。
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -97,9 +97,38 @@ export function parseBank(raw: unknown): Bank {
   return raw as Bank;
 }
 
+/**
+ * Every place the bank can live, nearest first.
+ *
+ * The host bundles this module into `<pkg>/lib/index.js`, so `import.meta.url`
+ * points at `lib/` — but the package also keeps the very same layout in the
+ * source tree (`src/fingerprint/`). One fixed `../../assets` therefore only
+ * works in one of the two layouts, and in the installed profile it resolved to
+ * `<profile>/node_modules/assets/unified_bank.json` (the parent of the plugin
+ * folder), which never exists. Walking up from the module and taking the first
+ * `assets/unified_bank.json` that exists works for source, lib/, and any future
+ * bundle depth without trusting `process.cwd()` (the host's cwd is the user's,
+ * not the package's).
+ */
+function bankCandidates(): string[] {
+  const candidates: string[] = [];
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let depth = 0; depth < 5; depth += 1) {
+    candidates.push(join(dir, 'assets', 'unified_bank.json'));
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return candidates;
+}
+
 function bankPath(): string {
-  // 打包后这里位于 <pkg>/lib/fingerprint/bank.js，银行在 <pkg>/assets/unified_bank.json。
-  return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'assets', 'unified_bank.json');
+  const candidates = bankCandidates();
+  const found = candidates.find(candidate => existsSync(candidate));
+  if (found === undefined) {
+    throw new Error(`指纹库 assets/unified_bank.json 未找到（已查找：${candidates.join('、')}）`);
+  }
+  return found;
 }
 
 let cached: Bank | undefined;

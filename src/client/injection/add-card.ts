@@ -159,6 +159,11 @@ function applyAddCard(card: HTMLElement, deps: AddCardDeps, state: AddCardState)
     custom = panelWithSuffix(card, CUSTOM_PANEL_SUFFIX)
     if (custom === undefined || custom.hidden) return
   }
+  // User item 2: the add-provider card itself kept the official tinted fill,
+  // while every card INSIDE the takeover was whitened — a grey slab around a
+  // white form. The marker is this pass's own, so the stylesheet can whiten the
+  // card without matching a hashed host class.
+  if (card.getAttribute('data-bre-add-card') !== '1') card.setAttribute('data-bre-add-card', '1')
   ensureHost(card, custom, deps, state)
   // User item 9: the add-provider form gets the key field MARKED, not a second
   // eye. The official API-key box already draws its own reveal button inside

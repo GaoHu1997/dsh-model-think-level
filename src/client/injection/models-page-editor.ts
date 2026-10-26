@@ -35,6 +35,7 @@ import { AUTOFILL_MARKER, INPUT_UNSET_MARKER, PLUGIN_ID, UNSET_MARKER } from '..
 import { suggestEfforts, type CompatSuggestion, type InputModalities, type ReasoningEfforts } from '../../knowledge.js'
 import { modelsOf, routeFactsOf, isRecord } from '../../shared.js'
 import { buildIntent, draftFrom, sameEfforts } from '../effort.js'
+import { parseCapacity } from '../capacity.js'
 import {
   buildModalityIntent,
   ladderIntent,
@@ -226,6 +227,10 @@ export interface EditorMountProps {
    * DOM, never a kernel version.
    */
   officialInputTypes?: boolean
+  /** The card reports whether it still covers the official capacity and
+   * input-type fields: it does while its thinking switch is on, and steps
+   * aside when the switch turns the card off. */
+  onCoverageChange?: (covered: boolean) => void
   api: EffortEditorApi
   readOnly: boolean
   t: (key: string, params?: Record<string, string | number>) => string
@@ -1200,7 +1205,49 @@ export function showOfficialReasoning(container: HTMLElement): void {
 }
 
 /**
- * The official input-types checkbox an image verdict belongs to, or undefined
+ * The official capacity/input-type chrome THIS plugin stood down. The editor
+ * carries both decisions now (the design board puts 文本/图片 beside 默认思考
+ * 强度 and the two token counts inside the same card), so the official copies
+ * would be a second, smaller surface for the same fields.
+ */
+const CAPACITY_HIDDEN_ATTR = 'data-bre-capacity-hidden'
+
+/** The official disclosure's capacity labels and the input-types fieldset. */
+function capacityChromeOf(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.children).filter((child): child is HTMLElement => {
+    if (child.nodeType !== 1) return false
+    const element = child as HTMLElement
+    return element.matches('[class*="modelField"]') || element.matches('[class*="modelInputTypes"]')
+  })
+}
+
+/**
+ * Stand the official context-window / max-output labels and the input-types
+ * fieldset down for a row whose editor renders those same decisions.
+ *
+ * Only DIRECT children of the disclosure are touched: the editor's own inputs
+ * (and its own modality pills) live inside `.bre-effort-slot`, which carries
+ * neither class stem. The marker attribute distinguishes this hide from one the
+ * host wrote itself, exactly like {@link hideOfficialReasoning}.
+ */
+export function hideOfficialCapacityChrome(container: HTMLElement): void {
+  for (const element of capacityChromeOf(container)) {
+    if (element.style.display === 'none') continue
+    element.setAttribute(CAPACITY_HIDDEN_ATTR, '1')
+    element.style.display = 'none'
+  }
+}
+
+/** Hand the official capacity/input-type chrome back when the editor goes. */
+export function showOfficialCapacityChrome(container: HTMLElement): void {
+  for (const element of capacityChromeOf(container)) {
+    if (element.getAttribute(CAPACITY_HIDDEN_ATTR) !== '1') continue
+    element.removeAttribute(CAPACITY_HIDDEN_ATTR)
+    if (element.style.display === 'none') element.style.display = ''
+  }
+}
+
+/** The official input-types checkbox an image verdict belongs to, or undefined
  * when this row ships no such control (a legacy kernel) — or ships one whose
  * boxes cannot be told apart.
  *
@@ -1344,7 +1391,8 @@ export function echoOfficialCapacities(
   const fill = (input: HTMLInputElement | undefined, value: number | undefined): boolean => {
     if (input === undefined || input.disabled) return false
     if (value === undefined || !Number.isFinite(value) || value <= 0) return false
-    if (Number(input.value) > 0) return false
+    // A filled field is a decision, even when the catalogue spells it "1M".
+    if (parseCapacity(input.value) !== undefined) return false
     return landCapacity(input, String(value))
   }
   return {
@@ -1384,10 +1432,9 @@ export function readOfficialCapacities(
   const inputs = officialCapacityInputsOf(scope, labels)
   const read = (input: HTMLInputElement | undefined): number | undefined => {
     if (input === undefined) return undefined
-    const digits = input.value.replace(/[^\d]/g, '')
-    if (digits === '') return undefined
-    const value = Number(digits)
-    return Number.isFinite(value) && value > 0 ? value : undefined
+    // The official draft may hold the catalogue's shorthand ("1M", "128K"),
+    // not only digits; one parser with the editor's fields keeps both in sync.
+    return parseCapacity(input.value)
   }
   const contextWindow = read(inputs.contextWindow)
   const maxTokens = read(inputs.maxOutput)
@@ -3022,6 +3069,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         // group was hidden by a DOM write of ours and must not outlive the
         // editor that stood in for it.
         showOfficialReasoning(container)
+        showOfficialCapacityChrome(container)
         entry.editor.unmount()
       }
       state.mounted.clear()
@@ -3050,6 +3098,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   if (!hasCapacityRows) {
     for (const [container, entry] of state.mounted) {
       showOfficialReasoning(container)
+      showOfficialCapacityChrome(container)
       entry.editor.unmount()
     }
     state.mounted.clear()
@@ -3138,6 +3187,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     for (const [key, entry] of state.mounted) {
       if (!found.some(candidate => candidate.container === key)) {
         showOfficialReasoning(key)
+        showOfficialCapacityChrome(key)
         entry.editor.unmount()
         state.mounted.delete(key)
       }
@@ -3286,6 +3336,12 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         index,
         staged,
         officialInputTypes: officialInputTypesOf(container),
+        // The card covers these controls only while its thinking switch is on;
+        // it reports every flip so an off row gets its own fields back.
+        onCoverageChange: covered => {
+          if (covered) hideOfficialCapacityChrome(container)
+          else showOfficialCapacityChrome(container)
+        },
         api: {
           ...createEditorApi(
             deps.api,
@@ -3344,6 +3400,14 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       // that finally gives the model a ladder), under a container whose editor
       // has long been mounted.
       hideOfficialReasoning(container)
+      // The official copy of both capacity fields and of the input-types
+      // checkbox follows the card's own switch: with thinking on the card
+      // renders those decisions, so the row's smaller controls stand down.
+      // With it off the card disappears, and leaving its stand-in hidden would
+      // take away every way to edit the model's window. Asserted every scan for
+      // the same re-render reason as the reasoning group.
+      if (efforts === false) showOfficialCapacityChrome(container)
+      else hideOfficialCapacityChrome(container)
       const existing = state.mounted.get(container)
       if (existing !== undefined) {
         // The official page kept the container but moved the document under

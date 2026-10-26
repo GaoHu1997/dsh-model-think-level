@@ -30,6 +30,12 @@ export interface FingerprintRunner {
   subscribe(listener: () => void): () => void
   /** 订阅"某个模型的结论落盘了"；返回退订函数。 */
   onRecord(listener: (record: FingerprintRecord) => void): () => void
+  /**
+   * 订阅"这次检测根本没跑成"（500、断网、流断在半路）。与落盘的 `failed`
+   * 记录不同：那不是模型的结论，是一次没有结论的尝试，面板要把它说出来，
+   * 否则按钮转一圈就复位，用户看不出有没有真的测过。
+   */
+  onFailure(listener: (model: string, error: string) => void): () => void
   /** 排队一个模型。已经在跑或已排队就什么都不做。 */
   check(model: string): void
   /** 按顺序排队一批模型。 */
@@ -65,6 +71,7 @@ function senderOf(route: string): FingerprintSender {
 class RouteRunner implements Runner {
   private readonly listeners = new Set<() => void>()
   private readonly recordListeners = new Set<(record: FingerprintRecord) => void>()
+  private readonly failureListeners = new Set<(model: string, error: string) => void>()
   private state: FingerprintRunnerState = {
     running: new Map(),
     queued: [],
@@ -91,6 +98,13 @@ class RouteRunner implements Runner {
     this.recordListeners.add(listener)
     return () => {
       this.recordListeners.delete(listener)
+    }
+  }
+
+  onFailure(listener: (model: string, error: string) => void): () => void {
+    this.failureListeners.add(listener)
+    return () => {
+      this.failureListeners.delete(listener)
     }
   }
 
@@ -127,6 +141,7 @@ class RouteRunner implements Runner {
     this.abort()
     this.listeners.clear()
     this.recordListeners.clear()
+    this.failureListeners.clear()
     RUNNERS.delete(this.route)
     SENDERS.delete(this.route)
   }
@@ -183,9 +198,13 @@ class RouteRunner implements Runner {
 
     if (answer.ok) {
       for (const listener of [...this.recordListeners]) listener(answer.record)
+    } else {
+      // 失败不打断整批：下一个模型照跑。但这一次没有结论，必须让面板说出来；
+      // 静默复位会让"点了没反应"和"测完了没结果"长得一模一样。
+      for (const listener of [...this.failureListeners]) listener(model, answer.error)
     }
-    // 失败不打断整批：下一个模型照跑。失败的那条已经由宿主落盘成 `failed`，
-    // 面板拿到 recordListener 之外的情况就只把按钮换回"重试"。
+    // 模型本身测出 `failed` 时宿主仍会落盘并 emit result，那条走 onRecord，
+    // 面板按结论卡显示 record.error，不经过这里。
   }
 }
 

@@ -317,6 +317,28 @@ describe('FingerprintPane', () => {
     expect(rowOf(pane.root, 'gpt-5.5').textContent).toContain('3 prompts · about 15s')
   })
 
+  it('shows a transport failure instead of silently resetting the button', async () => {
+    // The route can fail before it has a verdict to persist (a 500 from the
+    // bank, a dropped connection). Before this the button spun once and came
+    // back unchanged, which reads exactly like "nothing was checked".
+    stubFetch()
+    const pane = mount()
+    await flush()
+
+    setFingerprintSender('magpie', {
+      run: () => ({
+        done: Promise.resolve({ ok: false, error: 'the fingerprint bank is unavailable' }),
+        abort: () => {},
+      }),
+    })
+
+    actionOf(pane.root, 'gpt-5.5').click()
+    await flush()
+
+    expect(pane.root.querySelector('.bre-fp-error')?.textContent).toContain('the fingerprint bank is unavailable')
+    expect(pane.root.querySelector('.bre-fp-error')?.textContent).toContain('gpt-5.5')
+  })
+
   it('draws the result as a family verdict plus three bars, with the closed-set warning always on', async () => {
     stubFetch([identified('gpt-5.5')])
     const pane = mount()

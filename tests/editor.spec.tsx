@@ -535,25 +535,25 @@ describe('EffortEditor modality', () => {
     expect(modalityPill(container, t('modalityImage')).classList.contains('is-on')).toBe(false)
   })
 
-  it('hides the modality section when the official input-types editor is present', async () => {
-    // 0.1.6-alpha.2 ships a per-row Input-types editor. The plugin sniffs that
-    // CAPABILITY and drops its own modality section on exactly those rows;
-    // every other section (levels, default pick, actions) stays.
+  it('keeps the modality section visible when the official input-types editor is present', async () => {
+    // User item 1: the injector hides the official per-row Input-types control
+    // and this card always shows its own modality pills beside the default
+    // effort pick. Only the official control is hidden — the ladder and the
+    // modality stay one editor.
     const api = baseApi()
     const { container } = await renderEditor(baseProps({ api, input: ['text', 'image'], officialInputTypes: true }))
-    expect(container.querySelector(`[aria-label^="${t('modalityImage')}"]`)).toBeNull()
-    expect(container.querySelector(`[aria-label^="${t('modalityText')}"]`)).toBeNull()
+    expect(container.querySelector(`[aria-label^="${t('modalityImage')}"]`)).not.toBeNull()
+    expect(container.querySelector(`[aria-label^="${t('modalityText')}"]`)).not.toBeNull()
     // The ladder still commits normally on a row whose modality is official.
     await act(async () => { pillFor(container, t('level_high')).click() })
     expect(api.commit).toHaveBeenCalledWith('aliyun', 'qwen-max', { efforts: { high: 'high' } })
   })
 
   it('auto-adapt still writes the input declaration when the official editor owns modalities', async () => {
-    // Decided scope: the official Input-types control hides this plugin's
-    // modality SECTION, but the plugin stays a suggestion engine — Auto-adapt
-    // still carries the input part into the row (the official checkboxes then
-    // show it), and the input-source hint still reports where it came from.
-    // Only the editing UI is suppressed; the write is not.
+    // Decided scope: the official Input-types control is hidden by the injector
+    // and this card keeps its own pills visible; Auto-adapt still carries the
+    // input part into the row and the source hint still reports where it came
+    // from. The official checkboxes remain the write target through the seam.
     const api = baseApi()
     api.suggest.mockResolvedValue({
       ok: true,
@@ -573,8 +573,8 @@ describe('EffortEditor modality', () => {
       'qwen-max',
       expect.objectContaining({ efforts: { high: 'high' }, input: ['text', 'image'] }),
     )
-    // The section itself stays hidden; the ladder pills are all that renders.
-    expect(container.querySelector(`[aria-label^="${t('modalityText')}"]`)).toBeNull()
+    // The modal pills render on the same card; the ladder is not the only part.
+    expect(container.querySelector(`[aria-label^="${t('modalityText')}"]`)).not.toBeNull()
     expect(container.textContent).toContain(t('inputHintEndpoint'))
   })
 

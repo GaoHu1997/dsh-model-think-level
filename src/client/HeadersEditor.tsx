@@ -276,6 +276,19 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
     setMessage(undefined)
   }
 
+  /**
+   * Empty the draft down to one blank pair.
+   *
+   * The target is the DRAFT, never the stored document: in the fold the card's
+   * own Save still has to be pressed, and in deferred mode the blank draft is
+   * what the card will commit. Clearing therefore reads exactly like removing
+   * the rows by hand, without a wire call.
+   */
+  const clearAll = (): void => {
+    setDraft({ rows: [{ id: nextRowId.current += 1, name: '', value: '' }] })
+    setMessage(undefined)
+  }
+
   const cancel = (): void => {
     setDraft(draftFrom(stored, nextRowId))
     setEditing(false)
@@ -350,7 +363,6 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
   // disclosure arrow opens the rest. The tab takeover removes that trade-off:
   // there the section is the whole 高级配置 pane, so it stays expanded and the
   // disclosure disappears instead of hiding the only thing the pane holds.
-  const count = rows.length
   // Under the tabs the pane IS the editor: rows on screen, typed in place, and
   // the pane's own Save commits them through the same seam the fold's editor
   // used. No "press Edit first" step — the other two panes take their edits
@@ -358,18 +370,41 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
   // reason and one more: there is no fold to open and no Save to press, because
   // the draft commit belongs to the card the pane sits on.
   const inline = tabbed || isDeferred
+  /** Named rows in the mode on screen: blank pairs are input slots, not entries. */
+  const count = editing || inline
+    ? draft.rows.filter(row => row.name.trim().length > 0).length
+    : rows.length
+  /** Whether the draft holds anything "Clear all" could take away. */
+  const hasRows = draft.rows.some(row => row.name.trim().length > 0 || row.value.length > 0)
   /** Whether the body renders at all: the fold's own disclosure, or a pane. */
   const expanded = open || editing || inline
 
   return (
     <div className="bre-headers" ref={rootRef} data-plugin={PLUGIN_ID} data-open={open ? '1' : '0'}>
-      {/* The section's identity. A fold inside the provider card needs the grey
-          head with the count and the › that opens it; the 高级配置 pane needs
-          only the NAME — the tab above already disclosed it, and the pane is
-          the editor, so this is where the title the hint sits under belongs. */}
+      {/* The section's identity: title, count, and the one action that belongs
+          to the whole list (清空) — or, folded, the › that opens it. The count
+          tracks NAMED pairs while editing so a fresh blank slot does not read
+          as a configured header. */}
       <div className="bre-headers-head">
         {editing || inline
-          ? <span className="bre-effort-title">{t('headersTitle')}</span>
+          ? (
+            <>
+              <span className="bre-effort-title">{t('headersTitle')}</span>
+              {count === 0 ? null : <span className="bre-headers-count">{count}</span>}
+              {readOnly || !hasRows
+                ? null
+                : (
+                  <button
+                    type="button"
+                    className="bre-headers-clear"
+                    disabled={disabled}
+                    onClick={clearAll}
+                  >
+                    {t('headersClear')}
+                  </button>
+                )}
+            </>
+          )
           : (
             <button
               type="button"
@@ -445,9 +480,10 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
                         />
                         <button
                           type="button"
-                          className="bre-link-button bre-headers-remove"
+                          className="bre-headers-remove"
                           disabled={disabled}
-                          aria-label={`${t('headersClear')} ${row.name}`}
+                          aria-label={`${t('headersRemove')} ${row.name}`}
+                          title={t('headersRemove')}
                           onClick={() => { removeRow(row.id) }}
                         >
                           ×
@@ -456,7 +492,7 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
                     ))}
                     <button
                       type="button"
-                      className="bre-link-button bre-headers-add"
+                      className="bre-headers-add"
                       disabled={disabled}
                       onClick={addRow}
                     >
