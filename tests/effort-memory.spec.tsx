@@ -579,6 +579,26 @@ describe('wireEffortMemory: configured per-model pick', () => {
     }
   })
 
+  it('never waits on the configured pick: a hung settings read still commits the switch', async () => {
+    // The configured layer reads the whole settings document, which is slow
+    // (and can hang) right after a reconnect or a config sync. A model switch
+    // must not wait for it: the click commits on the bounded wait, and the
+    // level lands through the projection watcher instead of being lost.
+    const fake = fakeDirectory(stateWith({ provider: 'openai', model: 'gpt-5.6' }))
+    const restore = wireEffortMemory(fake.directory, {
+      configuredEffort: () => new Promise<string | undefined>(() => undefined),
+    })
+    try {
+      await fake.directory.select({ provider: 'moonshot', model: 'kimi-k3' })
+      expect(fake.attempts()).toBe(1)
+      // The chain continues past the hung read and answers from the vendor
+      // default, so the switch carries a level instead of stalling on it.
+      expect(fake.submitted).toEqual([{ provider: 'moonshot', model: 'kimi-k3', reasoningEffort: 'max' }])
+    } finally {
+      restore()
+    }
+  })
+
   it('applies the configured pick to a level-less restored projection', async () => {
     const fake = fakeDirectory(stateWith({ provider: 'moonshot', model: 'kimi-k3' }, { restore: true }))
     const restore = wireEffortMemory(fake.directory, { configuredEffort: async () => 'high' })

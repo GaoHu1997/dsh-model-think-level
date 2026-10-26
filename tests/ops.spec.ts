@@ -3,8 +3,8 @@
  * over a fake settings Remote.
  */
 
-import { describe, expect, it, vi } from 'vitest'
-import { baselineModelsOf, createEditorApi, defaultEffortOf, describeNamespace, effortsOf, inputOf, providersOf } from '../src/client/ops.js'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { baselineModelsOf, createEditorApi, defaultEffortOf, describeNamespace, effortsOf, inputOf, invalidateProbeCache, providersOf } from '../src/client/ops.js'
 import { modelsOf } from '../src/shared.js'
 import { AUTOFILL_MARKER } from '../src/constants.js'
 import type { RemoteApi, SettingsNamespaceView, SettingsRemoteApi, SettingsScopeReadLike } from '../src/client/types.js'
@@ -163,6 +163,14 @@ describe('providersOf / modelsOf / effortsOf', () => {
 })
 
 describe('createEditorApi', () => {
+  // The route-listing probe cache is process-wide by design (one read serves a
+  // whole Auto-adapt pass), so a test that mocks `fetch` must start from an
+  // empty cache: otherwise the previous test's answer would stand in for this
+  // one's probe.
+  beforeEach(() => {
+    invalidateProbeCache()
+  })
+
   it('holds the write while an editor owns the document', async () => {
     // The official card freezes its own revision baseline, so a write from
     // this seam makes the user's very next save in that card fail with
@@ -678,6 +686,29 @@ describe('createEditorApi', () => {
         // stays the conservative confirmed set.
         expect(reply.suggestion.efforts).toEqual({ off: null, low: 'low', medium: 'medium', high: 'high' })
       }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('probes a route once for every model of the pass, not once per model', async () => {
+    // Auto-adapt walks a provider model by model, and each model needs the same
+    // listing. One probe per pass is what keeps a 40-model provider from paying
+    // 40 sequential wire round trips (报告: 自动获取模型思考等级很慢).
+    const { api } = fakeApi(initialValue)
+    const probe = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, data: [{ id: 'mystery', supported_features: ['reasoning'] }] }),
+    }))
+    vi.stubGlobal('fetch', probe)
+    try {
+      const editor = createEditorApi(api)
+      const first = await editor.suggest('aliyun', 'mystery')
+      const second = await editor.suggest('aliyun', 'mystery')
+      expect(probe).toHaveBeenCalledTimes(1)
+      // The shared answer still applies to every model it is asked about.
+      expect(first.ok && second.ok).toBe(true)
+      if (first.ok) expect(first.suggestion.endpoint).toEqual({ reasoning: true, source: 'supported_features' })
     } finally {
       vi.unstubAllGlobals()
     }

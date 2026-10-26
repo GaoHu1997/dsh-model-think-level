@@ -1203,17 +1203,20 @@ describe('apply() key-index route', () => {
       expect(body.data.map(model => model.id)).toEqual(['claude-model', 'qwen-model'])
       // The unpinned key is AUTOMATIC, so it is asked on the route's wire AND on
       // the Anthropic family's address it could dispatch on; the pinned key is
-      // asked on its own wire alone. The two probes run concurrently, so the
-      // pinned key's single request lands between the automatic key's two.
+      // asked on its own wire alone. The targets of one key are independent
+      // listings and run together, so each key's requests land as a group —
+      // which is asserted by content rather than by index.
       expect(requests).toHaveLength(3)
-      expect(requests[0]?.url).toBe('https://gw.example.com/v1/models')
-      expect(requests[0]?.headers.get('authorization')).toBe('Bearer sk-openai')
-      expect(requests[1]?.url).toBe('https://anth.example.com/v1/models?limit=1000')
-      expect(requests[1]?.headers.get('x-api-key')).toBe('sk-anthropic')
-      expect(requests[1]?.headers.get('authorization')).toBeNull()
-      expect(requests[2]?.url).toBe('https://anth.example.com/v1/models?limit=1000')
-      expect(requests[2]?.headers.get('x-api-key')).toBe('sk-openai')
-      expect(requests[2]?.headers.get('authorization')).toBeNull()
+      const routeWire = requests.filter(request => request.url === 'https://gw.example.com/v1/models')
+      const anthropicWire = requests.filter(request => request.url === 'https://anth.example.com/v1/models?limit=1000')
+      expect(routeWire).toHaveLength(1)
+      expect(routeWire[0]?.headers.get('authorization')).toBe('Bearer sk-openai')
+      expect(anthropicWire).toHaveLength(2)
+      expect(anthropicWire.map(request => request.headers.get('x-api-key')).sort()).toEqual(['sk-anthropic', 'sk-openai'])
+      for (const request of anthropicWire) {
+        // The Anthropic arm carries its own key and never a Bearer.
+        expect(request.headers.get('authorization')).toBeNull()
+      }
       expect(requests.map(request => request.headers.get('x-attribution'))).toEqual(['sdk', 'sdk', 'sdk'])
       expect(requests.map(request => request.headers.get('x-account'))).toEqual(['tenant-a', 'tenant-a', 'tenant-a'])
     } finally {
@@ -1261,6 +1264,96 @@ describe('apply() key-index route', () => {
       expect(requests[1]?.url).toBe('https://anth.example.com/v1/models?limit=1000')
       expect(requests[1]?.headers.get('x-api-key')).toBe('sk-openai')
       expect(requests[1]?.headers.get('authorization')).toBeNull()
+    } finally {
+      dispose()
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('serves a repeated listing from the catalogue cache instead of re-probing every key', async () => {
+    // The harness re-requests `/models` on reconnect and on refresh, and each
+    // request used to re-probe every key of the route: two keys of a slow
+    // gateway made the second refresh as slow as the first.
+    writeKeyIndex({
+      version: 1,
+      providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
+    }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-one', ALIYUN_KEY_2: 'sk-two' })
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get('authorization')
+      const id = authorization === 'Bearer sk-two' ? 'zeta-model' : 'alpha-model'
+      return new Response(JSON.stringify({ data: [{ id }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+    const settings = fakeSettings({ aliyun: profile })
+    const { ctx, dispose } = fakeHost(settings, { credentials })
+    try {
+      const { apply } = await import('../src/index.js')
+      apply(ctx, { autofill: false })
+      const first = await globalThis.fetch('https://gw.example.com/v1/models')
+      const firstBody = await first.json() as { data: Array<{ id: string }> }
+      const second = await globalThis.fetch('https://gw.example.com/v1/models')
+      const secondBody = await second.json() as { data: Array<{ id: string }> }
+
+      expect(firstBody.data.map(model => model.id)).toEqual(['alpha-model', 'zeta-model'])
+      expect(secondBody.data.map(model => model.id)).toEqual(['alpha-model', 'zeta-model'])
+      // One probe per key, not one per refresh: the second GET is a memory read.
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      dispose()
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('keeps a key\'s last known models when its next probe stops answering', async () => {
+    // The intermittency the user reported: two keys, one of them answers a
+    // refresh and the other times out or is rate limited — the catalogue then
+    // showed ONE key's models, and the other key's models vanished until a
+    // later refresh happened to succeed. A key that answered once keeps its
+    // models through a failed pass.
+    writeKeyIndex({
+      version: 1,
+      providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
+    }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-one', ALIYUN_KEY_2: 'sk-two' })
+    const originalFetch = globalThis.fetch
+    let secondKeyFails = false
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get('authorization')
+      if (secondKeyFails && authorization === 'Bearer sk-two') {
+        return new Response(JSON.stringify({ error: { message: 'rate limited' } }), { status: 429 })
+      }
+      const id = authorization === 'Bearer sk-two' ? 'zeta-model' : 'alpha-model'
+      return new Response(JSON.stringify({ data: [{ id }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+    const settings = fakeSettings({ aliyun: profile })
+    const { ctx, dispose, emitUpdated } = fakeHost(settings, { credentials })
+    try {
+      const { apply } = await import('../src/index.js')
+      apply(ctx, { autofill: false })
+      const first = await globalThis.fetch('https://gw.example.com/v1/models')
+      const firstBody = await first.json() as { data: Array<{ id: string }> }
+      expect(firstBody.data.map(model => model.id)).toEqual(['alpha-model', 'zeta-model'])
+
+      // A settings write drops the catalogue cache, so the next GET is a real
+      // probe again — and that probe now loses one of the two keys.
+      secondKeyFails = true
+      emitUpdated('llm-pi-ai')
+      const second = await globalThis.fetch('https://gw.example.com/v1/models')
+      const secondBody = await second.json() as { data: Array<{ id: string }> }
+
+      expect(secondBody.data.map(model => model.id)).toEqual(['alpha-model', 'zeta-model'])
+      // Both keys were asked on the second pass: the failing one takes part, it
+      // simply contributes its remembered models instead of a fresh answer.
+      expect(fetchMock).toHaveBeenCalledTimes(4)
     } finally {
       dispose()
       globalThis.fetch = originalFetch

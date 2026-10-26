@@ -58,6 +58,17 @@ import type {
   ModelDirectoryStateLike,
 } from './types.js'
 
+/**
+ * How long a pick may hold the menu's commit lock before it is released.
+ *
+ * A pick is one host round trip (a model switch, or a level switch). Ten
+ * seconds covers a slow settings write and a cold host, and still bounds the
+ * damage of a round trip that never answers: the lock must not outlive the
+ * click that took it, because a held lock turns every further click into a
+ * silent no-op.
+ */
+const COMMIT_WATCHDOG_MS = 10_000
+
 /** The model's declared effort levels, when there are at least two to choose from. */
 export function sliderLevels(state: ModelDirectoryStateLike): readonly EffortLevelLike[] {
   if (state.current === null) return []
@@ -387,6 +398,25 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     input: SelectInput,
   ) => Promise<Parameters<typeof selectRefusalMessage>[0]>
 
+  /**
+   * Release the commit lock if a pick's round trip never settles.
+   *
+   * The lock exists to stop a second pick landing on top of the first, and it is
+   * normally released by the same promise that took it. A round trip that never
+   * answers — a hung host call, a dropped RPC — would keep the whole menu
+   * read-only for the rest of the session: rows stay `disabled`, so every click
+   * is silently swallowed with no error line to explain it. The watchdog frees
+   * the lock and says so; the request itself stays the host's to finish, and a
+   * late settle is still reflected by the store.
+   * @returns the timer handle to clear once the round trip settles.
+   */
+  const armCommitWatchdog = useCallback((): ReturnType<typeof setTimeout> => setTimeout(() => {
+    if (!committingRef.current) return
+    committingRef.current = false
+    setCommitting(false)
+    setLocalError(t('sliderCommitSlow'))
+  }, COMMIT_WATCHDOG_MS), [t])
+
   // The store is the single source of truth: every settled snapshot pulls the
   // selection back onto the level the session actually reports. Skipped while a
   // commit is in flight (the optimistic pick must not be yanked back mid-round
@@ -504,6 +534,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     focusMenu()
     setCommitting(true)
     setLocalError(null)
+    const watchdog = armCommitWatchdog()
     try {
       // No reasoningEffort on purpose: a model switch resets the level, and the
       // effort-memory wiretap then restores the one remembered for that model.
@@ -513,10 +544,11 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause))
     } finally {
+      clearTimeout(watchdog)
       committingRef.current = false
       setCommitting(false)
     }
-  }, [directory, focusMenu, searching, select])
+  }, [armCommitWatchdog, directory, focusMenu, searching, select])
 
   /** Pick a reasoning level. Leaves the popover open. */
   const chooseEffort = useCallback(async (next: string): Promise<void> => {
@@ -537,6 +569,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     // Optimistic pick keeps the footer responsive.
     setEffort(next)
 
+    const watchdog = armCommitWatchdog()
     try {
       const now = state.current
       if (now === null) throw new Error(t('sliderNoCurrent'))
@@ -561,10 +594,11 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
       setEffort(previous)
       setLocalError(cause instanceof Error ? cause.message : String(cause))
     } finally {
+      clearTimeout(watchdog)
       committingRef.current = false
       setCommitting(false)
     }
-  }, [directory, focusMenu, levels, select, state.current, state.status, t])
+  }, [armCommitWatchdog, directory, focusMenu, levels, select, state.current, state.status, t])
 
   // The footer's level pick is a SLIDER, not a row of capsules: a long ladder
   // (off…max is seven) wrapped its row inside the popover (思考等级选择换成进度

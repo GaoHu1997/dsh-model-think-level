@@ -21,6 +21,18 @@ export interface ConfiguredEffortsDeps {
   api: RemoteApi
 }
 
+/**
+ * How long a read waits for the settings document before it answers "nothing
+ * configured" and lets the caller's chain fall through.
+ *
+ * The composer switch this layer feeds is a click: it must not stall behind a
+ * describe of the whole settings document (which is also re-read after every
+ * settings push, and after any gateway hiccup). Answering undefined on a slow
+ * read only moves the level to the projection watcher a moment later — the
+ * document read itself keeps running, so the NEXT read is already warm.
+ */
+const READY_WAIT_MS = 350
+
 /** The cache's face. */
 export interface ConfiguredEfforts {
   /** The configured pick for one model, after the cache has settled. */
@@ -77,7 +89,31 @@ export function createConfiguredEfforts(deps: ConfiguredEffortsDeps): Configured
   }
 
   const of = async (provider: string, model: string): Promise<string | undefined> => {
-    await ensureConfiguredEfforts()
+    // Warm read: answer from the settled snapshot without touching the wire.
+    if (configuredEfforts === undefined) {
+      const pending = ensureConfiguredEfforts()
+      // Bounded wait, never a rejection: a slow or refusing describe leaves the
+      // layer unanswered for this call instead of stalling the model switch.
+      await new Promise<void>((resolve) => {
+        let settled = false
+        const finish = (): void => {
+          if (settled) return
+          settled = true
+          resolve()
+        }
+        const timer = setTimeout(finish, READY_WAIT_MS)
+        pending.then(
+          () => {
+            clearTimeout(timer)
+            finish()
+          },
+          () => {
+            clearTimeout(timer)
+            finish()
+          },
+        )
+      })
+    }
     return configuredEfforts?.get(`${provider}/${model}`)
   }
 

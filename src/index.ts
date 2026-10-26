@@ -116,6 +116,26 @@ const BOOT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as con
 const PROBE_TIMEOUT_MS = 15_000
 
 /**
+ * How long ONE per-key listing probe may take while the host's own `/models`
+ * GET is waiting on it.
+ *
+ * This is a budget for the whole catalogue, not for one diagnostic: two keys of
+ * a route are probed at once (see the overlay's `modelListing`), so this caps
+ * the catalogue's worst case at roughly this number instead of one timeout per
+ * key per endpoint family. A gateway slower than this still answers the next
+ * refresh; the previous catalogue is reused in the meantime.
+ */
+const LISTING_PROBE_BUDGET_MS = 6_000
+
+/**
+ * How long a merged catalogue (and a raw probe answer) is reused before the
+ * next request re-reads it. The harness refreshes models on reconnect and on
+ * demand, and Auto-adapt asks per model; a bounded window keeps those repeats
+ * off the wire without ever pinning a stale catalogue on the user.
+ */
+const LISTING_CACHE_MS = 30_000
+
+/**
  * Plugin configuration, supplied through the profile's cordis layer
  * (the row's `config:` block). Every tunable two deployments may want
  * to set differently lives here rather than as a code constant.
@@ -771,6 +791,26 @@ export function apply(ctx: Context, config: Config = {}): void {
   // the fetch seam uses to choose and fail over across keys. Kept as a live
   // snapshot so the hot request path reads memory, not disk.
   const keyScopes: { current: Record<string, readonly RouteKeyScope[]> } = { current: {} }
+  // The most recent per-key listing this process obtained, by reference. It is
+  // the fallback that keeps a key's models in the catalogue when its next probe
+  // fails (a timeout, a 429, a gateway hiccup): without it one slow request
+  // silently shrinks a two-key route to one key's models until the next
+  // successful pass, which is exactly the "one key's models disappeared"
+  // symptom. `mergeKeyListings` reports such keys as `retained`.
+  const lastKnownScopes = new Map<string, readonly string[]>()
+  // The full listing records behind those ids (display name, limits, effort
+  // ladder). A retained id must still resolve to its record when the catalogue
+  // is rebuilt, or the merge would drop the very models it just kept.
+  const lastKnownRecords = new Map<string, ListedModel[]>()
+  // Merged catalogues, shortest-lived first: the harness re-requests `/models`
+  // on refresh and on every reconnect, and the probe behind it can take
+  // seconds per key. A short window turns those repeats into memory reads
+  // without ever serving a catalogue the user cannot refresh.
+  const listingCache = new Map<string, { at: number; body: string }>()
+  // Raw listing answers for the probe route, by target. Auto-adapt asks for the
+  // same route once per model, so this is what turns a whole pass into one
+  // wire read; `?refresh=1` (and the TTL above) keeps it from going stale.
+  const probeRouteCache = new Map<string, { at: number; data: Record<string, unknown>[] }>()
   const providersOf = (): Record<string, Record<string, unknown>> => {
     const section = piSection()
     return isRecord(section) && isRecord(section['providers'])
@@ -826,6 +866,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (ns === PI_NS) {
       refreshHeaders()
       refreshKeyScopes()
+      // A save may repoint a route or edit its declared models, and the user
+      // expects the next listing to show it: never answer a refresh that
+      // follows a settings write from the cache of the state before it.
+      listingCache.clear()
+      probeRouteCache.clear()
     }
   })
   /**
@@ -880,15 +925,40 @@ export function apply(ctx: Context, config: Config = {}): void {
     const baseURL = typeof profile?.['baseURL'] === 'string' ? profile['baseURL'].trim() : ''
     if (api === undefined || !LISTABLE_PROTOCOLS.has(api) || baseURL.length === 0) return undefined
 
+    // Which keys a catalogue was merged from decides what the cache may answer:
+    // adding, removing or reordering a key changes the answer, so it changes
+    // the key too. A hit skips the wire entirely — the same refresh (and the
+    // many Auto-adapt probes) then costs nothing.
+    const cacheKey = `${route}\u0000${keys.map(key => key.ref).join(',')}`
+    const cached = listingCache.get(cacheKey)
+    if (cached !== undefined && Date.now() - cached.at < LISTING_CACHE_MS) {
+      return new Response(cached.body, { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+
     // Shares the probe-and-merge the panel and the `discover` operation use, so
     // the catalogue the host's own discovery sees is the census the plugin would
-    // report: bounded concurrency, and one key's refusal never drops the others.
+    // report: bounded concurrency across keys, and one key's refusal never drops
+    // the others — a key that cannot answer keeps the models it was last seen
+    // serving (`lastKnownScopes`), so one slow request cannot shrink a two-key
+    // route to one key's models until the next pass.
     // A listing record carries more than its id (display name, limits), so the
     // full records are kept per key and stitched back in merged order below.
     const recordsByRef = new Map<string, ListedModel[]>()
+    // One budget for the whole catalogue, not one per target: this runs INSIDE
+    // the host's own `/models` GET, so the caller is waiting on it.
+    const probeTimeoutMs = Math.min(resolved.probeTimeoutMs, LISTING_PROBE_BUDGET_MS)
+    // The memory is stored per ROUTE and reference (two routes may name the same
+    // `apiKeyEnv`), while the merge speaks one reference space. Narrow it here.
+    const here = (ref: string): string => `${route}\u0000${ref}`
+    const knownHere = new Map<string, readonly string[]>()
+    for (const key of keys) {
+      const remembered = lastKnownScopes.get(here(key.ref))
+      if (remembered !== undefined) knownHere.set(key.ref, remembered)
+    }
     const { results } = await collectKeyListings({
       keys,
       refOf: key => key.ref,
+      lastKnown: knownHere,
       probe: async key => {
         // A pinned key is asked on its own wire; an automatic key is asked on
         // every wire it could dispatch on — the route's wire, plus each
@@ -918,21 +988,29 @@ export function apply(ctx: Context, config: Config = {}): void {
           return send(url, { ...init, headers: requestHeaders, signal: requestSignal })
         }
         const asked = new Set<string>()
-        const records: ListedModel[] = []
+        const distinct: { api: RouteProtocol; baseURL: string }[] = []
         for (const target of targets) {
           if (!LISTABLE_PROTOCOLS.has(target.api) || target.baseURL.length === 0) continue
           const url = probeListingUrl(target.baseURL, target.api)
           // A gateway that spells one listing under two protocols is asked once.
           if (asked.has(url)) continue
           asked.add(url)
-          const listing = await probeListing({
-            baseURL: target.baseURL,
-            api: target.api,
-            apiKey: key.value,
-            headers: profile?.['headers'],
-            timeoutMs: resolved.probeTimeoutMs,
-            send: sendListing,
-          })
+          distinct.push(target)
+        }
+        // The targets of ONE key are independent listings: asking them one after
+        // another made a key with two addresses cost two timeouts in series
+        // while the host's `/models` GET waited. They run together, and the
+        // answers are folded in target order so the catalogue stays stable.
+        const answered = await Promise.all(distinct.map(target => probeListing({
+          baseURL: target.baseURL,
+          api: target.api,
+          apiKey: key.value,
+          headers: profile?.['headers'],
+          timeoutMs: probeTimeoutMs,
+          send: sendListing,
+        })))
+        const records: ListedModel[] = []
+        for (const listing of answered) {
           if (listing === undefined) continue
           for (const model of listing) {
             if (records.some(existing => existing.id === model.id)) continue
@@ -941,24 +1019,33 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
         if (records.length === 0) return { ref: key.ref, models: undefined, targets: [] }
         recordsByRef.set(key.ref, records)
+        const ids = records.map(model => model.id)
+        // Remember what this key serves, so a later failed probe retains it.
+        lastKnownScopes.set(here(key.ref), ids)
+        lastKnownRecords.set(here(key.ref), records)
         return {
           ref: key.ref,
-          models: records.map(model => model.id),
+          models: ids,
           targets: [],
         }
       },
     })
     const records = new Map<string, ListedModel>()
     for (const result of results) {
-      for (const model of recordsByRef.get(result.ref) ?? []) {
+      // A key that could not answer contributes the records it was last seen
+      // serving: the merge kept its ids, so their full records must be kept too.
+      const owned = recordsByRef.get(result.ref) ?? lastKnownRecords.get(here(result.ref)) ?? []
+      for (const model of owned) {
         if (!records.has(model.id)) records.set(model.id, model)
       }
     }
-    const models = mergeKeyListings(results).ids
+    const models = mergeKeyListings(results, knownHere).ids
       .map(id => records.get(id))
       .filter((model): model is ListedModel => model !== undefined)
     if (models.length === 0) return undefined
-    return new Response(JSON.stringify({ data: models }), {
+    const body = JSON.stringify({ data: models })
+    listingCache.set(cacheKey, { at: Date.now(), body })
+    return new Response(body, {
       status: 200,
       headers: { 'content-type': 'application/json' },
     })
@@ -1067,6 +1154,19 @@ export function apply(ctx: Context, config: Config = {}): void {
             }
             const apiKeyEnv = typeof profile['apiKeyEnv'] === 'string' ? profile['apiKeyEnv'] : undefined
             const listingURL = probeListingUrl(baseURL, api)
+            // One listing read answers a whole Auto-adapt pass (it asks per
+            // model) and every key-panel probe of the same route inside the
+            // window. The identity of a read is the target plus the credential
+            // reference it was composed from, so re-pointing a route or swapping
+            // its `apiKeyEnv` never serves the previous answer; `?refresh=1`
+            // forces the wire instead of waiting out the window.
+            const listingKey = `${listingURL}\u0000${apiKeyEnv ?? ''}`
+            const cacheable = url.searchParams.get('refresh') !== '1'
+            const remembered = cacheable ? probeRouteCache.get(listingKey) : undefined
+            if (remembered !== undefined && Date.now() - remembered.at < LISTING_CACHE_MS) {
+              sendJson(res, 200, { ok: true, url: displayUrl(listingURL), data: remembered.data })
+              return
+            }
             let apiKey: string | undefined
             if (apiKeyEnv !== undefined) {
               try {
@@ -1101,7 +1201,11 @@ export function apply(ctx: Context, config: Config = {}): void {
                 // protocol inference, the path every unanswerable endpoint
                 // takes.
                 redirect: 'error',
-                signal: AbortSignal.timeout(resolved.probeTimeoutMs),
+                // This probe waits on an interactive pass (Auto-adapt asks for
+                // it per model), so it gets the catalogue budget rather than the
+                // diagnostic one: a gateway that cannot list within it yields no
+                // endpoint evidence, and the pass moves on to the knowledge base.
+                signal: AbortSignal.timeout(Math.min(resolved.probeTimeoutMs, LISTING_PROBE_BUDGET_MS)),
               })
               if (!upstream.ok) {
                 const hint = upstream.status === 401 || upstream.status === 403 ? '; check the API key' : ''
@@ -1128,6 +1232,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 })
                 return
               }
+              probeRouteCache.set(listingKey, { at: Date.now(), data: entries })
               sendJson(res, 200, { ok: true, url: displayUrl(listingURL), data: entries })
             } catch (error) {
               sendJson(res, 502, {

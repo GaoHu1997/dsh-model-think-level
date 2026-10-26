@@ -42,7 +42,7 @@ import {
   pendingWriteOf,
   sameModality,
 } from '../EffortEditor.js'
-import { compatOf, createEditorApi, defaultEffortOf, effortsOf, inputOf, nameOf, providersOf, writeModelRows, type RowIntent } from '../ops.js'
+import { compatOf, createEditorApi, defaultEffortOf, effortsOf, inputOf, invalidateProbeCache, nameOf, providersOf, writeModelRows, type RowIntent } from '../ops.js'
 import type { EffortEditorApi, EffortWriteIntent, HeldWrite, RemoteApi, SettingsJoin } from '../types.js'
 import { cataloguesOf, reconcileAutoEffortSeats, type AutoEffortSeatTarget } from './auto-effort-seat.js'
 import type { AutoAdaptReport } from '../auto-effort.js'
@@ -1694,6 +1694,12 @@ export async function adaptEveryModel(
   let held = 0
   let unsuggested = 0
   try {
+    // A pass is a fresh judgement of the route's endpoints: start from the wire,
+    // not from an answer a previous pass (or a probe of the key panel) left in
+    // the probe cache. Within the pass, every model of the route shares one
+    // read, which is what makes the walk cost one listing instead of one per
+    // model.
+    invalidateProbeCache()
     // One read for the whole run: `suggest` only ever READS the namespace here
     // (its endpoint probe is a read-only GET, it never resolves a credential),
     // the holds below change nothing the read depends on, and every model of

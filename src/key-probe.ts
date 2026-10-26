@@ -211,11 +211,13 @@ export interface ProbeKeyOptions {
  */
 export async function probeKeyModels(options: ProbeKeyOptions): Promise<KeyProbeResult> {
   const plan = probePlanFor(options.intent)
-  const outcomes: ProbeTargetOutcome[] = []
-  const ids: string[] = []
-  const seen = new Set<string>()
-  let answered = 0
-  for (const target of plan.targets) {
+  // Every address the plan names is asked AT THE SAME TIME. The addresses are
+  // independent reads of the same key, so asking them one after another only
+  // added their latencies together: a key whose OpenAI address hangs for the
+  // whole timeout used to delay its Anthropic answer by the same amount, and a
+  // pass over two families could take twice the timeout before it reported
+  // anything. Folded below in plan order, so the ids stay deterministic.
+  const answers = await Promise.all(plan.targets.map(async target => {
     const url = probeListingUrl(target.baseURL, target.api)
     const reported = displayUrl(url)
     let response: Response
@@ -227,62 +229,80 @@ export async function probeKeyModels(options: ProbeKeyOptions): Promise<KeyProbe
         signal: AbortSignal.timeout(options.timeoutMs),
       })
     } catch (error) {
-      outcomes.push({
+      const outcome: ProbeTargetOutcome = {
         api: target.api,
         family: target.family,
         url: reported,
         ok: false,
         error: error instanceof Error ? error.message : String(error),
-      })
-      continue
+      }
+      return { outcome, ids: [] as string[] }
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {
         // Best-effort cleanup: the outcome is already decided by the status.
       })
-      outcomes.push({ api: target.api, family: target.family, url: reported, ok: false, status: response.status })
-      continue
+      const outcome: ProbeTargetOutcome = {
+        api: target.api,
+        family: target.family,
+        url: reported,
+        ok: false,
+        status: response.status,
+      }
+      return { outcome, ids: [] as string[] }
     }
     let entries: Record<string, unknown>[] | undefined
     try {
       entries = options.entries(JSON.parse(await options.read(response, url)) as unknown)
     } catch (error) {
-      outcomes.push({
+      const outcome: ProbeTargetOutcome = {
         api: target.api,
         family: target.family,
         url: reported,
         ok: false,
         status: response.status,
         error: error instanceof Error ? error.message : String(error),
-      })
-      continue
+      }
+      return { outcome, ids: [] as string[] }
     }
     if (entries === undefined) {
-      outcomes.push({
+      const outcome: ProbeTargetOutcome = {
         api: target.api,
         family: target.family,
         url: reported,
         ok: false,
         status: response.status,
         error: 'the reply names no model listing',
-      })
-      continue
+      }
+      return { outcome, ids: [] as string[] }
     }
-    answered += 1
-    for (const entry of entries) {
-      const id = entry['id']
-      if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue
-      seen.add(id)
-      ids.push(id)
-    }
-    outcomes.push({
+    const outcome: ProbeTargetOutcome = {
       api: target.api,
       family: target.family,
       url: reported,
       ok: true,
       status: response.status,
       models: entries.length,
-    })
+    }
+    const found: string[] = []
+    for (const entry of entries) {
+      const id = entry['id']
+      if (typeof id === 'string' && id.length > 0) found.push(id)
+    }
+    return { outcome, ids: found }
+  }))
+  const outcomes = answers.map(answer => answer.outcome)
+  const ids: string[] = []
+  const seen = new Set<string>()
+  let answered = 0
+  for (const answer of answers) {
+    if (!answer.outcome.ok) continue
+    answered += 1
+    for (const id of answer.ids) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      ids.push(id)
+    }
   }
   return {
     ref: options.ref,

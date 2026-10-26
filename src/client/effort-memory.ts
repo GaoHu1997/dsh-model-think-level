@@ -62,6 +62,50 @@ const EFFORT_MEMORY_KEY = 'dsh-model-think-level.slider.efforts'
 const WIRED_MARKER = 'breSelectWired'
 
 /**
+ * How long a model switch waits for the memory chain's SLOWEST layer (the
+ * configured pick, a settings-document read) before it stops waiting and
+ * submits without a level.
+ *
+ * The switch itself is what the user clicked: it must land on the click, not
+ * after a settings round trip. When the read answers inside this window the
+ * level still rides the switch in one commit; when it does not, the switch
+ * lands level-less IMMEDIATELY (as the unwired composer would) and the
+ * projection watcher applies the level a moment later. Either way the click
+ * never waits on the settings document — and a settings read that never
+ * answers can no longer hold the composer's commit lock forever.
+ */
+const CHAIN_WAIT_MS = 400
+
+/**
+ * Await one memory-layer read, but never past {@link CHAIN_WAIT_MS}.
+ * A rejection degrades to "no answer", exactly like an absent layer.
+ * @param read - the layer's promise.
+ * @returns the level, or undefined when the layer missed or timed out.
+ */
+function withinChainWait(read: Promise<string | undefined> | undefined): Promise<string | undefined> {
+  if (read === undefined) return Promise.resolve(undefined)
+  return new Promise<string | undefined>((resolve) => {
+    let settled = false
+    const finish = (value: string | undefined): void => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(undefined), CHAIN_WAIT_MS)
+    read.then(
+      (value) => {
+        clearTimeout(timer)
+        finish(value)
+      },
+      () => {
+        clearTimeout(timer)
+        finish(undefined)
+      },
+    )
+  })
+}
+
+/**
  * Whether a `select` outcome is a refusal.
  *
  * Kernels through 0.1.6-alpha.1 reject by THROWING; 0.1.6-alpha.2 resolves the
@@ -206,7 +250,12 @@ async function resolveFallback(
   const key = memoryKey(provider, model)
   const sighted = sessionSightings.get(key)
   if (sighted !== undefined && supported.includes(sighted)) return sighted
-  const configured = await deps?.configuredEffort?.(provider, model)
+  // Bounded on purpose: this is the only layer that can make a wire round
+  // trip, and a switch must not wait on the settings document (see
+  // CHAIN_WAIT_MS). A timed-out read simply leaves the layer unanswered.
+  const configured = await withinChainWait(
+    deps?.configuredEffort === undefined ? undefined : deps.configuredEffort(provider, model),
+  )
   if (configured !== undefined && supported.includes(configured)) return configured
   const memory = rememberedEffort(provider, model)
   if (memory !== undefined && supported.includes(memory)) return memory
@@ -308,27 +357,34 @@ export function wireEffortMemory(directory: ModelDirectoryLike, deps?: EffortMem
     if (!sliderEnabled()) return original.call(directory, selection)
     const fallback = await resolveFallback(snapshot, selection.provider, selection.model, sessionSightings, deps)
     // The chain awaited (the configured layer may have made a wire round
-    // trip): re-verify before speaking. A newer user action — an explicit
-    // pick, a follow-the-default, or a different selection — that landed
-    // during the window is final: the stale submission is dropped entirely
-    // instead of overwriting it. "Newer" means the store's selection moved
-    // off the snapshot this call started from, or another wrapped call ran.
+    // trip): re-verify before speaking.
+    //
+    // A NEWER user utterance is the user's latest word and always wins: the
+    // superseded submission is dropped entirely instead of overwriting it.
+    if (utterances !== myUtterance) return undefined
+    // The projection, however, can move inside that window WITHOUT a newer
+    // utterance — a session-restore watcher applying its level, a settings
+    // push re-projecting the same selection, the host echoing the previous
+    // switch. Dropping the click in that case is what made a model switch look
+    // "ignored": the click landed on a directory whose displayed current had
+    // simply been refreshed a moment too late. The switch the user asked for
+    // still has to land, so the moved projection is not a reason to abort —
+    // unless it has ALREADY become the requested target, in which case there
+    // is nothing left to submit without a level.
     const fresh = directory.store.getSnapshot()
-    const moved = (a: DirectoryCurrentLike | null, b: DirectoryCurrentLike | null): boolean =>
-      a === null || b === null
-        ? a !== b
-        : a.provider !== b.provider || a.model !== b.model || a.reasoningEffort !== b.reasoningEffort
-    if (utterances !== myUtterance || moved(fresh.current, snapshot.current)) return undefined
+    const alreadyThere = fresh.current !== null
+      && fresh.current.provider === selection.provider
+      && fresh.current.model === selection.model
     // The chain awaited: the gate is re-checked BEFORE speaking, or a slider
     // toggle landing inside the await window would make the plugin inject a
     // level while it is already absent (the switch itself must still land --
     // as the plain pass-through the unwired directory would have performed).
-    if (!sliderEnabled()) return original.call(directory, selection)
-    if (fallback === undefined) return original.call(directory, selection)
+    if (!sliderEnabled()) return alreadyThere ? undefined : original.call(directory, selection)
+    if (fallback === undefined) return alreadyThere ? undefined : original.call(directory, selection)
     // The catalog can refresh during the same window: the level must still
     // sit on the CURRENT advertised ladder.
     if (!effortIdsOf(fresh, selection.provider, selection.model).includes(fallback)) {
-      return original.call(directory, selection)
+      return alreadyThere ? undefined : original.call(directory, selection)
     }
     return original.call(directory, { ...selection, reasoningEffort: fallback })
   }

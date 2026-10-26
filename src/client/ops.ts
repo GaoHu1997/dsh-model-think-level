@@ -134,6 +134,63 @@ export function defaultEffortOf(models: Record<string, unknown>[], modelId: stri
 }
 
 /**
+ * How long one route's raw listing stays usable for further per-model reads.
+ *
+ * A route is probed once per Auto-adapt pass, not once per model: the pass
+ * walks every model of a provider, and each model needs the SAME listing. The
+ * uncached version asked the host for a full network listing per model, which
+ * turned a 40-model provider into 40 sequential wire round trips (and a
+ * hanging endpoint into 40 timeouts). One probe — shared with every model of
+ * that pass, and with a repeated pass inside the window — is the whole signal.
+ */
+const PROBE_CACHE_MS = 30_000
+
+interface ProbeCacheEntry {
+  at: number
+  data: unknown
+}
+
+const probeCache = new Map<string, ProbeCacheEntry>()
+const probeInflight = new Map<string, Promise<unknown | undefined>>()
+
+/**
+ * One route's raw listing, from the cache when it is still fresh, else from the
+ * host's probe route (a concurrent read joins the request already in flight).
+ * @param route - the llm-pi-ai provider route.
+ * @returns the listing's `data` payload, or undefined when it could not be read.
+ */
+async function probeRouteListing(route: string): Promise<unknown | undefined> {
+  const cached = probeCache.get(route)
+  if (cached !== undefined && Date.now() - cached.at < PROBE_CACHE_MS) return cached.data
+  const pending = probeInflight.get(route)
+  if (pending !== undefined) return pending
+  const request = (async (): Promise<unknown | undefined> => {
+    try {
+      const response = await fetch(`${PROBE_PATH}?route=${encodeURIComponent(route)}`, { method: 'GET' })
+      if (!response.ok) return undefined
+      const body = (await response.json()) as { ok?: boolean; data?: unknown }
+      if (!body?.ok) return undefined
+      probeCache.set(route, { at: Date.now(), data: body.data })
+      return body.data
+    } catch {
+      return undefined
+    } finally {
+      probeInflight.delete(route)
+    }
+  })()
+  probeInflight.set(route, request)
+  return request
+}
+
+/**
+ * Forget the cached listings (a settings change can move a route's endpoint).
+ */
+export function invalidateProbeCache(): void {
+  probeCache.clear()
+  probeInflight.clear()
+}
+
+/**
  * Ask the host's same-origin probe route for this model's raw-listing facts
  * (reasoning signal, modality disclosure, context length). Any failure --
  * route absent, endpoint unreachable, listing shape unexpected -- degrades to
@@ -141,15 +198,9 @@ export function defaultEffortOf(models: Record<string, unknown>[], modelId: stri
  * suggestions must not break because the endpoint would not talk.
  */
 async function probeEndpoint(route: string, modelId: string): Promise<EndpointSignal> {
-  try {
-    const response = await fetch(`${PROBE_PATH}?route=${encodeURIComponent(route)}`, { method: 'GET' })
-    if (!response.ok) return { reasoning: 'unknown', source: null }
-    const body = (await response.json()) as { ok?: boolean; data?: unknown }
-    if (!body?.ok) return { reasoning: 'unknown', source: null }
-    return detectModelSignal(body.data, modelId).signal
-  } catch {
-    return { reasoning: 'unknown', source: null }
-  }
+  const data = await probeRouteListing(route)
+  if (data === undefined) return { reasoning: 'unknown', source: null }
+  return detectModelSignal(data, modelId).signal
 }
 
 /**
