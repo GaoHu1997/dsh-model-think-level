@@ -381,6 +381,53 @@ describe('the reshaped provider card', () => {
     expect(card.innerHTML).toBe(before)
   })
 
+  it('emits NO childList mutations on a steady-state re-decoration', () => {
+    // The freeze of 2026-10-26: an extra-row re-seat (appendChild of an
+    // already-placed row) fired a childList record on every scan, and the
+    // Models-page observer re-entered decorate from that microtask — the
+    // renderer looped forever and the whole page hung. Steady state must be
+    // mutation-free: a settled card re-decorated by a scan may not move or
+    // create a single node.
+    const card = buildCard({ protocol: 'openai-completions' })
+    decorateProviderCard(card, LABELS, { t })
+    // A second card settles too — the pass that removes rows no longer wanted
+    // (a protocol switch) settles after its one corrective pass as well.
+    const switched = buildCard({ protocol: 'anthropic-messages' })
+    decorateProviderCard(switched, LABELS, { t })
+    const select = switched.querySelector<HTMLSelectElement>('select[aria-label="API protocol"]')
+    if (select === null) throw new Error('the fixture lost its select')
+    select.value = 'openai-completions'
+    decorateProviderCard(switched, LABELS, { t })
+
+    const records: MutationRecord[] = []
+    const observer = new MutationObserver((batch) => records.push(...batch))
+    observer.observe(card, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] })
+    observer.observe(switched, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] })
+
+    decorateProviderCard(card, LABELS, { t })
+    decorateProviderCard(switched, LABELS, { t })
+
+    expect(records).toEqual([])
+    observer.disconnect()
+  })
+
+  it('rebuilds the extra rows in one corrective pass after a protocol switch', () => {
+    // The flip side of the idempotence guarantee: the order check must be a
+    // no-op ONLY when the seated order already matches, so a protocol switch
+    // still re-seats the rows for the new family set.
+    const card = buildCard({ protocol: 'openai-completions' })
+    decorateProviderCard(card, LABELS, { t })
+    const select = card.querySelector<HTMLSelectElement>('select[aria-label="API protocol"]')
+    if (select === null) throw new Error('the fixture lost its select')
+    expect(Array.from(card.querySelectorAll<HTMLElement>('[data-bre-endpoint-row]')).map((row) => row.getAttribute('data-bre-endpoint-row')))
+      .toEqual(['anthropic', 'gemini'])
+    select.value = 'anthropic-messages'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    decorateProviderCard(card, LABELS, { t })
+    expect(Array.from(card.querySelectorAll<HTMLElement>('[data-bre-endpoint-row]')).map((row) => row.getAttribute('data-bre-endpoint-row')))
+      .toEqual(['openai', 'gemini'])
+  })
+
   it('hides the collapsed row container in CSS, since `display: contents` beats the UA rule', () => {
     // The rows container sets `display: contents` (it makes the rows grid
     // items of the address field), which outranks the user agent's

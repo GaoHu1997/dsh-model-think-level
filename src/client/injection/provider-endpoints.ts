@@ -786,15 +786,30 @@ function decorateExtraRows(
     rows.hidden = true
     urlGroup.appendChild(rows)
   }
-  // One row per family the main address does not serve, in the family order;
-  // appendChild re-seats an existing row into that order for free.
-  for (const extra of ENDPOINT_FAMILIES) {
-    if (extra === family) continue
-    let row = rows.querySelector<HTMLElement>(`[${SECOND_ROW_ATTR}="${extra}"]`)
-    if (row === null) row = createExtraRow(card, labels, deps, extra)
-    rows.appendChild(row)
+  // One row per family the main address does not serve, in the family order.
+  // Append rows ONLY when the seated order differs from the wanted one:
+  // appendChild of an already-placed node still fires a childList
+  // MutationRecord, and the Models-page observer re-enters decorate from
+  // that microtask — an unconditional re-seat here looped the renderer
+  // solid (freeze of 2026-10-26). Steady state must be mutation-free.
+  const wanted = ENDPOINT_FAMILIES.filter((extra) => extra !== family)
+  const seated = Array.from(rows.children).filter(
+    (node): node is HTMLElement => node instanceof HTMLElement && node.hasAttribute(SECOND_ROW_ATTR),
+  )
+  const orderMatches =
+    wanted.length === seated.length &&
+    wanted.every((extra, index) => familyOfRow(seated[index]) === extra)
+  if (!orderMatches) {
+    for (const extra of wanted) {
+      let row = rows.querySelector<HTMLElement>(`[${SECOND_ROW_ATTR}="${extra}"]`)
+      if (row === null) row = createExtraRow(card, labels, deps, extra)
+      rows.appendChild(row)
+    }
   }
-  // A protocol switch changed the extra set; a row that no longer belongs goes.
+  // A protocol switch changed the extra set; a row that no longer belongs
+  // goes. remove() only fires a mutation when the node is actually attached,
+  // and a removed row is never re-created here, so this settles after the
+  // one corrective pass.
   for (const row of Array.from(rows.querySelectorAll<HTMLElement>(`[${SECOND_ROW_ATTR}]`))) {
     const rowFamily = familyOfRow(row)
     if (rowFamily !== undefined && rowFamily !== family) continue
