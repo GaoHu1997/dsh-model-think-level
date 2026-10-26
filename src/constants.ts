@@ -64,6 +64,18 @@ export const AUTOFILL_CONFIG_PATH = '/dsh-model-think-level/autofill-config'
  */
 export const HEADERS_CONFIG_PATH = '/dsh-model-think-level/headers-config'
 
+/**
+ * Same-origin host route owning model fingerprint attribution (ModelTrace).
+ *
+ * Three verbs on one path: `GET` returns the stored records for one provider
+ * plus the bank summary the page needs to label families; `POST` runs one
+ * model's three challenges and stores the verdict; `DELETE` forgets one model.
+ * The attribution itself is `src/fingerprint/`, a pure port of ModelTrace's
+ * `fingerprint-core.js` over a vendored bank -- so this route only does the
+ * plumbing: run challenges through the llm service, parse, store.
+ */
+export const FINGERPRINT_PATH = '/dsh-model-think-level/fingerprint'
+
 /** The settings namespace this plugin edits: pi-ai custom provider routes. */
 export const PI_AI_NS = 'llm-pi-ai'
 

@@ -2068,6 +2068,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    gave it, so showing must not declare a display at all. */
 .bre-tabbed:not([data-bre-tab='provider']) [data-bre-region='provider'],
 .bre-tabbed:not([data-bre-tab='models']) [data-bre-region='models'],
+.bre-tabbed:not([data-bre-tab='fingerprint']) [data-bre-region='fingerprint'],
 .bre-tabbed:not([data-bre-tab='advanced']) [data-bre-region='advanced'] {
   display: none !important;
 }
@@ -3653,5 +3654,216 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   .bre-editor-tab { transition: none; }
   .bre-key-eye { transition: none; }
   .bre-keys-actions, .bre-keys-add, .bre-keys-discover, .bre-keys-chip { transition: none; }
+}
+
+/* ---- 指纹检测页签 / the fingerprint tab pane ----------------------------
+
+   A SEPARATE pane, never a field in the model row: the model grid keeps its
+   five columns and its own meaning (one row = one configuration), while this
+   page is one row per model of one provider's health check. Everything here
+   is ours — the pane's root carries data-bre-fingerprint, which is the bit
+   the tab pass reads to decide the tab exists at all. No overlays, no toasts,
+   no progress bar: progress is the row badge and nothing else (m00702). */
+
+.bre-fingerprint {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0 2px;
+  min-width: 0;
+}
+
+.bre-fp-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.bre-fp-head .grow,
+.bre-fp-family .grow,
+.bre-fp-row-head .grow { flex: 1 1 auto; min-width: 0; }
+
+.bre-fp-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--bre-ink);
+}
+.bre-fp-count,
+.bre-fp-evidence,
+.bre-fp-k {
+  font-size: 11px;
+  color: var(--bre-ink-3);
+}
+/* The status line is a STATUS, not a progress bar — it reports how the last
+   run came out and, while a batch is going, where it is. 既然是状态行，就
+   不该比徽章更响。 */
+.bre-fp-summary {
+  font-size: 12px;
+  color: var(--bre-ink-2);
+}
+.bre-fp-intro {
+  margin: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+}
+.bre-fp-error {
+  margin: 0;
+  font-size: 11px;
+  color: var(--bre-danger);
+}
+
+/* One button for the whole provider. Quiet by default and quiet while it
+   runs — it only greys out. 一个强调色只表达状态，而"正在跑"已经在徽章和
+   状态行上说了两遍。 */
+.bre-fp-all,
+.bre-fp-action {
+  appearance: none;
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid var(--bre-line-3);
+  border-radius: var(--bre-r-sm);
+  background: var(--bre-surface);
+  color: var(--bre-ink-2);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--bre-t) var(--bre-ease);
+}
+.bre-fp-all:hover:not(:disabled),
+.bre-fp-action:hover:not(:disabled) {
+  border-color: var(--bre-line-4);
+  color: var(--bre-ink);
+}
+.bre-fp-all:focus-visible,
+.bre-fp-action:focus-visible {
+  outline: none;
+  border-color: var(--bre-accent);
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
+}
+.bre-fp-all:disabled,
+.bre-fp-action:disabled { opacity: 0.55; cursor: default; }
+
+.bre-fp-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bre-fp-row {
+  border: 1px solid var(--bre-line-2);
+  border-radius: var(--bre-r-md);
+  background: var(--bre-surface);
+  overflow: hidden;
+}
+.bre-fp-row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 12px;
+}
+.bre-fp-model {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--bre-ink);
+  overflow-wrap: anywhere;
+}
+
+/* The badge is the ONLY place a verdict is painted. 19px, a 5px corner and a
+   hairline stroke, so a column of them reads as one instrument. State is the
+   colour; the words say which state. */
+.bre-fp-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 6px;
+  border: 1px solid var(--bre-line-3);
+  border-radius: 5px;
+  background: var(--bre-surface);
+  color: var(--bre-ink-3);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.bre-fp-badge.is-idle { color: var(--bre-ink-3); }
+.bre-fp-badge.is-queued { color: var(--bre-ink-3); border-style: dashed; }
+.bre-fp-badge.is-running {
+  border-color: var(--bre-accent-line);
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
+}
+.bre-fp-badge.is-identified {
+  border-color: var(--bre-accent-line);
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
+}
+.bre-fp-badge.is-doubtful { color: var(--bre-warn); border-color: var(--bre-warn); }
+.bre-fp-badge.is-failed { color: var(--bre-danger); background: var(--bre-danger-weak); }
+
+/* The result card: where the numbers came from, what they say, and what they
+   cannot say. Sunken, so it reads as evidence under the row rather than as
+   another row. */
+.bre-fp-body {
+  padding: 10px 12px 12px;
+  background: var(--bre-sunken);
+  border-top: 1px solid var(--bre-line-1);
+}
+.bre-fp-family {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.bre-fp-v {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--bre-ink);
+}
+.bre-fp-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.bre-fp-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bre-fp-bar-name {
+  width: 132px;
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--bre-ink-2);
+  overflow-wrap: anywhere;
+}
+/* The bar is a measurement, so it gets no colour of its own — only the top
+   candidate is tinted. 一个强调色只表达状态，而"第一名"就是这里的结论。 */
+.bre-fp-bar-fill {
+  height: 6px;
+  min-width: 2px;
+  flex: 0 1 auto;
+  border-radius: var(--bre-r-pill);
+  background: var(--bre-line-3);
+}
+.bre-fp-bar-fill.is-top { background: var(--bre-accent); }
+.bre-fp-bar-value {
+  font-size: 11px;
+  color: var(--bre-ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.bre-fp-note {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bre-fp-all, .bre-fp-action { transition: none; }
 }
 `

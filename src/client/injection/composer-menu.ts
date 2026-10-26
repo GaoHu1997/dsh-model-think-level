@@ -107,6 +107,14 @@ const rePlaceInFrame = (): void => {
 export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjection {
   const { menuOf, triggerOf, t, refreshed, sliderEnabled, directory } = deps
   let sliderMount: ForeignMount | undefined
+  // The directory the mounted slider SUBMITS to. The root outlives a menu
+  // close (detach, not unmount — see reconcile), so without this identity a
+  // session switch left the replica pointing at the previous session's
+  // directory: after A → B a pick still landed on A and B's real prompt model
+  // never changed ("选择了新的模型，但是没有切换"). Compared by INSTANCE, and
+  // only acted on when it actually differs — re-rendering the root on every
+  // reconcile would feed the Models-page MutationObserver.
+  let sliderDirectory: ModelDirectoryLike | undefined
   let searchMount: ForeignMount | undefined
   let lastModelPane: boolean | undefined
   let lastOwnedSurface: boolean | undefined
@@ -293,6 +301,7 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
     if (!sliderEnabled()) {
       unmountReact(sliderMount)
       sliderMount = undefined
+      sliderDirectory = undefined
       // The preference flipped off while the menu stayed open: the host menu
       // must go back to the official content-sized box AND its root cells
       // must become visible again (the active branch hides them inline).
@@ -317,11 +326,24 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
       // next DOM mutation re-enters (the mounted slider keeps its face).
       return
     }
+    // The root's `directory` prop is its binding to a session: rebuild the root
+    // when the resolved instance differs from the one it was mounted with, or
+    // the pick would land on the PREVIOUS session's directory (see the identity
+    // note above). Same instance → keep the root and its state; only the wrapper
+    // is re-seated below. `resolved === undefined` (the transient boot window)
+    // keeps whatever face is up: it is not proof the session changed, and
+    // dropping the body there would flash the menu on every resync.
+    if (sliderMount !== undefined && sliderDirectory !== resolved) {
+      unmountReact(sliderMount)
+      sliderMount = undefined
+      sliderDirectory = undefined
+    }
     // React re-renders the menu around a foreign node; keep our wrapper as the
     // menu's FIRST child by re-inserting it whenever a re-render displaced it.
     // The React root survives DOM moves (the fiber tree is position-independent),
     // so a displaced slider is re-attached, never re-created.
     if (sliderMount === undefined) {
+      sliderDirectory = resolved
       const wrapper = document.createElement('div')
       wrapper.dataset['plugin'] = PLUGIN_ID
       wrapper.dataset['breSlider'] = '1'
@@ -420,6 +442,7 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
         else {
           unmountReact(sliderMount)
           sliderMount = undefined
+          sliderDirectory = undefined
         }
       }
       unmountSearch()
@@ -470,6 +493,7 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
     clearTriggerDecoration()
     unmountReact(sliderMount)
     sliderMount = undefined
+    sliderDirectory = undefined
     unmountSearch()
     // The fiber is going away while the popover may still be open: the host
     // must get its own children back, not a body hidden by a dead injection.

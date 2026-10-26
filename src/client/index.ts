@@ -51,7 +51,15 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { createElement } from 'react'
 import type { ReactNode } from 'react'
+import { createRefreshScheduler } from './refresh-scheduler.js'
 import { PI_AI_NS, PLUGIN_ID, STORE_NS } from '../constants.js'
+
+/**
+ * Floor between two pushed-invalidation refreshes. The host's document
+ * notifications are its own, and some of them are echoes of work this plugin
+ * just did; without a floor the echo never lets the page settle.
+ */
+export const REFRESH_MIN_INTERVAL_MS = 200
 import { LocaleRefresh, type LocaleFace } from './LocaleRefresh.tsx'
 import { en, zh, type BreKey } from './locales.ts'
 import { SLIDER_PREF_KEY, sliderEnabled, subscribeSliderEnabled, syncSliderEnabled } from './slider-pref.js'
@@ -70,6 +78,7 @@ import { createConfiguredInputs } from './configured-inputs.js'
 import { createConfiguredEfforts } from './injection/configured-efforts.js'
 import { createIdleAutofill } from './injection/autofill-run.js'
 import { createModelsPage } from './injection/models-page.js'
+import { teardownFingerprintRunners } from './fingerprint-runner.js'
 import { createSessionDirectoryTracker } from './injection/session-directory.js'
 import { modelMenuOf, modelTriggerOf } from './injection/model-menu.js'
 import { registerProviderCardSlot } from './injection/provider-card-slot.js'
@@ -222,8 +231,15 @@ export function apply(ctx: ClientContext): void {
   // own draft, so the plugin's uncommitted edits go with it. (The dispose
   // effect above keeps the ledger for a same-document fiber cycle, where the
   // card survives.)
+  //
+  // The fingerprint queue goes too — but only what is still in flight. A check
+  // that already finished wrote its own verdict when it finished, so nothing
+  // earned is thrown away by leaving.
   ctx.effect(() => {
-    const onPageHide = (): void => { modelsPage.flushOnUnload() }
+    const onPageHide = (): void => {
+      modelsPage.flushOnUnload()
+      teardownFingerprintRunners()
+    }
     window.addEventListener('pagehide', onPageHide)
     return () => { window.removeEventListener('pagehide', onPageHide) }
   }, 'dsh-model-think-level: ledger flush on unload')
@@ -244,13 +260,19 @@ export function apply(ctx: ClientContext): void {
       autofill.invalidate()
       modelsPage.schedule()
     }
+    // A pushed invalidation is not a command to refresh once per event; see
+    // `createRefreshScheduler` for why this has to be coalesced and capped.
+    const scheduler = createRefreshScheduler(refresh, REFRESH_MIN_INTERVAL_MS)
     const disposers = [
       ctx.remote.$on('settings/document-updated', (ns: unknown) => {
-        if (ns === PI_AI_NS) refresh()
+        if (ns === PI_AI_NS) scheduler.schedule()
       }),
-      ctx.on('connection/reset', refresh),
+      ctx.on('connection/reset', scheduler.schedule),
     ]
-    return () => { for (const dispose of disposers) dispose() }
+    return () => {
+      scheduler.dispose()
+      for (const dispose of disposers) dispose()
+    }
   }, 'dsh-model-think-level: pushed invalidations')
 
   // Refresh the composer the moment a preference flips (the toggle and the

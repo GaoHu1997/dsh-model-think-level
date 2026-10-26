@@ -1,5 +1,6 @@
 /**
- * The provider editor's segmented control (供应商配置 / 模型配置 / 高级配置).
+ * The provider editor's segmented control
+ * (供应商配置 / 模型配置 / 指纹检测 / 高级配置).
  *
  * This is the bar the editor-tabs pass drives. It lives HERE, in the plugin's
  * own React subtree, rather than being built by the pass and inserted into the
@@ -36,6 +37,7 @@ import {
 const LABEL_KEYS: Record<EditorTabId, string> = {
   provider: 'editorTabProvider',
   models: 'editorTabModels',
+  fingerprint: 'editorTabFingerprint',
   advanced: 'editorTabAdvanced',
 }
 

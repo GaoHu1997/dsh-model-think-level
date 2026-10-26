@@ -381,13 +381,21 @@ describe('the reshaped provider card', () => {
     expect(card.innerHTML).toBe(before)
   })
 
-  it('emits NO childList mutations on a steady-state re-decoration', () => {
+  it('emits NO mutations on a steady-state re-decoration', () => {
     // The freeze of 2026-10-26: an extra-row re-seat (appendChild of an
     // already-placed row) fired a childList record on every scan, and the
     // Models-page observer re-entered decorate from that microtask — the
     // renderer looped forever and the whole page hung. Steady state must be
     // mutation-free: a settled card re-decorated by a scan may not move or
-    // create a single node.
+    // create a single node, and may not RE-ASSERT an attribute it already
+    // holds. A blind `control.hidden = true` on an already-hidden select still
+    // queues a mutation record — the same loop, entered through the observer's
+    // `hidden` attribute filter instead of childList.
+    //
+    // takeRecords(), NOT the observer callback: the callback is delivered on a
+    // later microtask, so the array this test used to read was still empty when
+    // it was asserted — an empty array proved nothing. takeRecords() drains the
+    // queue synchronously and cannot lie about it.
     const card = buildCard({ protocol: 'openai-completions' })
     decorateProviderCard(card, LABELS, { t })
     // A second card settles too — the pass that removes rows no longer wanted
@@ -399,15 +407,42 @@ describe('the reshaped provider card', () => {
     select.value = 'openai-completions'
     decorateProviderCard(switched, LABELS, { t })
 
-    const records: MutationRecord[] = []
-    const observer = new MutationObserver((batch) => records.push(...batch))
+    const observer = new MutationObserver(() => undefined)
     observer.observe(card, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] })
     observer.observe(switched, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] })
 
     decorateProviderCard(card, LABELS, { t })
     decorateProviderCard(switched, LABELS, { t })
 
-    expect(records).toEqual([])
+    expect(observer.takeRecords()).toEqual([])
+    observer.disconnect()
+  })
+
+  it('settles through the Models-page observer instead of looping on `hidden`', async () => {
+    // The attribute side of the same freeze, modeled end to end: the
+    // Models-page observer watches `hidden` on the whole panel and re-enters
+    // decorate from every record it reports. A scan that re-asserts `hidden` on
+    // a control it already hid therefore feeds itself forever. Prove the pass
+    // count is bounded — a settled card re-decorated here produces no record at
+    // all, so the callback never fires.
+    const card = buildCard({ protocol: 'openai-completions' })
+    decorateProviderCard(card, LABELS, { t })
+    let passes = 0
+    const observer = new MutationObserver(() => {
+      passes += 1
+      // Runaway guard: if the loop regresses, stop feeding it so the assertion
+      // below reports the count instead of hanging the test run.
+      if (passes <= 25) decorateProviderCard(card, LABELS, { t })
+    })
+    observer.observe(card, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] })
+
+    decorateProviderCard(card, LABELS, { t })
+    // Drain the observer's microtask queue before judging how many passes the
+    // first record set produced (house pattern, see the address-switch test).
+    for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(passes).toBe(0)
+    expect(observer.takeRecords()).toEqual([])
     observer.disconnect()
   })
 

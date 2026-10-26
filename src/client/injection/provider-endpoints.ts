@@ -30,6 +30,7 @@
  */
 
 import { endpointFamilyOf, ENDPOINT_FAMILIES, type EndpointFamily as Family, type RouteProtocol } from '../../key-refs.js'
+import { setHidden } from './dom.js'
 import { ENDPOINTS_CHANGED_EVENT } from '../events.js'
 import { httpKeyManagerClient, type KeyManagerClient } from '../key-manager-client.js'
 
@@ -333,7 +334,7 @@ function decorateAddressLabel(card: HTMLElement, labels: EndpointLabels, t: Endp
   }
   if (tag !== null) {
     if (tag.textContent !== text) tag.textContent = text
-    tag.hidden = text.length === 0
+    setHidden(tag, text.length === 0)
     markFilled(tag, control instanceof HTMLInputElement && control.value.trim().length > 0)
   }
   markAddressRow(urlGroup, control, tag !== null && text.length > 0)
@@ -504,8 +505,11 @@ function decorateProtocolCards(card: HTMLElement, labels: EndpointLabels, deps: 
   }
   // Hidden, never removed: removing the select would take the value the host
   // saves with it. Re-asserted every scan, because a re-render can drop the flag
-  // while the group it belongs to survives.
-  control.hidden = true
+  // while the group it belongs to survives. Compare-first (setHidden): the
+  // Models-page observer watches `hidden` on the whole panel, so a blind
+  // re-assert on an already-hidden select records a mutation that re-enters
+  // decorate — the feedback loop that hung the page (freeze of 2026-10-26).
+  setHidden(control, true)
   syncProtocolSelection(control, cards)
 }
 

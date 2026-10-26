@@ -19,3 +19,16 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+第三方随附物 / Third-party components
+
+ModelTrace（数字指纹判定核心与指纹库）
+  来源：https://github.com/xqy2006/ModelTrace
+  许可证：MIT License
+  Copyright (c) 2026 xqy2006
+  随附范围：src/fingerprint/core.ts（移植自 static/fingerprint-core.js）、
+            src/fingerprint/challenges.ts（移植自 fingerprint.py:generate_challenges）、
+            assets/unified_bank.json（原样随附，见 assets/NOTICE.md）
+  本插件对其做了语言移植与类型收紧，数值路径未作改动。

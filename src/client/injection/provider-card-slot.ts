@@ -26,6 +26,7 @@ import type { ReactNode } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { PI_AI_NS, PLUGIN_ID } from '../../constants.js'
 import { HeadersEditor } from '../HeadersEditor.js'
+import { FingerprintPane } from '../FingerprintPane.js'
 import { EditorTabBar } from './editor-tab-bar.js'
 import { editorCardOf } from './editor-tabs.js'
 import type { ClientContext, RemoteApi, SlotRegistrarFace } from '../types.js'
@@ -45,7 +46,12 @@ interface ProviderCardOccurrence {
 }
 
 /** Props the occurrence component receives: the section's share plus ours. */
-export type ProviderCardSlotProps = ProviderCardOccurrence & { api: RemoteApi; t: Translate }
+export type ProviderCardSlotProps = ProviderCardOccurrence & {
+  api: RemoteApi
+  t: Translate
+  /** The client root, so the fingerprint pane can subscribe to document edits. */
+  ctx?: ClientContext
+}
 
 /**
  * Press the official editor's own dismiss button for this card.
@@ -83,7 +89,7 @@ function dismissCard(card: HTMLElement | null): void {
  * itself with the official editor. Exported for its own tests (the registration
  * below is the production path).
  */
-export function ProviderCardSlot({ provider, api, t }: ProviderCardSlotProps): ReactNode {
+export function ProviderCardSlot({ provider, api, t, ctx }: ProviderCardSlotProps): ReactNode {
   const host = useRef<HTMLDivElement | null>(null)
   const route = provider?.provider
   // The card is read at press time, not captured: the row a slot mounts in is
@@ -162,6 +168,11 @@ export function ProviderCardSlot({ provider, api, t }: ProviderCardSlotProps): R
     // (the DeepSeek account editor).
     createElement(EditorTabBar, { host, t }),
     createElement(HeadersEditor, { route, api, t, onDismiss: dismiss }),
+    // The fingerprint pane is a THIRD child of the mount, a sibling of the
+    // headers section — never inside the official body. That is what lets the
+    // tab pass treat the two as separate panes while the bar and both stay
+    // visible across tabs.
+    createElement(FingerprintPane, { route, api, t, ctx, host }),
   )
 }
 
@@ -183,7 +194,7 @@ export function registerProviderCardSlot(ctx: ClientContext, api: RemoteApi, t: 
       // extends, so one registration covers every card; other adapter families
       // dispatch other keys and never reach this component.
       key: PI_AI_NS,
-      inject: () => ({ api, t }),
+      inject: () => ({ api, t, ctx }),
     }, ProviderCardSlot)
   })
   return typeof injected === 'function' ? injected as () => void : () => {}

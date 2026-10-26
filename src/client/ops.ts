@@ -706,9 +706,9 @@ export async function describeNamespace(api: RemoteApi, options: { fresh?: boole
   const viaScope = options.fresh === true ? undefined : joinFromScope(api)
   if (viaScope !== undefined) return viaScope
   const response = await api.settings.describe()
-  if (!response.ok) return { namespace: undefined, writable: false }
+  if (!response.ok) return { namespace: undefined, writable: false, source: 'wire' }
   const namespace = response.value.namespaces.find(ns => ns.ns === PI_AI_NS)
-  return { namespace, writable: response.value.writable }
+  return { namespace, writable: response.value.writable, source: 'wire' }
 }
 
 /**
@@ -736,5 +736,6 @@ function joinFromScope(api: RemoteApi): SettingsJoin | undefined {
       secrets: [],
     } as unknown as SettingsNamespaceView,
     writable: snapshot.writable === true,
+    source: 'scope',
   }
 }

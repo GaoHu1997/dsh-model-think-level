@@ -27,6 +27,7 @@ const COPY = {
     editorTabsLabel: 'Editor sections',
     editorTabProvider: 'Provider',
     editorTabModels: 'Models',
+    editorTabFingerprint: 'Fingerprint',
     editorTabAdvanced: 'Advanced',
     keyRevealShow: 'Show key',
     keyRevealHide: 'Hide key',
@@ -36,6 +37,7 @@ const COPY = {
     editorTabsLabel: '编辑器分区',
     editorTabProvider: '供应商配置',
     editorTabModels: '模型配置',
+    editorTabFingerprint: '指纹检测',
     editorTabAdvanced: '高级配置',
     keyRevealShow: '显示密钥',
     keyRevealHide: '隐藏密钥',
@@ -214,7 +216,7 @@ describe('reconcileEditorTabs', () => {
     expect(root.querySelectorAll(`.${EDITOR_TABS_CLASS}`)).toHaveLength(1)
     expect(bar?.getAttribute('role')).toBe('tablist')
     expect(bar?.getAttribute('aria-label')).toBe('编辑器分区')
-    expect(bar?.children).toHaveLength(3)
+    expect(bar?.children).toHaveLength(4)
 
     expect(card.classList.contains('bre-tabbed')).toBe(true)
     expect(card.getAttribute('data-bre-tab')).toBe('provider')
@@ -222,7 +224,12 @@ describe('reconcileEditorTabs', () => {
     expect(tabOf(root, 'models')?.getAttribute('aria-selected')).toBe('false')
     expect(tabOf(root, 'provider')?.textContent).toBe('供应商配置')
     expect(tabOf(root, 'models')?.textContent).toBe('模型配置')
+    expect(tabOf(root, 'fingerprint')?.textContent).toBe('指纹检测')
     expect(tabOf(root, 'advanced')?.textContent).toBe('高级配置')
+    // No fingerprint section on this card, so the segment steps aside rather
+    // than offering a tab with nothing behind it — same rule as Models on a
+    // provider whose catalogue has not rendered yet.
+    expect(tabOf(root, 'fingerprint')?.hidden).toBe(true)
 
     for (const field of Array.from(root.querySelectorAll('.field'))) {
       expect(field.getAttribute('data-bre-region')).toBe('provider')
@@ -356,6 +363,64 @@ describe('reconcileEditorTabs', () => {
     expect(root.querySelectorAll('[data-bre-region="advanced"]')).toHaveLength(0)
   })
 
+  it('shows the fingerprint tab when the pane reports models to check', () => {
+    const root = buildCard()
+    root
+      .querySelector('.editor')
+      ?.insertAdjacentHTML('beforeend', '<div class="bre-fingerprint" data-bre-fingerprint="ready"></div>')
+    reconcileEditorTabs(root, depsFor('en'), createEditorTabsState())
+
+    expect(tabOf(root, 'fingerprint')?.hidden).toBe(false)
+    expect(tabOf(root, 'fingerprint')?.textContent).toBe('Fingerprint')
+    expect(root.querySelector('.bre-fingerprint')?.getAttribute('data-bre-region')).toBe('fingerprint')
+  })
+
+  it('hides the fingerprint tab when the pane found no GPT or Claude model', () => {
+    // 一个都没有就整页不显示 —— 不给一个必然点不动的灰按钮（m00702 第 1 条）。
+    const root = buildCard()
+    root
+      .querySelector('.editor')
+      ?.insertAdjacentHTML('beforeend', '<div class="bre-fingerprint" data-bre-fingerprint="none"></div>')
+    reconcileEditorTabs(root, depsFor('en'), createEditorTabsState())
+
+    expect(tabOf(root, 'fingerprint')?.hidden).toBe(true)
+    expect(root.querySelector('.bre-fingerprint')?.getAttribute('data-bre-region')).toBe('fingerprint')
+  })
+
+  it('offers no fingerprint tab on a create-provider card, ready pane or not', () => {
+    // m00883: 指纹检测不出现在新增供应商中。A card still choosing what to be
+    // must not offer to fingerprint what it is not yet — and the pane says
+    // "ready" only because the pass asks the card, never what the pane claims.
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <ul class="rows">
+        <li class="addCard">
+          <div class="addPanel">
+            <div class="bre-create-host"></div>
+            <div class="editor">
+              <div class="field"><input aria-label="Base URL" /></div>
+              <section class="modelCatalog"><div class="modelListHead"></div></section>
+              <div class="bre-fingerprint" data-bre-fingerprint="ready"></div>
+              <div class="editorActions">
+                <button class="primaryButton" type="button">Create</button>
+              </div>
+            </div>
+          </div>
+        </li>
+      </ul>
+    `
+    const host = root.querySelector('.bre-create-host') as HTMLElement
+    host.insertBefore(tabBar(), host.firstChild)
+    document.body.appendChild(root)
+
+    reconcileEditorTabs(root, depsFor('en'), createEditorTabsState())
+
+    const card = root.querySelector('li.addCard') as HTMLElement
+    expect(card.classList.contains('bre-tabbed')).toBe(true)
+    expect(tabOf(root, 'fingerprint')?.hidden).toBe(true)
+    expect(tabOf(root, 'provider')?.hidden).toBe(false)
+  })
+
   it('takes a card whose mount never rendered, without a bar to label', () => {
     const root = buildCard({ headers: false })
     reconcileEditorTabs(root, depsFor('en'), createEditorTabsState())
@@ -393,7 +458,7 @@ describe('reconcileEditorTabs', () => {
     reconcileEditorTabs(root, depsFor('zh'), state)
 
     expect(root.querySelectorAll(`.${EDITOR_TABS_CLASS}`)).toHaveLength(1)
-    expect(barOf(root)?.children).toHaveLength(3)
+    expect(barOf(root)?.children).toHaveLength(4)
     expect(root.querySelectorAll('[data-bre-tab]')).toHaveLength(1)
     expect(root.querySelectorAll('[data-bre-editor-body]')).toHaveLength(1)
     expect(root.querySelectorAll('[data-bre-region]')).toHaveLength(5)

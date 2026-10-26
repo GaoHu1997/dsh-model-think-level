@@ -228,10 +228,13 @@ describe('CreateCardPane', () => {
       expect(children[0]?.classList.contains(EDITOR_TABS_CLASS)).toBe(true)
       expect(children[1]?.classList.contains('bre-headers')).toBe(true)
       // The bar is mounted whole; which of its tabs may light up is the takeover
-      // pass's reading of the form, not this pane's.
+      // pass's reading of the form, not this pane's. The fingerprint segment
+      // rides along like the rest and is the one that never lights up here —
+      // m00883: a card still choosing what to be must not offer to fingerprint
+      // what it is not yet (see the create-card case in editor-tabs.spec.ts).
       expect(Array.from(card.host.querySelectorAll(`[${EDITOR_TAB_ID_ATTR}]`)).map(
         tab => tab.getAttribute(EDITOR_TAB_ID_ATTR),
-      )).toEqual(['provider', 'models', 'advanced'])
+      )).toEqual(['provider', 'models', 'fingerprint', 'advanced'])
     } finally {
       await pane.unmount()
     }

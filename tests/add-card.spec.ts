@@ -267,8 +267,10 @@ describe('the create-provider card', () => {
     expect(tabLabel(bar, 'models')).toBe('Models')
     expect(tabLabel(bar, 'advanced')).toBe('Advanced')
     // Which tabs the card can offer is the tab pass's decision, not this one's:
-    // the bar is mounted whole.
-    expect(bar.children).toHaveLength(3)
+    // the bar is mounted whole — the fingerprint segment included, and it is the
+    // one that never lights up on a card still choosing what to be (m00883).
+    expect(tabLabel(bar, 'fingerprint')).toBe('Fingerprint')
+    expect(bar.children).toHaveLength(4)
     // The 高级配置 pane is here from the start, blank id and all — the card the
     // official page builds has no other place to hang it, and a tab whose pane
     // only appeared once the id was typed would be a tab that did nothing. The
@@ -328,6 +330,11 @@ describe('the create-provider card', () => {
     expect((host.querySelector(`[${EDITOR_TAB_ID_ATTR}="advanced"]`) as HTMLElement).hidden).toBe(false)
     expect((host.querySelector(`[${EDITOR_TAB_ID_ATTR}="provider"]`) as HTMLElement).hidden).toBe(false)
     expect((host.querySelector(`[${EDITOR_TAB_ID_ATTR}="models"]`) as HTMLElement).hidden).toBe(false)
+    // m00883: 指纹检测不出现在新增供应商中。The bar is one render and the tab
+    // pass decides which segments light up — the same split `models` and
+    // `advanced` already use. `hidden` takes the segment out of the layout
+    // entirely, so it is gone, not merely dimmed.
+    expect((host.querySelector(`[${EDITOR_TAB_ID_ATTR}="fingerprint"]`) as HTMLElement).hidden).toBe(true)
   })
 
   it('leaves a card with no custom form exactly as the official page built it', () => {

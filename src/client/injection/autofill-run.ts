@@ -78,11 +78,16 @@ export function createIdleAutofill(deps: IdleAutofillDeps): IdleAutofill {
     try {
       const switches = await autofillSwitchesOf()
       if (runGeneration !== generation || !switches.autofill) return
-      // Fresh: the scope mirror folds a just-settled write in asynchronously,
-      // so reading it here would fence this fill on a superseded revision and
-      // manufacture a `settings/conflict` (the same reason a conflict retry
-      // re-reads the wire).
-      const join = await describeNamespace(deps.api, { fresh: true })
+      // Read the snapshot first. This pass runs on every scan and every pushed
+      // invalidation, and the host's `describe()` EMITS `settings/document-updated`
+      // whenever the serialized document moved. Reading the wire here would
+      // feed the very notification that scheduled this pass:
+      //   document-updated -> refresh -> idle -> describe -> document-updated
+      // which never settles and starves the renderer -- the whole DSH stopped
+      // responding the moment the Models page opened. The scope mirror already
+      // carries the resolved section, so "is there anything to fill" costs no
+      // round trip and echoes nothing.
+      const join = await describeNamespace(deps.api)
       const namespace = join.namespace
       if (runGeneration !== generation || namespace === undefined || join.writable !== true) return
       const userProviders = userProvidersOf(namespace)
@@ -91,13 +96,28 @@ export function createIdleAutofill(deps: IdleAutofillDeps): IdleAutofill {
         userProviders, () => true, { modalities: switches.modalityAutofill }, namespace.revision,
       )
       if (patch === undefined) return
-      const routes = patch['providers'] as Record<string, { models: unknown }>
+      // There IS something to fill. Only a MIRRORED read may have gone stale:
+      // the scope folds a just-settled write in asynchronously, so fencing the
+      // write off it would use a superseded revision and manufacture a
+      // `settings/conflict` (the same reason a conflict retry re-reads the
+      // wire). A wire read is already authoritative, so re-reading it would
+      // only spend a round trip -- and echo a second notification.
+      const writeJoin = join.source === 'scope' ? await describeNamespace(deps.api, { fresh: true }) : join
+      const writeNamespace = writeJoin.namespace
+      if (runGeneration !== generation || writeNamespace === undefined || writeJoin.writable !== true) return
+      const writeProviders = userProvidersOf(writeNamespace)
+      if (writeProviders === undefined) return
+      const settled = buildAutofillPatch(
+        writeProviders, () => true, { modalities: switches.modalityAutofill }, writeNamespace.revision,
+      )
+      if (settled === undefined) return
+      const routes = settled['providers'] as Record<string, { models: unknown }>
       const ops = Object.entries(routes).map(([route, profile]) => ({
         op: 'set' as const,
         path: ['providers', route, 'models'],
         value: profile.models,
       })) as unknown as Parameters<typeof deps.api.settings.mutate>[1]
-      const response = await deps.api.settings.mutate(PI_AI_NS, ops, namespace.revision)
+      const response = await deps.api.settings.mutate(PI_AI_NS, ops, writeNamespace.revision)
       // A refusal arrives as a VALUE, not a throw: without this check the whole
       // complement failed silently (the catch below never ran). Whatever is
       // still undeclared is picked up by the next idle pass.

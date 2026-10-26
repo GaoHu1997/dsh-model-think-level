@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PI_AI_NS } from '../src/constants.js'
-import { apply } from '../src/client/index.js'
+import { apply, REFRESH_MIN_INTERVAL_MS } from '../src/client/index.js'
 import { fakeApi, makeCtx, makeJoin } from './support/composer-fixture.js'
 
 const wiring = vi.hoisted(() => ({ onIdle: (): void => {} }))
@@ -24,6 +24,8 @@ vi.mock('../src/client/injection/models-page.js', () => ({
 async function settle(): Promise<void> {
   await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
+
+const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -55,6 +57,11 @@ describe('idle autofill refresh wiring', () => {
 
       if (event === 'settings/document-updated') context.emitRemote(event, PI_AI_NS)
       else context.emitLocal(event)
+      // The refresh is rate-limited -- that bound is exactly what keeps a chatty
+      // host from starving the page -- so the invalidation lands after the
+      // scheduler's window, not synchronously with the event. Once it has, the
+      // page scan's idle callback runs the fill again.
+      await sleep(REFRESH_MIN_INTERVAL_MS + 50)
       wiring.onIdle()
       await settle()
       expect(fetch).toHaveBeenCalledTimes(2)

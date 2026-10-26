@@ -28,6 +28,7 @@ import Schema from '@deepseek-ai/schemastery'
 import {
   AUTOFILL_CONFIG_PATH,
   DIAG_PATH,
+  FINGERPRINT_PATH,
   HEADERS_CONFIG_PATH,
   KEY_INDEX_PATH,
   PI_AI_NS,
@@ -88,6 +89,24 @@ import { detectHeaderConflicts, type HeaderConflictReport } from './headers-conf
 // builds the SAME patch from its own idle-time read, so one suggestion can
 // never produce two different documents.
 import { buildAutofillPatch, stripNewCompatKeysDeep } from './autofill.js'
+// Model fingerprint attribution (ModelTrace). The math is a pure port of
+// upstream `fingerprint-core.js` over a vendored bank; only the routing below
+// touches the llm service, so the whole attribution path stays unit-testable.
+import { bankBuiltAt, loadBankSync, summarizeBank } from './fingerprint/bank.js'
+import { generateChallenges } from './fingerprint/challenges.js'
+import { analyzeGlobalOutputs, NO_USABLE_OUTPUT, type AttributionResult } from './fingerprint/core.js'
+import { isEligibleModel } from './fingerprint/eligibility.js'
+import { runProbe, type ProbeRunResult } from './fingerprint/run.js'
+import {
+  fingerprintFilePath,
+  providerRecords,
+  readFingerprintStore,
+  updateFingerprintStore,
+  withRecord,
+  withoutRecord,
+  type FingerprintRecord,
+} from './fingerprint/store.js'
+import { statusOf, topEntriesOf } from './fingerprint/verdict.js'
 
 /** Re-exported so the package entry keeps naming the patch builder. */
 export { buildAutofillPatch }
@@ -114,6 +133,15 @@ const BOOT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as con
 
 /** Probe fetch budget: a gateway that cannot answer /models in 15s will not answer the composer either. */
 const PROBE_TIMEOUT_MS = 15_000
+
+/**
+ * Per-challenge budget for one fingerprint probe. Deliberately NOT derived from
+ * `probeTimeoutMs`: that one bounds a tiny /models read (15s default), while a
+ * challenge asks for ~300 integers and the answer alone is several hundred
+ * tokens. A provider that cannot answer in two minutes is a `failed` row, not a
+ * reason to widen the listing probe.
+ */
+const FINGERPRINT_CHALLENGE_TIMEOUT_MS = 120_000
 
 /**
  * How long ONE per-key listing probe may take while the host's own `/models`
@@ -1064,12 +1092,19 @@ export function apply(ctx: Context, config: Config = {}): void {
     ctx.effect(() => () => transforms.dispose(), 'dsh-model-think-level: pi-ai request headers')
   }
   const availableLlm = (ctx as unknown as { llm?: unknown }).llm
+  // The fingerprint route dispatches through the same service, discovered the
+  // same way: whichever of the two shapes supplied it, and re-read at request
+  // time so a late registration is picked up.
+  let fingerprintDispatch: LlmDispatchLike | undefined = availableLlm as LlmDispatchLike | undefined
   if (availableLlm === undefined) {
     // Direct callers and older hosts may omit llm from the module-level inject;
     // keep the deferred path as a compatibility fallback for those contexts.
     ctx.inject(['llm'], (llmCtx) => {
       const llm = (llmCtx as unknown as { llm?: unknown }).llm
-      if (llm !== undefined) installPiAiBridge(llm)
+      if (llm !== undefined) {
+        fingerprintDispatch = llm as LlmDispatchLike
+        installPiAiBridge(llm)
+      }
     })
   } else {
     installPiAiBridge(availableLlm)
@@ -1078,6 +1113,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Read once: what sits on disk changes only when the user installs or patches
   // something, and a restart is the honest moment to re-read it.
   const environmentConflicts: HeaderConflictReport = detectHeaderConflicts()
+
+  // Serializes fingerprint store writes (POST and DELETE) so two clicks cannot
+  // interleave a read-modify-write. Reads stay unqueued, exactly like
+  // `keyMutationTail` below.
+  let fingerprintMutationTail = Promise.resolve()
 
   // Same-origin probe route: the browser half's Auto-adapt asks the endpoint's
   // RAW /models listing through here, because the sanctioned llm wire call
@@ -2059,6 +2099,226 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         }),
       'dsh-model-think-level: headers config route',
+    )
+
+    // Model fingerprint attribution (ModelTrace). One path, three verbs: GET
+    // reads the stored verdicts for a provider, POST runs one model's three
+    // challenges and stores the verdict, DELETE forgets one model.
+    //
+    // The POST answers as NDJSON -- one `progress` line per finished challenge,
+    // then one `result` line -- because the page shows `检测中 · n/3` and only
+    // the host knows when a challenge lands. A proxy that buffers the whole
+    // response degrades this safely: the progress lines just arrive late, the
+    // page falls back to an indeterminate badge, and the final line is still
+    // the truth. Raw answer text never leaves this process; only statistics
+    // are stored (design §4.2).
+    ctx.effect(
+      () =>
+        webServerCtx.webServer.register({
+          kind: 'exact',
+          path: FINGERPRINT_PATH,
+          handler: async (req, res) => {
+            if (!isTrustedRequest(req)) {
+              sendJson(res, 403, { ok: false, error: 'forbidden' })
+              return
+            }
+            const method = req.method ?? 'GET'
+            if (method !== 'GET' && method !== 'POST' && method !== 'DELETE') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
+              return
+            }
+            const url = new URL(req.url ?? '/', 'http://x')
+            const route = url.searchParams.get('route') ?? ''
+            if (route.length === 0) {
+              sendJson(res, 400, { ok: false, error: 'a provider route is required' })
+              return
+            }
+            let section: unknown
+            try {
+              section = piSection(true)
+            } catch {
+              sendJson(res, 502, { ok: false, error: 'the llm-pi-ai settings could not be read' })
+              return
+            }
+            const profile = isRecord(section) && isRecord(section['providers'])
+              ? section['providers'][route]
+              : undefined
+            if (!isRecord(profile)) {
+              sendJson(res, 400, { ok: false, error: `no llm-pi-ai provider route "${route}"` })
+              return
+            }
+            let bank: ReturnType<typeof loadBankSync>
+            try {
+              bank = loadBankSync()
+            } catch (error) {
+              sendJson(res, 500, {
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
+              })
+              return
+            }
+            const file = fingerprintFilePath()
+            const stamp = bankBuiltAt(bank)
+
+            if (method === 'GET') {
+              const document = readFingerprintStore(stamp, file)
+              sendJson(res, 200, {
+                ok: true,
+                data: {
+                  bank: summarizeBank(bank),
+                  records: providerRecords(document, route),
+                },
+              })
+              return
+            }
+
+            // Both writers go through one tail so two clicks cannot interleave a
+            // read-modify-write on the same file. Reads stay unqueued.
+            let releaseMutation: (() => void) | undefined
+            const previous = fingerprintMutationTail
+            fingerprintMutationTail = new Promise<void>(resolve => {
+              releaseMutation = resolve
+            })
+            await previous
+            try {
+              if (method === 'DELETE') {
+                const model = url.searchParams.get('model') ?? ''
+                if (model.length === 0) {
+                  sendJson(res, 400, { ok: false, error: 'a model id is required' })
+                  return
+                }
+                updateFingerprintStore(
+                  document => withoutRecord(document, route, model),
+                  stamp,
+                  file,
+                )
+                sendJson(res, 200, { ok: true })
+                return
+              }
+
+              const body = await readJsonBody(req, 2048)
+              const model = isRecord(body) && typeof body['model'] === 'string' ? body['model'] : ''
+              if (model.length === 0) {
+                sendJson(res, 400, { ok: false, error: 'a model id is required' })
+                return
+              }
+              // Eligibility is a page-level rule (design §0.1): a model outside
+              // the two families cannot produce a verdict this bank can express,
+              // so the route refuses instead of spending three calls to say
+              // "failed".
+              if (!isEligibleModel(model)) {
+                sendJson(res, 400, {
+                  ok: false,
+                  error: `model "${model}" is not a GPT or Claude model`,
+                })
+                return
+              }
+
+              const llm = (fingerprintDispatch ?? (ctx as unknown as { llm?: unknown }).llm) as
+                | LlmDispatchLike
+                | undefined
+              if (llm === undefined || typeof llm.prepareCall !== 'function') {
+                sendJson(res, 503, { ok: false, error: 'the llm service is unavailable' })
+                return
+              }
+
+              res.statusCode = 200
+              res.setHeader('content-type', 'application/x-ndjson; charset=utf-8')
+              res.setHeader('cache-control', 'no-store')
+              // Tell any reverse proxy in front of us not to sit on the lines.
+              res.setHeader('x-accel-buffering', 'no')
+              const emit = (line: Record<string, unknown>): void => {
+                res.write(`${JSON.stringify(line)}\n`)
+              }
+
+              const challenges = generateChallenges(3)
+              const controller = new AbortController()
+              res.on('close', () => {
+                if (!res.writableEnded) controller.abort()
+              })
+
+              let run: ProbeRunResult
+              try {
+                run = await runProbe({
+                  provider: route,
+                  model,
+                  challenges,
+                  llm,
+                  signal: controller.signal,
+                  timeoutMs: FINGERPRINT_CHALLENGE_TIMEOUT_MS,
+                  onOutcome: outcome => {
+                    emit({
+                      type: 'progress',
+                      index: outcome.index,
+                      ok: outcome.ok,
+                      ...(outcome.error === undefined ? {} : { error: outcome.error }),
+                    })
+                  },
+                })
+              } catch (error) {
+                emit({
+                  type: 'error',
+                  error: error instanceof Error ? error.message : String(error),
+                })
+                res.end()
+                return
+              }
+
+              let attribution: AttributionResult | null = null
+              let failure: string | undefined
+              try {
+                attribution = analyzeGlobalOutputs(run.outputs, bank)
+              } catch (error) {
+                failure = error instanceof Error ? error.message : String(error)
+              }
+              // `analyzeGlobalOutputs` throws only when nothing was accepted, so
+              // the failure case is exactly "no usable answer". When every call
+              // died before producing text, say what actually went wrong.
+              const usedOutputs = attribution === null ? 0 : attribution.used_outputs
+              const record: FingerprintRecord = {
+                provider: route,
+                model,
+                status: statusOf(attribution, usedOutputs),
+                checkedAt: Date.now(),
+                usedOutputs,
+              }
+              if (attribution === null) {
+                const firstFailure = run.outcomes.find(outcome => !outcome.ok)
+                record.error =
+                  run.outputs.length === 0 && firstFailure?.error !== undefined
+                    ? firstFailure.error
+                    : (failure ?? NO_USABLE_OUTPUT)
+              } else {
+                record.prediction = attribution.prediction
+                record.predictionName = attribution.prediction_name
+                record.probability = attribution.probability
+                record.familyPrediction = attribution.family_prediction
+                record.familyProbability = attribution.family_probability
+                record.top = topEntriesOf(attribution.results, 3)
+                record.calibration = {
+                  queries: attribution.calibration.queries,
+                  cvAccuracy: attribution.calibration.cv_accuracy,
+                }
+              }
+
+              updateFingerprintStore(
+                document => withRecord(document, record),
+                stamp,
+                file,
+              )
+              emit({ type: 'result', record })
+              res.end()
+            } catch (error) {
+              sendJson(res, 500, {
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
+              })
+            } finally {
+              releaseMutation?.()
+            }
+          },
+        }),
+      'dsh-model-think-level: fingerprint route',
     )
   })
 }

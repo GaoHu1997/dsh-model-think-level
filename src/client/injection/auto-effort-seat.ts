@@ -31,6 +31,7 @@
  */
 
 import { requestAutoEffort, type AutoAdaptReport } from '../auto-effort.js'
+import { setHidden } from './dom.js'
 
 /** Marks the seat, and carries the route whose models it adapts. */
 const SEAT_ATTR = 'data-bre-auto-effort'
@@ -333,7 +334,7 @@ function showNote(
   const wording = wordsOf(outcome, deps)
   if (text.textContent !== wording.text) text.textContent = wording.text
   if (detail.textContent !== wording.detail) detail.textContent = wording.detail
-  detail.hidden = wording.detail.length === 0
+  setHidden(detail, wording.detail.length === 0)
   if (entry === undefined) document.body.append(note)
   // A working bubble has no lifetime of its own: the pass answers and replaces
   // it with the verdict. The clock starts when the verdict lands. The fade is

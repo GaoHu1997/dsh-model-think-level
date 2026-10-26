@@ -109,11 +109,27 @@ const HEADERS_HOST_SELECTOR = '.bre-headers-host'
 /** The request-header section itself: the `advanced` pane. */
 const HEADERS_SECTION_SELECTOR = '.bre-headers'
 
+/** The model-fingerprint section itself: the `fingerprint` pane. */
+const FINGERPRINT_SECTION_SELECTOR = '.bre-fingerprint'
+
+/**
+ * What the fingerprint pane publishes about its own availability, written on
+ * the section by the component that knows the provider's catalogue.
+ *
+ * The eligibility rule is a CATALOGUE fact (does this provider hold any GPT or
+ * Claude model?) and the catalogue is not something this pass reads: it sorts
+ * DOM, the pane reads the settings document. So the pane says whether it has
+ * anything to show and this pass turns that into a tab, the same way it turns
+ * the presence of a headers section into one.
+ */
+const FINGERPRINT_READY_ATTR = 'data-bre-fingerprint'
+
 /** Tab ids, in display order. */
 const TAB_PROVIDER = 'provider'
 const TAB_MODELS = 'models'
+const TAB_FINGERPRINT = 'fingerprint'
 const TAB_ADVANCED = 'advanced'
-const TAB_IDS = [TAB_PROVIDER, TAB_MODELS, TAB_ADVANCED] as const
+const TAB_IDS = [TAB_PROVIDER, TAB_MODELS, TAB_FINGERPRINT, TAB_ADVANCED] as const
 
 /**
  * A region id that is NEVER a tab. The pane rules only ever reveal the three
@@ -188,6 +204,20 @@ export function createEditorTabsState(): EditorTabsState {
  */
 export function editorCardOf(element: Element | null): HTMLElement | null {
   return element === null ? null : element.closest<HTMLElement>(CARD_PROBE)
+}
+
+/**
+ * Whether the card a mount sits in is the one CREATING a provider.
+ *
+ * One rule for the two callers that need it — this pass (which refuses the
+ * fingerprint tab there) and the fingerprint pane (which refuses to render
+ * there at all). A card still choosing what to be must not offer to
+ * fingerprint what it is not yet, and the check is about the card, never about
+ * whether the draft happens to have an id typed in.
+ */
+export function isCreateProviderCard(element: Element | null): boolean {
+  const card = editorCardOf(element)
+  return card !== null && card.querySelector(CREATE_HOST_SELECTOR) !== null
 }
 
 /**
@@ -539,6 +569,10 @@ function applyTabs(card: HTMLElement, deps: EditorTabsDeps): void {
   // The MOUNT is not the pane: it carries the bar and stays visible on every
   // tab, so only the section inside it is tagged (and hidden off `advanced`).
   if (headersSection !== null) setAttr(headersSection, REGION_ATTR, TAB_ADVANCED)
+  // The fingerprint pane rides the same mount — it is a sibling of the headers
+  // section, not a child of the official body — so it is tagged the same way.
+  const fingerprintSection = scope.querySelector<HTMLElement>(FINGERPRINT_SECTION_SELECTOR)
+  if (fingerprintSection !== null) setAttr(fingerprintSection, REGION_ATTR, TAB_FINGERPRINT)
   forceGroupsOpen(body)
 
   // A tab whose pane is not on this card steps aside: the model list on a
@@ -548,6 +582,20 @@ function applyTabs(card: HTMLElement, deps: EditorTabsDeps): void {
   const available = new Set<string>([TAB_PROVIDER])
   if (regions.models !== undefined) available.add(TAB_MODELS)
   if (headersSection !== null) available.add(TAB_ADVANCED)
+  // The fingerprint tab needs THREE things, and the third is a hard rule
+  // rather than a rendering nicety: the pane must be mounted, it must have
+  // found at least one GPT or Claude model to speak of, and the card must not
+  // be the create-provider card. That last one is not about the draft having
+  // no credentials to sign a probe with (it has not) — it is that a card still
+  // choosing what to be must not offer to fingerprint what it is not yet. The
+  // pane refuses to render there in the first place; this is the belt to that
+  // braces.
+  const isCreateCard = scope.querySelector(CREATE_HOST_SELECTOR) !== null
+  if (fingerprintSection !== null
+    && !isCreateCard
+    && fingerprintSection.getAttribute(FINGERPRINT_READY_ATTR) === 'ready') {
+    available.add(TAB_FINGERPRINT)
+  }
   const active = card.getAttribute(TAB_ATTR) ?? TAB_PROVIDER
   setAttr(card, TAB_ATTR, available.has(active) ? active : TAB_PROVIDER)
   setClass(card, TABBED_CLASS, true)
@@ -576,8 +624,10 @@ function syncTabBar(card: HTMLElement, scope: HTMLElement, deps: EditorTabsDeps,
   setText(tabOf(bar, TAB_PROVIDER), deps.t('editorTabProvider'))
   setText(tabOf(bar, TAB_MODELS), deps.t('editorTabModels'))
   setText(tabOf(bar, TAB_ADVANCED), deps.t('editorTabAdvanced'))
+  setText(tabOf(bar, TAB_FINGERPRINT), deps.t('editorTabFingerprint'))
   setHidden(tabOf(bar, TAB_MODELS), !available.has(TAB_MODELS))
   setHidden(tabOf(bar, TAB_ADVANCED), !available.has(TAB_ADVANCED))
+  setHidden(tabOf(bar, TAB_FINGERPRINT), !available.has(TAB_FINGERPRINT))
   syncSelected(card, bar)
 }
 

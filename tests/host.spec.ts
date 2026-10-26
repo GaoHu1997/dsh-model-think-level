@@ -2769,3 +2769,288 @@ describe('apply() default-guard', () => {
     expect(llm.svc.stream).toBe(origStream)
   })
 })
+
+describe('apply() fingerprint route', () => {
+  const FINGERPRINT_PATH = '/dsh-model-think-level/fingerprint'
+
+  /** The verdict file lives under the harness home; point it at a temp dir per test. */
+  const savedHome = process.env['DSH_HOME']
+  let home = ''
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'bre-host-fp-'))
+    process.env['DSH_HOME'] = home
+  })
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env['DSH_HOME']
+    else process.env['DSH_HOME'] = savedHome
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  /** A response that can stream NDJSON as well as answer a whole JSON body. */
+  function fakeRes(): {
+    res: unknown
+    headers: Record<string, string>
+    lines: () => Array<Record<string, unknown>>
+    out: () => { status: number; body: Record<string, unknown> }
+  } {
+    let status = 0
+    let raw = ''
+    let ended = false
+    const headers: Record<string, string> = {}
+    const written: string[] = []
+    const closers: Array<() => void> = []
+    const res = {
+      set statusCode(value: number) { status = value },
+      get statusCode(): number { return status },
+      get writableEnded(): boolean { return ended },
+      setHeader(key: string, value: string): void { headers[key.toLowerCase()] = value },
+      write(chunk: string): boolean { written.push(chunk); return true },
+      end(body?: string): void { raw = body ?? ''; ended = true },
+      on(event: string, listener: () => void): void {
+        if (event === 'close') closers.push(listener)
+      },
+      close(): void { for (const listener of closers) listener() },
+    }
+    return {
+      res,
+      headers,
+      lines: () => written.join('').split('\n').filter(line => line.length > 0).map(line => JSON.parse(line) as Record<string, unknown>),
+      out: () => ({ status, body: JSON.parse(raw.length > 0 ? raw : '{}') as Record<string, unknown> }),
+    }
+  }
+
+  function fakeReq(overrides?: {
+    method?: string
+    url?: string
+    headers?: Record<string, string>
+    body?: unknown
+  }): unknown {
+    const text = overrides?.body === undefined ? '' : JSON.stringify(overrides.body)
+    const req: Record<string | symbol, unknown> = {
+      method: 'GET',
+      url: '?route=aliyun',
+      headers: { host: '127.0.0.1:3080' },
+      ...overrides,
+    }
+    if (text.length > 0) {
+      req[Symbol.asyncIterator] = async function* () {
+        yield text
+      }
+    }
+    return req
+  }
+
+  /**
+   * A dispatch that answers every challenge with a full integer run, so the
+   * bank has something to attribute. Deterministic via an LCG: the point is the
+   * plumbing, not the verdict.
+   */
+  function speakingLlm(): Record<string, unknown> {
+    let state = 1
+    const next = (): number => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0
+      return state
+    }
+    return {
+      async prepareCall(config: Record<string, unknown>): Promise<Record<string, unknown>> {
+        return { ...config }
+      },
+      stream(options: Record<string, unknown>): AsyncIterable<unknown> {
+        const messages = options['messages'] as Array<{ content: Array<{ text: string }> }> | undefined
+        const prompt = String(messages?.[0]?.content?.[0]?.text ?? '')
+        const count = /(\d+)\s*个/.exec(prompt)?.[1]
+        const wanted = Number(count ?? '300')
+        const values = Array.from({ length: wanted }, () => 1 + (next() % 355))
+        return (async function* (): AsyncGenerator<unknown> {
+          yield { type: 'text-delta', index: 0, text: values.join(' ') }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        })()
+      },
+    }
+  }
+
+  const profile = {
+    api: 'openai-completions',
+    baseURL: 'https://gw.example.com/v1',
+    apiKeyEnv: 'ALIYUN_KEY',
+    models: [],
+  }
+
+  async function mounted(options?: {
+    llm?: Record<string, unknown>
+  }): Promise<(req: unknown, res: unknown) => Promise<void>> {
+    const settings = fakeSettings({ aliyun: profile })
+    const { ctx, routes } = fakeHost(
+      settings,
+      options?.llm === undefined ? undefined : { llm: options.llm },
+    )
+    const { apply } = await import('../src/index.js')
+    apply(ctx, { autofill: false })
+    const handler = routes.get(FINGERPRINT_PATH)
+    expect(handler).toBeDefined()
+    return handler!
+  }
+
+  it('names the route and refuses every other verb', async () => {
+    const handler = await mounted()
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'PATCH' }), res)
+    expect(out()).toEqual({ status: 405, body: { ok: false, error: 'method not allowed' } })
+  })
+
+  it('refuses a cross-site caller before reading anything', async () => {
+    const handler = await mounted()
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ headers: { host: '10.0.0.5:3080', 'sec-fetch-site': 'cross-site' } }), res)
+    expect(out().status).toBe(403)
+    expect(out().body['error']).toBe('forbidden')
+  })
+
+  it('insists on a provider route', async () => {
+    const handler = await mounted()
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ url: '?' }), res)
+    expect(out()).toEqual({ status: 400, body: { ok: false, error: 'a provider route is required' } })
+  })
+
+  it('refuses a route the llm-pi-ai settings do not name', async () => {
+    const handler = await mounted()
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ url: '?route=nope' }), res)
+    expect(out()).toEqual({
+      status: 400,
+      body: { ok: false, error: 'no llm-pi-ai provider route "nope"' },
+    })
+  })
+
+  it('GET answers the bank and an empty verdict list', async () => {
+    const handler = await mounted()
+    const { res, out } = fakeRes()
+    await handler(fakeReq(), res)
+
+    const body = out()
+    expect(body.status).toBe(200)
+    expect(body.body['ok']).toBe(true)
+    const data = body.body['data'] as Record<string, unknown>
+    expect(data['records']).toEqual([])
+    const bank = data['bank'] as Record<string, unknown>
+    // The shipped bank is the 2-family / 18-model one.
+    expect((bank['models'] as unknown[]).length).toBe(18)
+    expect((bank['families'] as Array<Record<string, unknown>>).map(f => f['family']).sort()).toEqual(['claude', 'gpt'])
+    expect(bank['recommendedQueries']).toBe(3)
+    expect(data['bankBuiltAt']).toBeUndefined()
+  })
+
+  it('POST refuses a model outside the two families instead of spending three calls', async () => {
+    const handler = await mounted({ llm: speakingLlm() })
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { model: 'qwen3.8-flash' } }), res)
+
+    expect(out()).toEqual({
+      status: 400,
+      body: { ok: false, error: 'model "qwen3.8-flash" is not a GPT or Claude model' },
+    })
+  })
+
+  it('POST insists on a model id', async () => {
+    const handler = await mounted({ llm: speakingLlm() })
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: {} }), res)
+    expect(out()).toEqual({ status: 400, body: { ok: false, error: 'a model id is required' } })
+  })
+
+  it('POST reports an unavailable llm service rather than pretending to fail', async () => {
+    const handler = await mounted()
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { model: 'gpt-5.5' } }), res)
+    expect(out()).toEqual({ status: 503, body: { ok: false, error: 'the llm service is unavailable' } })
+  })
+
+  it('POST streams one line per challenge and a verdict, then stores it', async () => {
+    const handler = await mounted({ llm: speakingLlm() })
+    const fake = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { model: 'gpt-5.5' } }), fake.res)
+    const { headers, lines } = fake
+
+    // The answer is streamed, never buffered whole: the page reads it as it lands.
+    expect(headers['content-type']).toBe('application/x-ndjson; charset=utf-8')
+    expect(headers['cache-control']).toBe('no-store')
+    expect(headers['x-accel-buffering']).toBe('no')
+
+    const emitted = lines()
+    const progress = emitted.filter(line => line['type'] === 'progress')
+    expect(progress).toHaveLength(3)
+    expect(progress.map(line => line['index']).sort()).toEqual([0, 1, 2])
+    expect(progress.every(line => line['ok'] === true)).toBe(true)
+
+    const result = emitted.find(line => line['type'] === 'result') as Record<string, unknown>
+    expect(result).toBeDefined()
+    const record = result['record'] as Record<string, unknown>
+    expect(record['provider']).toBe('aliyun')
+    expect(record['model']).toBe('gpt-5.5')
+    expect(['identified', 'doubtful']).toContain(record['status'])
+    expect(record['usedOutputs']).toBe(3)
+    expect(record['prediction']).toBeTypeOf('string')
+    expect(record['probability']).toBeTypeOf('number')
+    expect((record['top'] as unknown[]).length).toBeGreaterThan(0)
+
+    // And it is on disk, keyed by provider + model.
+    const written = readFileSync(join(home, 'dsh-model-think-level', 'fingerprint.json'), 'utf8')
+    const records = (JSON.parse(written) as { records: Record<string, unknown> }).records
+    expect(Object.keys(records)).toHaveLength(1)
+    expect(Object.keys(records)[0]).toBe('aliyun\u0000gpt-5.5')
+  })
+
+  it('stores a verdict under the model id and can forget it again', async () => {
+    const handler = await mounted({ llm: speakingLlm() })
+    const run = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { model: 'gpt-5.5' } }), run.res)
+
+    const before = fakeRes()
+    await handler(fakeReq(), before.res)
+    const records = (before.out().body['data'] as Record<string, unknown>)['records'] as Array<Record<string, unknown>>
+    expect(records.map(entry => entry['model'])).toEqual(['gpt-5.5'])
+
+    const gone = fakeRes()
+    await handler(fakeReq({ method: 'DELETE', url: '?route=aliyun&model=gpt-5.5' }), gone.res)
+    expect(gone.out().body['ok']).toBe(true)
+
+    const after = fakeRes()
+    await handler(fakeReq(), after.res)
+    expect(((after.out().body['data'] as Record<string, unknown>)['records'] as unknown[]).length).toBe(0)
+  })
+
+  it('DELETE insists on a model id', async () => {
+    const handler = await mounted()
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ method: 'DELETE' }), res)
+    expect(out()).toEqual({ status: 400, body: { ok: false, error: 'a model id is required' } })
+  })
+
+  it('reports a dead model as a verdict, not as a transport error', async () => {
+    const silent = {
+      async prepareCall(config: Record<string, unknown>): Promise<Record<string, unknown>> {
+        return { ...config }
+      },
+      stream(): AsyncIterable<unknown> {
+        return (async function* (): AsyncGenerator<unknown> {
+          yield { type: 'finish', reason: { kind: 'error', failure: { message: 'model not found' } } }
+        })()
+      },
+    }
+    const handler = await mounted({ llm: silent })
+    const { res, lines } = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { model: 'claude-sonnet-5' } }), res)
+
+    const result = lines().find(line => line['type'] === 'result') as Record<string, unknown>
+    const record = result['record'] as Record<string, unknown>
+    expect(record['status']).toBe('failed')
+    expect(record['usedOutputs']).toBe(0)
+    // Every call died before producing text, so say what actually went wrong.
+    expect(record['error']).toBe('error: model not found')
+    expect(record['prediction']).toBeUndefined()
+    expect(record['top']).toBeUndefined()
+  })
+})

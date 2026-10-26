@@ -88,8 +88,13 @@ describe('EditorTabBar', () => {
       expect(bar.getAttribute('role')).toBe('tablist')
       expect(bar.getAttribute('aria-label')).toBe('Editor sections')
       const tabs = Array.from(bar.querySelectorAll<HTMLElement>(`[${EDITOR_TAB_ID_ATTR}]`))
-      expect(tabs.map((tab) => tab.getAttribute(EDITOR_TAB_ID_ATTR))).toEqual(['provider', 'models', 'advanced'])
-      expect(tabs.map((tab) => tab.textContent)).toEqual(['Provider', 'Models', 'Advanced'])
+      expect(tabs.map((tab) => tab.getAttribute(EDITOR_TAB_ID_ATTR))).toEqual([
+        'provider',
+        'models',
+        'fingerprint',
+        'advanced',
+      ])
+      expect(tabs.map((tab) => tab.textContent)).toEqual(['Provider', 'Models', 'Fingerprint', 'Advanced'])
       // Nothing is selected until the pass labels the card it belongs to: a bar
       // rendered on a card the takeover skipped must not claim a tab.
       expect(tabs.every((tab) => tab.getAttribute('aria-selected') === null)).toBe(true)

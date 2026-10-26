@@ -116,6 +116,15 @@ export interface SettingsJoin {
   namespace: SettingsNamespaceView | undefined;
   /** Whether the settings document accepts writes. */
   writable: boolean;
+  /**
+   * Where the join came from, when the reader produced it. A mirrored read is
+   * free but can lag a write the mirror has not folded in yet; a wire read is
+   * authoritative. A caller about to fence a write on this revision must know
+   * which one it is holding -- and it must not go to the wire just to find out,
+   * because the host's `describe()` emits `settings/document-updated`.
+   * Undefined for a join a mock built by hand, which is never stale.
+   */
+  source?: 'scope' | 'wire';
 }
 /**
  * The client shell's context face, declared locally instead of imported: the
