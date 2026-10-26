@@ -184,4 +184,44 @@ describe('the directory the composer picker submits to', () => {
       document.body.innerHTML = ''
     }
   })
+
+  it('re-attaches a stable root instead of rebuilding it on every observer pass', async () => {
+    // The other half of the same contract: the root is rebuilt on a directory
+    // IDENTITY change, so a host that resolves one instance per call (instead
+    // of memoizing per session, as the kernel does) would rebuild on EVERY
+    // reconcile — and each rebuild is a childList mutation that re-enters the
+    // Models-page observer. That feedback loop is what exhausted the CI worker's
+    // heap, so the stable case is pinned here: same instance in, same wrapper out.
+    document.body.innerHTML = ''
+    const dir = modelDirectory('qwen-max')
+
+    const { apply } = await import('../src/client/index.js')
+    const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+    const h = makeCtx(api, {
+      services: {
+        sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
+        modelDirectories: { directoryFor: () => dir },
+      },
+    })
+    apply(h.ctx as unknown as Ctx)
+    try {
+      const menu = openMenu()
+      await waitFor(() => menu.querySelector('[data-bre-slider="1"] .bre-provider-models .bre-option') !== null)
+      const wrapper = menu.querySelector<HTMLElement>('[data-bre-slider="1"]')!
+
+      // Unrelated document mutations: each one drives a reconcile pass, which
+      // re-resolves the directory. None of them may replace the mounted root.
+      for (let pass = 0; pass < 5; pass += 1) {
+        document.body.insertAdjacentHTML('beforeend', '<div data-noise="1"></div>')
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+
+      expect(menu.querySelector('[data-bre-slider="1"]')).toBe(wrapper)
+      expect(wrapper.isConnected).toBe(true)
+      expect(wrapper.parentElement).toBe(menu)
+    } finally {
+      h.disposeAll()
+      document.body.innerHTML = ''
+    }
+  })
 })

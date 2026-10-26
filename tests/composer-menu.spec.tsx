@@ -70,10 +70,18 @@ async function withAppliedMenu(
 ): Promise<void> {
   const { apply } = await import('../src/client/index.js')
   const api = fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE))))
+  // ONE instance per session, resolved on every call: the kernel memoizes
+  // `directoryFor(sessionId)`, and the plugin depends on it — the session
+  // tracker tests wiretap liveness by identity (`directoryFor(id) === wired`)
+  // and the composer rebuilds its React root when the resolved INSTANCE
+  // changes. A fixture minting a fresh directory per call would therefore look
+  // like a session switch on every DOM mutation, and the rebuild would feed the
+  // document observer forever.
+  const directory = directoryFixture()
   const h = makeCtx(api, {
     services: {
       sessions: { list: { getSnapshot: () => ({ current: 's1' }) } },
-      modelDirectories: { directoryFor: () => directoryFixture() },
+      modelDirectories: { directoryFor: () => directory },
     },
   })
   // Probes standing in for the official bubble-phase handler: React 18
