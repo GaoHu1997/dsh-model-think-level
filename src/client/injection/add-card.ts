@@ -271,34 +271,6 @@ function seatKeyFields(scope: HTMLElement, deps: AddCardDeps): void {
   }
 }
 
-/**
- * Give the custom form's key field the edit card's draft key list.
- *
- * The list runs over an in-memory store (there is no route to read), and its
- * drafts wait in the session ledger until this card's own 保存 declares the
- * provider they belong to — see `staged-keys`. A field with no key input is
- * reset, so a card the page restructured sheds any list whose field is gone.
- */
-function seatKeyFields(scope: HTMLElement, deps: AddCardDeps): void {
-  for (const field of keyFieldsOf(scope)) {
-    try {
-      enhanceCreateKeySeat(field, {
-        t: deps.t,
-        api: deps.api,
-        routeIdLabels: deps.routeIdLabels,
-        staged: deps.stagedKeys,
-        refreshed: deps.refreshed,
-      })
-    } catch (error) {
-      // The list is an affordance the official form works without: a field it
-      // could not seat keeps the official input (the managed mark goes with
-      // the reset the enhancer never reached, so the box stays usable).
-      resetCreateKeySeat(field)
-      console.warn('[bre] add provider card: could not mount the key list:', error)
-    }
-  }
-}
-
 /** Show or hide the official switch. */
 function setPickerHidden(card: HTMLElement, hidden: boolean): void {
   const picker = pickerOf(card)

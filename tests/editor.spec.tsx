@@ -143,7 +143,7 @@ function pillGroup(container: HTMLElement, label: string): HTMLButtonElement[] {
 
 /** The armed levels' wire spelling inputs, in LEVEL_ORDER. */
 function wires(container: HTMLElement): HTMLInputElement[] {
-  return Array.from(container.querySelectorAll<HTMLInputElement>('.bre-effort-card .bre-wire-row input[type="text"]'))
+  return Array.from(container.querySelectorAll<HTMLInputElement>('.bre-effort-card input.bre-effort-wire'))
 }
 
 /** The quiet link that unfolds the wire-spelling row (folded by default). */

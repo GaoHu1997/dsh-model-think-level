@@ -1,7 +1,7 @@
 /**
  * The create-provider card's draft key list: the seat that mounts it under the
- * official key field, the seed it takes out of a value the user had already
- * typed, and the session-ledger staging its pane performs as the id field
+ * official key field — which keeps whatever the user typed into it (user items
+ * 9 and 10) — and the session-ledger staging its pane performs as the id field
  * changes — the seat-level twin of what `create-card-pane.spec` pins for the
  * headers pane.
  */
@@ -155,20 +155,20 @@ describe('the seat', () => {
     expect(seatHostOf(fixture)).toBe(first)
   })
 
-  it('seeds a value the user had already typed as the first draft row', async () => {
+  it('leaves a value the user had already typed in the official box', async () => {
+    // User items 9 and 10: the official create card fetches its models with the
+    // key the FORM currently shows, and its in-field eye only exists while the
+    // box has text — so the seat must keep the value where the user put it.
+    // The list below stays empty; the official 保存 stores the first key.
     const fixture = buildCard()
     fixture.keyInput.value = 'sk-already-typed-01'
 
     enhanceCreateKeySeat(fixture.keyField, deps())
     await flush()
 
+    expect(fixture.keyInput.value).toBe('sk-already-typed-01')
     const host = seatHostOf(fixture)
-    // The head-and-tail mask, not the value: the row reads exactly like a
-    // stored one will after the create.
-    expect(host?.querySelector('.bre-keys-mask')?.textContent).toBe('sk-a...d-01')
-    // The official form no longer holds the value — its own 保存 would store it
-    // as the provider's single key beside the list the drain writes.
-    expect(fixture.keyInput.value).toBe('')
+    expect(host?.querySelectorAll('.bre-keys-mask')).toHaveLength(0)
   })
 
   it('mirrors the field’s pane region onto the host', async () => {
