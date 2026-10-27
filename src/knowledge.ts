@@ -1483,7 +1483,7 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     patterns: ['gpt-image', 'dall-e', 'dalle'],
     efforts: false,
     imageGen: true,
-    note: 'OpenAI 生图系（gpt-image-1 / DALL·E 3）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+    note: 'OpenAI 生图系（gpt-image-1 / DALL·E 3）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。',
   },
   {
     id: 'google-imagen',
@@ -1493,42 +1493,42 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     patterns: ['imagen', 'flash-image', 'pro-image', 'nano-banana'],
     efforts: false,
     imageGen: true,
-    note: 'Google 生图系（Imagen / Gemini-Image "nano banana"）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+    note: 'Google 生图系（Imagen / Gemini-Image "nano banana"）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。',
   },
   {
     id: 'black-forest-flux',
     patterns: ['flux'],
     efforts: false,
     imageGen: true,
-    note: 'FLUX 系（FLUX.1 schnell/dev/pro 等）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+    note: 'FLUX 系（FLUX.1 schnell/dev/pro 等）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。',
   },
   {
     id: 'stability-sd',
     patterns: ['stable-diffusion', 'sdxl', 'sd3'],
     efforts: false,
     imageGen: true,
-    note: 'Stability 生图系（Stable Diffusion / SDXL / SD3）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+    note: 'Stability 生图系（Stable Diffusion / SDXL / SD3）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。',
   },
   {
     id: 'zhipu-cogview',
     patterns: ['cogview'],
     efforts: false,
     imageGen: true,
-    note: '智谱 CogView 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+    note: '智谱 CogView 生图系：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。',
   },
   {
     id: 'aliyun-wanx',
     patterns: ['wanx'],
     efforts: false,
     imageGen: true,
-    note: '阿里万相 Wanx 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+    note: '阿里万相 Wanx 生图系：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。',
   },
   {
     id: 'bytedance-seedream',
     patterns: ['seedream', 'seededit'],
     efforts: false,
     imageGen: true,
-    note: '字节 Seedream / SeedEdit 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+    note: '字节 Seedream / SeedEdit 生图系：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。',
   },
   {
     id: 'qwen-image',
@@ -1537,14 +1537,14 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     patterns: ['qwen-image'],
     efforts: false,
     imageGen: true,
-    note: '通义千问 Qwen-Image 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+    note: '通义千问 Qwen-Image 生图系：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。',
   },
   {
     id: 'midjourney',
     patterns: ['midjourney', 'niji'],
     efforts: false,
     imageGen: true,
-    note: 'Midjourney / Niji 生图系（中转常见）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+    note: 'Midjourney / Niji 生图系（中转常见）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。',
   },
 ]
 
@@ -1670,11 +1670,9 @@ export function inferProtocol(route: RouteFacts): string {
       // Malformed URL: fall through to the generic ladder.
     }
   }
-  // No route-level 'gemini' guessing: the harness adapter's registry offers
-  // only the three OpenAI/Anthropic wires, so a Gemini endpoint at route level
-  // still speaks the OpenAI-compatible dialect. Native Gemini
-  // ('google-generative-ai') is reached only through a per-key protocol pin
-  // (see key-refs.ts), which needs no route inference.
+  // Only the host-supported OpenAI/Anthropic protocols are inferred. Models
+  // such as Gemini served through an OpenAI-compatible gateway keep that wire;
+  // the plugin does not provide a native Gemini protocol.
   return 'openai-completions'
 }
 

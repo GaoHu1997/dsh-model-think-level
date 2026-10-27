@@ -653,11 +653,12 @@ describe('ComposerSlider commit', () => {
   })
 })
 
-describe('ComposerSlider image-generation filter and capacity tag', () => {
-  it('hides a 生图-marked model from the columns, the search and the provider count', async () => {
-    // The models page marked wanx-v1 an image generator: it cannot serve a
-    // chat turn, so the switcher drops it everywhere — the columns, the
-    // matches and the count beside the provider name.
+describe('ComposerSlider image-generation rows and capacity tag', () => {
+  it('offers a 生图-marked model in the columns, the search and the provider count', async () => {
+    // The models page marked wanx-v1 an image generator. It is NOT a chat model,
+    // but hiding it here kept it out of reach of the composer altogether (user
+    // item: 生图模型需要出现在会话框的切换模型列表中）— it is offered like any
+    // other row, with the 生图 badge beside its name.
     const facts = fakeFacts({ aliyun: { 'wanx-v1': { imageGen: true } } })
     const { directory } = fixture({
       groups: ([{
@@ -672,12 +673,36 @@ describe('ComposerSlider image-generation filter and capacity tag', () => {
     })
     const { root, container } = await mount(directory, facts)
     const names = modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent)
-    expect(names).toEqual(['Qwen Max', 'Qwen Plus'])
-    // The provider count answers for the OFFERED models only.
-    expect(container.querySelector('.bre-provider-count')?.textContent).toBe('2')
-    // And the search cannot reach the hidden row either.
+    expect(names).toEqual(['Qwen Max', 'Qwen Plus', 'Wanx v1'])
+    // The provider count answers for every offered model.
+    expect(container.querySelector('.bre-provider-count')?.textContent).toBe('3')
+    // The search reaches it, too.
     await search(container, 'wanx')
-    expect(container.querySelector('.bre-provider-models')?.textContent).toContain('modelSearchNoMatches')
+    const hits = modelOptions(container)
+    expect(hits).toHaveLength(1)
+    expect(hits[0]?.querySelector('.bre-option-name')?.textContent).toContain('Wanx v1')
+    root.unmount()
+  })
+
+  it('badges exactly the 生图-marked rows, and only those', async () => {
+    const facts = fakeFacts({ aliyun: { 'wanx-v1': { imageGen: true } } })
+    const { directory } = fixture({
+      groups: ([{
+        id: 'aliyun',
+        name: 'Aliyun',
+        models: [
+          { id: 'qwen-max', name: 'Qwen Max', reasoning: { defaultEffort: 'medium', efforts: LADDER } },
+          { id: 'wanx-v1', name: 'Wanx v1' },
+        ],
+      }] as unknown) as Groups,
+    })
+    const { root, container } = await mount(directory, facts)
+    const badge = (name: string): string | null =>
+      optionNamed(modelOptions(container), name)?.querySelector('.bre-tag[title="tagImageGen"]')?.getAttribute('title') ?? null
+    expect(badge('Wanx v1')).toBe('tagImageGen')
+    // A chat row is never guessed into a generator by its name or its id.
+    expect(badge('Qwen Max')).toBeNull()
+    expect(optionNamed(modelOptions(container), 'Wanx v1')?.querySelectorAll('svg.bre-tag-icon')).toHaveLength(1)
     root.unmount()
   })
 

@@ -19,8 +19,8 @@
  *   - **extra endpoints can be added.** A grey "更多端点" text button directly
  *     under the API address — where the rows it reveals appear — opens one more
  *     address row for EVERY family the selected protocol does not serve
- *     (Anthropic and Gemini under an OpenAI protocol, OpenAI and Gemini under
- *     Anthropic). They persist to the route's `endpoints` in this plugin's key
+ *     (Anthropic under an OpenAI protocol, OpenAI under Anthropic). They persist
+ *     to the route's `endpoints` in this plugin's key
  *     index, which is what a key pinned to that family signs against.
  *
  * The add card carries the same three fields, so the same decoration applies to
@@ -55,13 +55,12 @@ export interface EndpointDeps {
 }
 
 /**
- * The stored endpoint triple, one base URL per family. Always whole: the host
- * replaces the set on write, so every merge carries all three sides.
+ * The stored endpoint pair, one base URL per family. Always whole: the host
+ * replaces the set on write, so every merge carries both sides.
  */
 interface StoredEndpoints {
   readonly openai: string
   readonly anthropic: string
-  readonly gemini: string
 }
 
 /** Marks the container holding the extra address rows. */
@@ -185,7 +184,7 @@ function valueByLabel(card: HTMLElement, labels: readonly string[]): string {
 /** The protocol the card selects, or undefined when it is not one the plugin knows. */
 function protocolOf(card: HTMLElement, labels: EndpointLabels): RouteProtocol | undefined {
   const value = valueByLabel(card, labels.apiProtocol)
-  return value === 'anthropic-messages' || value === 'openai-completions' || value === 'openai-responses' || value === 'google-generative-ai'
+  return value === 'anthropic-messages' || value === 'openai-completions' || value === 'openai-responses'
     ? value
     : undefined
 }
@@ -216,7 +215,6 @@ function routeOf(card: HTMLElement, labels: EndpointLabels): string {
 function familyText(family: Family | undefined, t: EndpointDeps['t']): string {
   if (family === 'anthropic') return t('keysEndpointAnthropic')
   if (family === 'openai') return t('keysEndpointOpenAI')
-  if (family === 'gemini') return t('keysEndpointGemini')
   return ''
 }
 
@@ -392,24 +390,11 @@ function cardsMatch(select: HTMLSelectElement, cards: HTMLElement, deps: Endpoin
   })
 }
 
-/** The Gemini protocol the host select does not offer: its option list predates
- * the plugin's gemini family, and the cards can only offer what the select can
- * carry (协议选择里没有 Gemini). The plugin injects the option — marked, so a
- * re-reconcile re-labels it instead of stacking a second one — and the host
- * saves the select's value like any other. */
-const GEMINI_PROTOCOL = 'google-generative-ai'
-const GEMINI_OPTION_ATTR = 'data-bre-protocol-option'
-
-/** The short name a protocol's CARD carries. The cards sit four across now
- * that Gemini rides the select, and the host's own labels ("Chat Completions",
- * "Anthropic Messages") are what wrapped the row (协议选项卡换行了) — the card
- * shows the short name and carries the host's full text as its tooltip, so
- * nothing is lost and everything fits. An unknown protocol keeps its own text. */
+/** The short name a protocol's card carries; unknown protocols keep the host's text. */
 function protocolShortText(value: string, hostText: string, t: EndpointDeps['t']): string {
   if (value === 'openai-completions') return t('keysProtocolShortChat')
   if (value === 'openai-responses') return t('keysProtocolShortResponses')
   if (value === 'anthropic-messages') return t('keysProtocolShortAnthropic')
-  if (value === 'google-generative-ai') return t('keysProtocolGemini')
   return hostText
 }
 
@@ -452,17 +437,8 @@ function decorateProtocolCards(card: HTMLElement, labels: EndpointLabels, deps: 
   if (!(control instanceof HTMLSelectElement)) return
   const group = fieldGroupOf(card, labels.apiProtocol)
   if (group === undefined) return
-  // The Gemini option rides the select itself, so the host's own save reads a
-  // value it can carry and the cards below need no special casing.
-  let gemini = control.querySelector<HTMLOptionElement>(`option[${GEMINI_OPTION_ATTR}]`)
-  if (gemini === null) {
-    gemini = document.createElement('option')
-    gemini.setAttribute(GEMINI_OPTION_ATTR, '1')
-    gemini.value = GEMINI_PROTOCOL
-    control.appendChild(gemini)
-  }
-  const geminiText = deps.t('keysProtocolGemini')
-  if (gemini.textContent !== geminiText) gemini.textContent = geminiText
+  // This select is the host's schema-backed list. Mirror its offered options
+  // without adding, removing or specially handling unknown protocols.
   let cards = group.querySelector<HTMLElement>(`[${PROTOCOL_CARDS_ATTR}]`)
   if (cards === null) {
     const fresh = document.createElement('div')
@@ -633,7 +609,7 @@ let endpointsEpoch = 0
 const endpointUpdates = new Map<string, Promise<unknown>>()
 
 /** Tell every listener the route's addresses just moved. */
-function announceEndpoints(route: string, endpoints: { openai: string | null; anthropic: string | null; gemini?: string | null }): void {
+function announceEndpoints(route: string, endpoints: { openai: string | null; anthropic: string | null }): void {
   // A write changed what every row of this route shows: the next decoration
   // pass may read past the throttle (see hydrateReads).
   endpointsEpoch += 1
@@ -644,7 +620,6 @@ function announceEndpoints(route: string, endpoints: { openai: string | null; an
         route,
         openai: endpoints.openai ?? '',
         anthropic: endpoints.anthropic ?? '',
-        gemini: endpoints.gemini ?? '',
       },
     }),
   )
@@ -653,10 +628,10 @@ function announceEndpoints(route: string, endpoints: { openai: string | null; an
 /** The family one extra row serves, from the attribute that keys it. */
 function familyOfRow(row: HTMLElement): Family | undefined {
   const value = row.getAttribute(SECOND_ROW_ATTR)
-  return value === 'openai' || value === 'anthropic' || value === 'gemini' ? value : undefined
+  return value === 'openai' || value === 'anthropic' ? value : undefined
 }
 
-/** Hydrate every extra row of a card, one stored triple per read. */
+/** Hydrate every extra row of a card, one stored pair per read. */
 async function hydrateRows(rows: HTMLElement, route: string, deps: EndpointDeps, card: HTMLElement, labels: EndpointLabels): Promise<void> {
   for (const row of Array.from(rows.querySelectorAll<HTMLElement>(`[${SECOND_ROW_ATTR}]`))) {
     await hydrate(row, route, deps, card, labels)
@@ -752,7 +727,6 @@ async function adoptVisibleAddress(
     return {
       openai: family === 'openai' ? visible : current.openai,
       anthropic: family === 'anthropic' ? visible : current.anthropic,
-      gemini: family === 'gemini' ? visible : current.gemini,
     }
   })
 }
@@ -898,7 +872,6 @@ function createExtraRow(
         return {
           openai: rowFamily === 'openai' ? value : stored.openai,
           anthropic: rowFamily === 'anthropic' ? value : stored.anthropic,
-          gemini: rowFamily === 'gemini' ? value : stored.gemini,
         }
       })
     })()
@@ -945,7 +918,6 @@ async function swapFamilyAddress(
       return {
         openai: previous === 'openai' ? leaving : current.openai,
         anthropic: previous === 'anthropic' ? leaving : current.anthropic,
-        gemini: previous === 'gemini' ? leaving : current.gemini,
       }
     })
     if (answer === undefined) return
@@ -986,12 +958,11 @@ async function updateEndpoints(
     if (stored === undefined) return undefined
     const next = merge(stored)
     if (next === undefined) return undefined
-    const answer = await client.setEndpoints(route, next.openai, next.anthropic, next.gemini)
+    const answer = await client.setEndpoints(route, next.openai, next.anthropic)
     if (!answer.ok) return undefined
     const result = {
       openai: answer.endpoints.openai ?? '',
       anthropic: answer.endpoints.anthropic ?? '',
-      gemini: answer.endpoints.gemini ?? '',
     }
     announceEndpoints(route, answer.endpoints)
     return result
@@ -1018,12 +989,23 @@ async function readEndpoints(
   route: string,
   client: KeyManagerClient,
 ): Promise<StoredEndpoints | undefined> {
+  // Ask for the addresses only. This runs once per visible card per second
+  // (HYDRATE_MIN_INTERVAL_MS), and pulling the whole list for two URLs charged
+  // the host a settings read plus a credential resolve per key every time,
+  // behind which the opened card's own list waited for seconds.
+  if (client.endpoints !== undefined) {
+    const pair = await client.endpoints(route)
+    if (!pair.ok) return undefined
+    return {
+      openai: pair.endpoints?.openai ?? '',
+      anthropic: pair.endpoints?.anthropic ?? '',
+    }
+  }
   const answer = await client.list(route)
   if (!answer.ok) return undefined
   return {
     openai: answer.endpoints.openai ?? '',
     anthropic: answer.endpoints.anthropic ?? '',
-    gemini: answer.endpoints.gemini ?? '',
   }
 }
 
@@ -1042,7 +1024,7 @@ function followProtocolFamily(card: HTMLElement, labels: EndpointLabels, deps: E
   decorateExtraRows(card, labels, deps)
   if (urlGroup === undefined || previous === undefined || next === undefined) return
   if (previous === next) return
-  if (previous !== 'openai' && previous !== 'anthropic' && previous !== 'gemini') return
+  if (previous !== 'openai' && previous !== 'anthropic') return
   void swapFamilyAddress(card, labels, deps, previous, next)
 }
 

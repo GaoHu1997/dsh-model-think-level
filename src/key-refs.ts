@@ -24,21 +24,16 @@ export interface KeyEntry {
   /** User-facing label; absent means "show the reference itself". */
   readonly alias?: string
   /**
-   * The model ids this key is known to serve, discovered from the provider's
-   * model listing. Absent means "unscoped": the key has not been probed yet, so
-   * it acts as a catch-all and serves any model no other key claims. An empty
-   * array means the key was probed and reached no models at all.
-   *
-   * Presence, not order, is what matters here: a model reachable through
-   * several keys is served by the first key (in list order) that lists it, so
-   * list order doubles as the preference order the user asked for.
+   * The user's model assignment. Absent means a catch-all; an empty array is a
+   * concrete empty assignment. Nothing but the user's explicit choice may
+   * change this field.
    */
   readonly models?: readonly string[]
   /**
    * The wire protocol this key must speak, when it is pinned to one.
    * Absent means AUTOMATIC: each request speaks the wire the model's own family
-   * names — an Anthropic-family endpoint for claude models, the Gemini one for
-   * gemini models, the route's default for everything else — as far as the
+   * names — an Anthropic-family endpoint for claude models, the route's default
+   * for everything else — as far as the
    * provider configured that family's endpoint. A concrete value re-dispatches
    * every request through that protocol's API implementation AND that key's
    * endpoint, so one provider route can hold a Chat-Completions key and an
@@ -58,35 +53,30 @@ export interface KeyEntry {
 /**
  * The pi-ai API ids the manager can pin a key to. These are the exact ids
  * `providers.<route>.api` carries, so a key pinned to one speaks the same wire
- * format the official card would have produced for that protocol — with one
- * addition: `google-generative-ai` names a protocol the harness's own adapter
- * registry does not offer at route level, so it can only ever appear as a
- * per-key pin riding the gemini family's endpoint.
+ * format the official card would have produced for that protocol. Only the
+ * host-supported OpenAI and Anthropic protocols are offered.
  */
 export type RouteProtocol =
   | 'openai-completions'
   | 'anthropic-messages'
   | 'openai-responses'
-  | 'google-generative-ai'
 
 /** Every protocol a key can be pinned to, in the order the picker shows them. */
 export const ROUTE_PROTOCOLS: readonly RouteProtocol[] = [
   'anthropic-messages',
   'openai-completions',
   'openai-responses',
-  'google-generative-ai',
 ]
 
 /** The endpoint families a protocol can draw its base URL from. */
-export type EndpointFamily = 'openai' | 'anthropic' | 'gemini'
+export type EndpointFamily = 'openai' | 'anthropic'
 
 /** Every endpoint family, in the order address rows and pickers show them. */
-export const ENDPOINT_FAMILIES: readonly EndpointFamily[] = ['openai', 'anthropic', 'gemini']
+export const ENDPOINT_FAMILIES: readonly EndpointFamily[] = ['openai', 'anthropic']
 
 /** Which endpoint family a protocol draws its base URL from. */
 export function endpointFamilyOf(protocol: RouteProtocol): EndpointFamily {
   if (protocol === 'anthropic-messages') return 'anthropic'
-  if (protocol === 'google-generative-ai') return 'gemini'
   return 'openai'
 }
 
@@ -95,7 +85,6 @@ export function isRouteProtocol(value: unknown): value is RouteProtocol {
   return value === 'openai-completions'
     || value === 'anthropic-messages'
     || value === 'openai-responses'
-    || value === 'google-generative-ai'
 }
 
 /**
@@ -128,7 +117,7 @@ export function normalizeKeyDisabled(value: unknown): boolean | undefined {
 
 /**
  * The base URLs one provider route can hold, one per endpoint family: an
- * OpenAI-family endpoint, an Anthropic-family endpoint and a Gemini-family one.
+ * OpenAI-family endpoint and an Anthropic-family endpoint.
  * A key pinned to a protocol uses the matching one; an automatic key (no pin)
  * dispatches a model to the entry of the family the model's id names, and to
  * the route's own `providers.<route>.baseURL` otherwise.
@@ -138,8 +127,6 @@ export interface RouteEndpoints {
   readonly openai?: string
   /** Base URL for anthropic-messages keys. */
   readonly anthropic?: string
-  /** Base URL for google-generative-ai keys (version path included, `…/v1beta`). */
-  readonly gemini?: string
 }
 
 /** Whether a value looks like an http(s) URL worth storing as an endpoint. */
@@ -162,11 +149,10 @@ function isEndpointUrl(value: unknown): value is string {
 export function normalizeRouteEndpoints(value: unknown): RouteEndpoints | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const record = value as Record<string, unknown>
-  const out: { openai?: string; anthropic?: string; gemini?: string } = {}
+  const out: { openai?: string; anthropic?: string } = {}
   if (isEndpointUrl(record['openai'])) out.openai = (record['openai'] as string).trim()
   if (isEndpointUrl(record['anthropic'])) out.anthropic = (record['anthropic'] as string).trim()
-  if (isEndpointUrl(record['gemini'])) out.gemini = (record['gemini'] as string).trim()
-  return out.openai === undefined && out.anthropic === undefined && out.gemini === undefined
+  return out.openai === undefined && out.anthropic === undefined
     ? undefined
     : out
 }

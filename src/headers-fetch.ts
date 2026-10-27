@@ -49,12 +49,15 @@ import {
 import {
   applyKeyToHeaders,
   classifyFailure,
+  clearRest,
+  isRestingFor,
   keyRest,
   parseRetryAfter,
   restKeyOf,
   restLast,
   shouldFailover,
   WIRE_DISPATCH_HEADER,
+  type FailureKind,
   type KeyCandidate,
 } from './key-route-core.js'
 
@@ -322,11 +325,34 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
     const resolved = keyed ? await entry.keys!({ route: override.route, model }) : []
     const keyCandidates: readonly KeyCandidate[] = restLast(
       resolved,
-      candidate => keyRest.isResting(restKeyOf(override.route, candidate.ref), Date.now()),
+      // A key may be benched as a whole (auth, quota, a server fault) or for this
+      // model alone (a group whose plan does not carry it); either defers it.
+      candidate => isRestingFor(keyRest, override.route, candidate.ref, model, Date.now()),
     )
 
     const method = init?.method ?? (typeof Request !== 'undefined' && input instanceof Request ? input.method : undefined)
-    if (entry.modelListing !== undefined && isModelListingRequest(url, method) && listingCouldExceedPlainRequest(keyCandidates)) {
+    const listingRequest = isModelListingRequest(url, method)
+    if (listingRequest && keyed) {
+      // The create/edit form may be trying a new key against an address an
+      // existing route already uses. Its explicit signature belongs to this
+      // listing; replacing it with saved keys would test the wrong credential.
+      const supplied = seedHeaders(input, init)
+      const authNames = ['authorization', 'x-api-key', 'x-goog-api-key'] as const
+      const suppliedKeys = authNames.map(name => {
+        const value = supplied.get(name)
+        return name === 'authorization' ? value?.replace(/^Bearer\s+/i, '').trim() : value?.trim()
+      }).filter((value): value is string => value !== undefined && value.length > 0)
+      if (suppliedKeys.some(value => !keyCandidates.some(candidate => candidate.value === value))) {
+        for (const name of authNames) {
+          const value = supplied.get(name)
+          if (value === null) patched.delete(name)
+          else patched.set(name, value)
+        }
+        return attempt(undefined)
+      }
+    }
+
+    if (entry.modelListing !== undefined && listingRequest && listingCouldExceedPlainRequest(keyCandidates)) {
       const signal = init?.signal ?? (typeof Request !== 'undefined' && input instanceof Request ? input.signal : undefined)
       try {
         const listing = await entry.modelListing({
@@ -347,27 +373,35 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
     if (!hasPatch && keyCandidates.length === 0) return base(input, passthroughInit(input, init))
 
     /**
-     * Charge one rejected attempt to the key that placed it: the status, the
-     * provider's `Retry-After` and a bounded body (enough to tell "out of quota"
-     * from "too fast") decide how long it rests. Best effort — a body that cannot
-     * be read still leaves the status, which is the part that matters.
+     * Read a failed attempt's body, bounded: enough to tell "out of quota" and
+     * "this account does not carry the model" from "too fast". Best effort — a
+     * body that cannot be read still leaves the status, which is the part that
+     * matters.
      */
-    const chargeFailure = async (candidate: KeyCandidate, response: Response): Promise<void> => {
-      const now = Date.now()
-      const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'), now)
-      let bodyText = ''
+    const failureBody = async (response: Response): Promise<string> => {
       try {
-        bodyText = await readBoundedText(response, 4096)
+        return await readBoundedText(response, 4096)
       } catch {
-        // The status alone still classifies most failures.
+        return ''
       }
-      const kind = classifyFailure(response.status, bodyText)
+    }
+
+    /**
+     * Charge one rejected attempt to the key that placed it: the status, the
+     * provider's `Retry-After` and the body decide how long it rests — and WHAT
+     * rests. An `unserved` refusal names the model, so it benches the (key,
+     * model) pair and leaves the key free for the models its group does carry; a
+     * refusal whose model could not be read benches nothing, because the KEY is
+     * not what is known to have failed.
+     */
+    const chargeFailure = (candidate: KeyCandidate, response: Response, kind: FailureKind | undefined): void => {
       if (kind === undefined) return
-      keyRest.note(
-        restKeyOf(override.route, candidate.ref),
-        kind,
-        retryAfterMs === undefined ? { now } : { now, retryAfterMs },
-      )
+      if (kind === 'unserved' && model === undefined) return
+      const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'), Date.now())
+      const restKey = kind === 'unserved'
+        ? restKeyOf(override.route, candidate.ref, model)
+        : restKeyOf(override.route, candidate.ref)
+      keyRest.note(restKey, kind, retryAfterMs === undefined ? undefined : { retryAfterMs })
     }
 
     /** Whether the caller walked away; a cancelled request is not a key failure. */
@@ -379,15 +413,28 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       const solo = keyCandidates[0]
       const response = await attempt(solo?.value)
       if (solo !== undefined) {
-        if (shouldFailover(response.status)) await chargeFailure(solo, response)
-        else keyRest.clear(restKeyOf(override.route, solo.ref))
+        if (response.status < 400) {
+          clearRest(keyRest, override.route, solo.ref, model)
+          return response
+        }
+        const bodyText = await failureBody(response)
+        if (shouldFailover(response.status, bodyText)) {
+          chargeFailure(solo, response, classifyFailure(response.status, bodyText))
+        } else {
+          clearRest(keyRest, override.route, solo.ref, model)
+        }
       }
       return response
     }
     // Try keys in preference order; a retryable status on a non-final attempt
     // releases the rejected body and moves to the next key. A 400/404/422 is a
-    // request-shape failure every key would repeat, so it is returned as-is.
+    // request-shape failure every key would repeat, so it is returned as-is —
+    // UNLESS its body names the model, which makes it a fact about this key's
+    // upstream group instead (see `shouldFailover`): a relay answering "this
+    // model is not supported by any configured account in this group" for one
+    // account must be asked of the next.
     let lastFailure: unknown
+    let unserved = 0
     for (let index = 0; index < keyCandidates.length; index += 1) {
       const candidate = keyCandidates[index]
       let response: Response
@@ -401,12 +448,26 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
         keyRest.note(restKeyOf(override.route, candidate.ref), 'refused')
         continue
       }
-      if (!shouldFailover(response.status)) {
-        keyRest.clear(restKeyOf(override.route, candidate.ref))
+      if (response.status < 400) {
+        clearRest(keyRest, override.route, candidate.ref, model)
         return response
       }
-      await chargeFailure(candidate, response)
-      if (index === keyCandidates.length - 1) return response
+      const bodyText = await failureBody(response)
+      if (!shouldFailover(response.status, bodyText)) {
+        clearRest(keyRest, override.route, candidate.ref, model)
+        return response
+      }
+      const kind = classifyFailure(response.status, bodyText)
+      if (kind === 'unserved') unserved += 1
+      chargeFailure(candidate, response, kind)
+      if (index === keyCandidates.length - 1) {
+        // Every key refused the same model: the provider's own error is the
+        // truth but not the whole story, so the answer names what the plugin
+        // found (see `withUnservedNote`).
+        return unserved === keyCandidates.length && model !== undefined
+          ? await withUnservedNote(response, bodyText, model, unserved)
+          : response
+      }
       await response.body?.cancel().catch(() => {
         // Releasing a rejected attempt's body is best-effort cleanup; the retry
         // decides the outcome either way.
@@ -414,6 +475,81 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
     }
     throw lastFailure ?? new Error('no key could place the request')
   }
+}
+
+/** A plain JSON object, for reading an error envelope without a shape assumption. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * The sentence appended to a route-wide model refusal: the provider's own error
+ * says which group refused it, this says what that means and what to do.
+ * @param model - the model every key refused.
+ * @param tried - how many keys were tried.
+ */
+function unservedNote(model: string, tried: number): string {
+  return ` [dsh-model-think-level: all ${tried} keys of this provider refused model "${model}" — `
+    + 'none of their upstream groups carries it. Add a key whose group does, or assign the model '
+    + 'to a key\'s scope in the provider\'s Keys panel.]'
+}
+
+/**
+ * Append the unserved note to the first message field of a JSON error body.
+ * @returns the rewritten payload, or undefined when the body has no field to
+ * append to (a shape this module does not know stays untouched).
+ */
+function noteInto(payload: unknown, note: string): Record<string, unknown> | undefined {
+  if (!isPlainObject(payload)) return undefined
+  const message = payload['message']
+  if (typeof message === 'string' && message.length > 0) return { ...payload, message: `${message}${note}` }
+  const error = payload['error']
+  if (isPlainObject(error) && typeof error['message'] === 'string' && error['message'].length > 0) {
+    return { ...payload, error: { ...error, message: `${error['message']}${note}` } }
+  }
+  if (typeof error === 'string' && error.length > 0) return { ...payload, error: `${error}${note}` }
+  return undefined
+}
+
+/**
+ * The final answer when every key of a route refused the same model: the
+ * provider's error, plus one sentence naming the real cause.
+ *
+ * A relay that fans one route out over several upstream accounts answers "this
+ * model is not supported by any configured account in this group" per ACCOUNT,
+ * so the user reads a 404 that looks like a typo in the model id while the model
+ * is simply on a group another key holds. Only a JSON error body with a message
+ * field is rewritten; any other shape is returned exactly as the provider sent it.
+ * @param response - the last attempt's response.
+ * @param bodyText - its body, already read (bounded) by the caller.
+ * @param model - the model every key refused.
+ * @param tried - how many keys were tried.
+ */
+async function withUnservedNote(
+  response: Response,
+  bodyText: string,
+  model: string,
+  tried: number,
+): Promise<Response> {
+  const text = bodyText.length > 0 ? bodyText : await response.text().catch(() => '')
+  let payload: unknown
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    return response
+  }
+  const patched = noteInto(payload, unservedNote(model, tried))
+  if (patched === undefined) return response
+  const headers = new Headers(response.headers)
+  // The body is re-encoded: its old length and encoding no longer describe it.
+  headers.delete('content-length')
+  headers.delete('content-encoding')
+  headers.set('content-type', 'application/json')
+  return new Response(JSON.stringify(patched), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  })
 }
 
 /** Handle one activation keeps; `dispose` is idempotent. */

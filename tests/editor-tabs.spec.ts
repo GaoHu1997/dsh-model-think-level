@@ -1,5 +1,5 @@
 /**
- * Editor-tabs tests: the three-tab takeover of the official provider editor.
+ * Editor-tabs tests: the four-tab takeover of the official provider editor.
  *
  * The pass is attribute-and-structure only — it never creates, moves or removes
  * a node — so the fixture supplies the DOM both owners contribute: the official
@@ -217,6 +217,9 @@ describe('reconcileEditorTabs', () => {
     expect(bar?.getAttribute('role')).toBe('tablist')
     expect(bar?.getAttribute('aria-label')).toBe('编辑器分区')
     expect(bar?.children).toHaveLength(4)
+    expect(Array.from(bar?.children ?? []).map(tab => tab.getAttribute(EDITOR_TAB_ID_ATTR))).toEqual([
+      'provider', 'models', 'advanced', 'fingerprint',
+    ])
 
     expect(card.classList.contains('bre-tabbed')).toBe(true)
     expect(card.getAttribute('data-bre-tab')).toBe('provider')

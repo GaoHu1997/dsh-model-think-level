@@ -45,6 +45,7 @@ import {
   normalizeKeyModels,
   normalizeKeyProtocol,
   normalizeRouteEndpoints,
+  type EndpointFamily,
   type RouteEndpoints,
   type RouteProtocol,
 } from './key-refs.js'
@@ -62,7 +63,11 @@ import {
   withRouteEndpoints,
   withoutKeyEntry,
 } from './key-index.js'
-import { keyRest, keysForModel, restKeyOf, type KeyCandidate } from './key-route-core.js'
+import { keyRest, keysForModel, restKeyOf, type KeyCandidate, type ServingKnowledge } from './key-route-core.js'
+import { keyServesFilePath, readKeyServes, servesOfRoute, withServes, withoutServes, writeKeyServes, type KeyServesDocument } from './key-serves.js'
+import { collectKeyListings, mergeKeyListings } from './multi-key-listing.js'
+import { FAMILY_PROTOCOL } from './key-probe.js'
+import { probeListing } from './discovery-merge.js'
 import { suggestEfforts } from './knowledge.js'
 import type { ReasoningEfforts } from './knowledge.js'
 import { resolveGuardEffort } from './guard.js'
@@ -77,10 +82,6 @@ import {
   readBounded,
   type ListedModel,
 } from './listing.js'
-import { probeListing } from './discovery-merge.js'
-import { FAMILY_PROTOCOL } from './key-probe.js'
-import type { EndpointFamily } from './key-refs.js'
-import { collectKeyListings, mergeKeyListings, type MergedListing } from './multi-key-listing.js'
 import { buildHeaderIndex, emptyIndex, type UserAgentIndex } from './headers-core.js'
 import { headerOverlayBypass, headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from './headers-fetch.js'
 import { describePiAiHeaderState, installPiAiHeaderTransforms } from './headers-pi-ai.js'
@@ -177,22 +178,17 @@ function fingerprintTimingOf(outcomes: readonly ProbeOutcome[]): FingerprintTimi
 }
 
 /**
- * How long ONE per-key listing probe may take while the host's own `/models`
- * GET is waiting on it.
- *
- * This is a budget for the whole catalogue, not for one diagnostic: two keys of
- * a route are probed at once (see the overlay's `modelListing`), so this caps
- * the catalogue's worst case at roughly this number instead of one timeout per
- * key per endpoint family. A gateway slower than this still answers the next
- * refresh; the previous catalogue is reused in the meantime.
+ * How long ONE raw listing probe may take while Auto-adapt is waiting on it.
+ * The wire read it bounds is one tiny `/models` read per endpoint family; a
+ * gateway slower than this still answers the next attempt, and the cached
+ * answer keeps a whole pass from re-reading it per model.
  */
 const LISTING_PROBE_BUDGET_MS = 6_000
 
 /**
- * How long a merged catalogue (and a raw probe answer) is reused before the
- * next request re-reads it. The harness refreshes models on reconnect and on
- * demand, and Auto-adapt asks per model; a bounded window keeps those repeats
- * off the wire without ever pinning a stale catalogue on the user.
+ * How long a raw probe answer is reused before the next request re-reads it.
+ * Auto-adapt asks per model; a bounded window keeps those repeats off the wire
+ * without ever pinning a stale listing on the user.
  */
 const LISTING_CACHE_MS = 30_000
 
@@ -265,8 +261,15 @@ interface KeyEntryView {
   configured: boolean | null
   /** The value in its display form, when the store let it be read. */
   masked?: string
-  /** Model ids this key was discovered to serve; absent means "unscoped". */
+  /** Manual assignment, restricted to the models this route has added. */
   models?: readonly string[]
+  /**
+   * What this key's own listing last advertised (observed, not assigned). The
+   * panel offers it as a one-click scope: an unscoped key that lists only part of
+   * the catalogue silently refuses the rest, and this is the list that makes the
+   * split visible. Absent means the key was never listed successfully.
+   */
+  observed?: readonly string[]
   /** The protocol this key pins, when it pins one (else the route's own). */
   protocol?: RouteProtocol
   /**
@@ -316,7 +319,7 @@ function enabledRefOf(profile: Record<string, unknown> | undefined): string | un
 
 /**
  * Read the key index into the per-route scope snapshot the fetch seam reads.
- * This is metadata only — references and their discovered model lists, never a
+ * This is metadata only — references and manual assignments, never a
  * secret — so it is safe to hold in memory across requests. A malformed or
  * missing index degrades to "no scopes", which leaves every request on the
  * adapter's own single-key path (exactly today's behaviour).
@@ -353,7 +356,7 @@ function readRouteKeyScopes(
       if (entry.protocol !== undefined) {
         ;(scope as { protocol?: RouteProtocol }).protocol = entry.protocol
         // A key that pins a protocol also pins the endpoint of that family: the
-        // provider keeps one URL per family (OpenAI, Anthropic, Gemini), and the
+        // provider keeps one URL per family (OpenAI and Anthropic), and the
         // key states which wire it speaks, so the matching URL must ride along.
         const family = endpointFamilyOf(entry.protocol)
         const endpoint = endpoints?.[family]
@@ -485,33 +488,54 @@ interface CredentialFacts {
 async function credentialFacts(
   credentials: CredentialsService | undefined,
   refs: readonly string[],
+  budgetMs?: number,
 ): Promise<Record<string, CredentialFacts>> {
-  const out: Record<string, CredentialFacts> = {}
-  if (credentials === undefined || refs.length === 0) return out
-  const describe = credentials.describe
-  if (typeof describe === 'function') {
-    try {
-      const answer = await describe.call(credentials, [...refs])
-      const records = isRefusal(answer) ? undefined : describeRecords(answer)
-      for (const ref of refs) {
-        const info = records?.[ref]
-        if (isRecord(info) && typeof info['configured'] === 'boolean') {
-          out[ref] = { configured: info['configured'] }
-        }
-      }
-    } catch {
-      // Unanswered references fall through to resolve() below.
-    }
-  }
-  for (const ref of refs) {
+  const described: Record<string, boolean> = {}
+  const resolvedFacts: Record<string, CredentialFacts> = {}
+  if (credentials === undefined || refs.length === 0) return {}
+  // Metadata and preview reads are independent IPC calls. Neither a slow
+  // describe nor an earlier reference should hold every remaining row up.
+  const reads: Promise<void>[] = refs.map(async ref => {
     try {
       const value = await resolveCredential(credentials, ref)
-      const configured = out[ref]?.configured ?? (value !== undefined && value.length > 0)
       const masked = value === undefined ? undefined : maskKeyValue(value)
-      out[ref] = masked === undefined || masked.length === 0 ? { configured } : { configured, masked }
+      resolvedFacts[ref] = masked === undefined || masked.length === 0
+        ? { configured: value !== undefined }
+        : { configured: true, masked }
     } catch {
-      // Leave it unknown: a badge is not worth failing the list over.
+      // Unavailable is unknown, never an empty credential.
     }
+  })
+  if (typeof credentials.describe === 'function') {
+    reads.push((async () => {
+      try {
+        const answer = await credentials.describe?.([...refs])
+        const records = isRefusal(answer) ? undefined : describeRecords(answer)
+        for (const ref of refs) {
+          const info = records?.[ref]
+          if (isRecord(info) && typeof info['configured'] === 'boolean') described[ref] = info['configured']
+        }
+      } catch {
+        // Resolved previews can still answer without describe.
+      }
+    })())
+  }
+  const settled = Promise.all(reads)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    // Only display callers use this bound; mutation preconditions still wait
+    // for an authoritative answer and fail closed when the store cannot read.
+    if (budgetMs === undefined) await settled
+    else await Promise.race([settled, new Promise<void>(resolve => { timer = setTimeout(resolve, budgetMs) })])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+  const out: Record<string, CredentialFacts> = {}
+  for (const ref of refs) {
+    const fact = resolvedFacts[ref]
+    const configured = described[ref] ?? fact?.configured
+    if (configured === undefined) continue
+    out[ref] = fact?.masked === undefined ? { configured } : { configured, masked: fact.masked }
   }
   return out
 }
@@ -848,7 +872,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // simply stop matching anything.
   /** Live index the overlay reads; never undefined once apply has run. */
   const overlaySource: OverlaySource = { current: emptyIndex() }
-  // Per-route key scopes (references + discovered model lists, never secrets)
+  // Per-route key metadata (references and manual assignments; never secrets)
   // the fetch seam uses to choose and fail over across keys. Kept as a live
   // snapshot so the hot request path reads memory, not disk.
   const keyScopes: { current: Record<string, readonly RouteKeyScope[]> } = { current: {} }
@@ -868,6 +892,50 @@ export function apply(ctx: Context, config: Config = {}): void {
   // seconds per key. A short window turns those repeats into memory reads
   // without ever serving a catalogue the user cannot refresh.
   const listingCache = new Map<string, { at: number; body: string }>()
+  // What each key's last successful listing advertised, persisted across restarts
+  // (key-serves.ts). The overlay reads it to order keys by "lists this model" and
+  // to guard an explicit model scope; the write is debounced because the hot path
+  // that fills it runs inside a `/models` answer.
+  const keyServes: { current: KeyServesDocument | undefined } = { current: undefined }
+  const servesDocument = (): KeyServesDocument => (keyServes.current ??= readKeyServes(keyServesFilePath()))
+  let servesTimer: ReturnType<typeof setTimeout> | undefined
+  const flushServes = (): void => {
+    servesTimer = undefined
+    try {
+      writeKeyServes(servesDocument(), keyServesFilePath())
+    } catch {
+      // Observations are a cache: a failed write costs one round of retries after
+      // a restart, never an answer.
+    }
+  }
+  const recordServes = (route: string, ref: string, models: readonly string[]): void => {
+    // A listing with no ids asserts "serves nothing"; keep what was known instead.
+    // The same rule as `withServes`, applied before the document is touched.
+    const live = servesDocument()
+    if (models.length === 0) return
+    keyServes.current = withServes(live, route, ref, models, Date.now())
+    if (servesTimer === undefined) servesTimer = setTimeout(flushServes, 200)
+  }
+  /** The serving knowledge of one route, or undefined when nothing is known yet. */
+  const servingKnowledgeOf = (route: string): ServingKnowledge | undefined => {
+    const listed = servesOfRoute(servesDocument(), route)
+    return listed.size === 0 ? undefined : { listed }
+  }
+  /**
+   * Forget what a key's listing said. Called when the key's VALUE changes (a
+   * different credential is a different upstream account, so the old catalogue
+   * describes nothing) and when it is removed. Written through immediately: these
+   * are rare, user-initiated operations, and a stale observation outliving a
+   * replaced key would send the next request to the wrong account.
+   */
+  const forgetServes = (route: string, ref: string): void => {
+    keyServes.current = withoutServes(servesDocument(), route, ref)
+    try {
+      writeKeyServes(keyServes.current, keyServesFilePath())
+    } catch {
+      // Observations are a cache; the in-memory copy is already correct.
+    }
+  }
   // Raw listing answers for the probe route, by target. Auto-adapt asks for the
   // same route once per model, so this is what turns a whole pass into one
   // wire read; `?refresh=1` (and the TTL above) keeps it from going stale.
@@ -879,6 +947,16 @@ export function apply(ctx: Context, config: Config = {}): void {
       : {}
   }
   const refreshKeyScopes = (): void => { keyScopes.current = readRouteKeyScopes(providersOf()) }
+  // Names and declared model edits do not change the upstream catalogue. A
+  // Save followed by adapter refresh can reuse it without remote detection.
+  const catalogueSource = (): string => JSON.stringify(Object.entries(providersOf()).map(([route, profile]) => [
+    route, profile['api'], profile['baseURL'], profile['apiKeyEnv'], profile['headers'],
+  ]).sort(([a], [b]) => String(a).localeCompare(String(b))))
+  let catalogueSourceStamp = catalogueSource()
+  const invalidateListings = (): void => {
+    probeRouteCache.clear()
+    listingCache.clear()
+  }
   const headerRetryTimers = new Set<ReturnType<typeof setTimeout>>()
   let headerRetryAttempt = 0
   const stopHeaderRetries = (): void => {
@@ -927,11 +1005,11 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (ns === PI_NS) {
       refreshHeaders()
       refreshKeyScopes()
-      // A save may repoint a route or edit its declared models, and the user
-      // expects the next listing to show it: never answer a refresh that
-      // follows a settings write from the cache of the state before it.
-      listingCache.clear()
-      probeRouteCache.clear()
+      const source = catalogueSource()
+      if (source !== catalogueSourceStamp) {
+        catalogueSourceStamp = source
+        invalidateListings()
+      }
     }
   })
   /**
@@ -950,6 +1028,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const ordered = keysForModel(
       scopes.map(scope => ({ ref: scope.ref, value: '', models: scope.models })),
       model,
+      servingKnowledgeOf(route),
     )
     // Resolve every reference in parallel (this sits on the request hot path:
     // sequential IPC per key would stack latency per key) and keep the planned
@@ -1084,6 +1163,9 @@ export function apply(ctx: Context, config: Config = {}): void {
         // Remember what this key serves, so a later failed probe retains it.
         lastKnownScopes.set(here(key.ref), ids)
         lastKnownRecords.set(here(key.ref), records)
+        // And record it across restarts: routing prefers the key whose group
+        // listed a model over one that did not (key-serves.ts).
+        recordServes(route, key.ref, ids)
         return {
           ref: key.ref,
           models: ids,
@@ -1099,7 +1181,15 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (!records.has(model.id)) records.set(model.id, model)
       }
     }
+    const census = servesOfRoute(servesDocument(), route)
+    // Only a COMPLETE census may hide a model: every key answered its listing, so
+    // a model none of them advertises is one no key's upstream group carries —
+    // offering it would offer a request the provider answers with "not supported
+    // by any configured account in this group" on every key. A key that could not
+    // be listed is unknown, not empty: with one unknown, nothing is hidden.
+    const censusComplete = keys.length > 0 && keys.every(key => census.has(key.ref))
     const models = mergeKeyListings(results, knownHere).ids
+      .filter(id => !censusComplete || [...census.values()].some(served => served.includes(id)))
       .map(id => records.get(id))
       .filter((model): model is ListedModel => model !== undefined)
     if (models.length === 0) return undefined
@@ -1463,6 +1553,31 @@ export function apply(ctx: Context, config: Config = {}): void {
                 keyMutationTail = new Promise<void>(resolve => { releaseMutation = resolve })
                 await previous
               }
+              // The endpoint pair a provider card paints, answered from the index
+              // file alone.
+              //
+              // The page hydrates this once per card per second (see the client's
+              // `readEndpoints`) just to show two URLs. It used to pull the whole
+              // key list for it -- a settings read plus one credential resolve per
+              // key, on a service that serialises -- so an opened card's own list
+              // queued behind dozens of those and the panel showed its loader for
+              // seconds. This branch touches no settings and no credential.
+              if (req.method === 'GET' && url.searchParams.get('op') === 'endpoints') {
+                if (route.length === 0) {
+                  sendJson(res, 400, { ok: false, error: 'a route is required' })
+                  return
+                }
+                const endpoints = readKeyIndex(keyIndexFilePath()).endpoints?.[route]
+                sendJson(res, 200, {
+                  ok: true,
+                  route,
+                  endpoints: {
+                    openai: endpoints?.openai ?? null,
+                    anthropic: endpoints?.anthropic ?? null,
+                  },
+                })
+                return
+              }
               // Read the entry fresh rather than through the cached section: this
               // route writes to it, and an answer built from a pre-write snapshot
               // would show the user the state they just changed away from.
@@ -1475,7 +1590,29 @@ export function apply(ctx: Context, config: Config = {}): void {
                   throw new HostReadError('the llm-pi-ai settings could not be read')
                 }
               }
-              if (route.length === 0 || providerProfileOf(entryOf()?.value, route) === undefined) {
+              /**
+               * The profile a READ renders, from the section the guard and probe
+               * routes already cache.
+               *
+               * This list is repainted constantly -- one GET per provider card
+               * per second, plus one per invalidation -- and every one of them
+               * used to call `settings.describe()`, a call the settings service
+               * serialises across the whole host: that queue, not the list
+               * itself, is what made an opened card wait seconds for its first
+               * answer. The cache is dropped on `settings/document-updated`, so a
+               * write from anywhere (this route, the official card's Save, the
+               * autofill pass) still reaches the next read. Writes keep their own
+               * fresh read below: a precondition decided from a snapshot is how a
+               * route moves a key it no longer owns.
+               */
+              const readProfile = (): Record<string, unknown> | undefined =>
+                providerProfileOf(piSection(true), route)
+              /** The profile this request may fence a write on. */
+              const writeProfile = (): Record<string, unknown> | undefined =>
+                providerProfileOf(entryOf()?.value, route)
+              const profileOf = (): Record<string, unknown> | undefined =>
+                req.method === 'POST' ? writeProfile() : readProfile()
+              if (route.length === 0 || profileOf() === undefined) {
                 sendJson(res, 400, { ok: false, error: `no llm-pi-ai provider route "${route}"` })
                 return
               }
@@ -1518,19 +1655,26 @@ export function apply(ctx: Context, config: Config = {}): void {
               }
 
               /** The whole list, as the browser half renders it. */
-              const payload = async (): Promise<unknown> => {
+              const payload = async (): Promise<Record<string, unknown>> => {
                 // One disk read answers the entries, the endpoints and (with the
                 // section) the seat context below; re-reading the file per field
                 // would triple the I/O of every list request.
                 const document = readKeyIndex(indexFile)
-                const seat = enabledNow()
+                // Reads render from the cached section; a POST renders what it
+                // just wrote, so it reads the document again (see `profileOf`).
+                const profile = profileOf()
+                const seat = enabledRefOf(profile)
+                const routeModels = Array.isArray(profile?.['models'])
+                  ? profile['models'].filter(isRecord).map(model => typeof model['id'] === 'string' ? model['id'].trim() : '').filter(Boolean)
+                  : []
+                const declaredModels = new Set(routeModels)
                 const listed = keyEntriesOf(document, route)
                 const refs = listed.map(entry => entry.ref)
                 // The seat (the reference the adapter itself resolves) is always
                 // on the list, even when the official page wrote it and this
                 // plugin has never listed it — the adapter still needs it.
                 if (seat !== undefined && !refs.includes(seat)) refs.push(seat)
-                const facts = await credentialFacts(credentials, refs)
+                const facts = await credentialFacts(credentials, refs, 250)
                 const now = Date.now()
                 const entries: KeyEntryView[] = refs.map(ref => {
                   const fact = facts[ref]
@@ -1544,7 +1688,17 @@ export function apply(ctx: Context, config: Config = {}): void {
                   }
                   if (fact?.masked !== undefined) view.masked = fact.masked
                   if (stored?.alias !== undefined) view.alias = stored.alias
-                  if (stored?.models !== undefined) (view as { models?: readonly string[] }).models = stored.models
+                  if (stored?.models !== undefined) view.models = stored.models.filter(id => declaredModels.has(id))
+                  // What the key's own listing said, when it ever answered one:
+                  // the observed half of the routing decision, shown so the user
+                  // can adopt it as a scope with one click. Filtered to the models
+                  // this route added (the scope universe) and omitted when that
+                  // leaves nothing, so an empty list can never read as "serves
+                  // nothing".
+                  const observed = servesOfRoute(servesDocument(), route).get(ref)?.filter(id => declaredModels.has(id))
+                  if (observed !== undefined && observed.length > 0) {
+                    ;(view as { observed?: readonly string[] }).observed = observed
+                  }
                   if (stored?.protocol !== undefined) (view as { protocol?: RouteProtocol }).protocol = stored.protocol
                   // The cooldown memory rides the view even though no row paints
                   // a badge from it any more: the routing pool is the state's
@@ -1563,34 +1717,14 @@ export function apply(ctx: Context, config: Config = {}): void {
                 // The models this route actually offers — the universe a key's
                 // scope is chosen from (user rule: pick from the models already
                 // added, never the provider's whole catalog).
-                const routeModels = modelsOf(providersOf(), route)
-                  .map(model => (typeof model['id'] === 'string' ? model['id'] : ''))
-                  .filter(id => id.length > 0)
-                // What the provider serves ACROSS its keys: one catalogue, each
-                // model naming the keys that advertise it. The picker only knows
-                // the route's own `models`, so `unmergedModels` is the part of
-                // that catalogue it cannot see yet — the panel offers to add it,
-                // and no write happens without that click.
-                const merged = mergeKeyListings(
-                  listed.map(entry => ({
-                    ref: entry.ref,
-                    targets: [],
-                    models: entry.models === undefined ? undefined : [...entry.models],
-                  })),
-                )
-                const declaredModels = new Set(routeModels)
-                const unmergedModels = merged.ids.filter(id => !declaredModels.has(id))
                 return {
                   ok: true,
                   route,
                   entries,
                   models: routeModels,
-                  ...merged.ids.length === 0 ? {} : { mergedModels: merged.ids },
-                  ...unmergedModels.length === 0 ? {} : { unmergedModels },
                   endpoints: {
                     openai: endpoints?.openai ?? null,
                     anthropic: endpoints?.anthropic ?? null,
-                    gemini: endpoints?.gemini ?? null,
                   },
                 }
               }
@@ -1605,6 +1739,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               const ref = isRecord(body) && typeof body['ref'] === 'string' ? body['ref'] : undefined
               const alias = isRecord(body) ? normalizeKeyAlias(body['alias']) : undefined
               const value = isRecord(body) && typeof body['value'] === 'string' ? body['value'] : undefined
+              let addedRef: string | undefined
               // Validate each operation before its first write and compensate
               // later failures across the independent settings and key stores.
               const refuse = (error: string): void => sendJson(res, 400, { ok: false, error })
@@ -1612,6 +1747,18 @@ export function apply(ctx: Context, config: Config = {}): void {
               if (op === 'add') {
                 if (!isLegalKeyValue(value)) {
                   refuse('a key must be printable ASCII without spaces')
+                  return
+                }
+                const activeSeat = enabledNow()
+                // The official create form has already stored its first key.
+                // Reuse that exact value during draft drain instead of minting
+                // a duplicate credential and losing the user's first-key label.
+                if (activeSeat !== undefined && await resolveCredential(credentials, activeSeat) === value) {
+                  updateKeyIndex(document => withKeyEntry(document, route, activeSeat, alias), indexFile)
+                  refreshKeyScopes()
+                  releaseMutation?.()
+                  releaseMutation = undefined
+                  sendJson(res, 200, { ...await payload(), addedRef: activeSeat })
                   return
                 }
                 const taken = keyEntriesOf(readKeyIndex(indexFile), route).map(candidate => candidate.ref)
@@ -1661,10 +1808,11 @@ export function apply(ctx: Context, config: Config = {}): void {
                   }
                   throw error
                 }
+                addedRef = created
               } else if (op === 'scope') {
-                // Record which models one key serves (the manual override; the
-                // `discover` op fills it automatically). Absent/empty models
-                // clears the scope, making the key an unscoped catch-all again.
+                // Store the manual assignment from the provider's added models.
+                // Omission clears it to catch-all; [] is an explicit empty
+                // assignment.
                 const document = readKeyIndex(indexFile)
                 const known = ref !== undefined && (hasKeyEntry(document, route, ref) || ref === enabledNow())
                 if (ref === undefined || !known) {
@@ -1672,12 +1820,20 @@ export function apply(ctx: Context, config: Config = {}): void {
                   return
                 }
                 const scope = isRecord(body) ? normalizeKeyModels(body['models']) : undefined
+                const profile = providerProfileOf(entryOf()?.value, route)
+                const declared = new Set(Array.isArray(profile?.['models'])
+                  ? profile['models'].filter(isRecord).map(model => model['id']) : [])
+                if (scope?.some(id => !declared.has(id))) {
+                  refuse('model assignments must use models already added to this provider')
+                  return
+                }
                 const target = ref
                 updateKeyIndex(
                   document2 =>
-                    hasKeyEntry(document2, route, target)
-                      ? withKeyModels(document2, route, target, scope)
-                      : withKeyEntry(document2, route, target, undefined),
+                    withKeyModels(
+                      hasKeyEntry(document2, route, target) ? document2 : withKeyEntry(document2, route, target),
+                      route, target, scope,
+                    ),
                   indexFile,
                 )
               } else if (op === 'protocol') {
@@ -1707,9 +1863,10 @@ export function apply(ctx: Context, config: Config = {}): void {
                 const target = ref
                 updateKeyIndex(
                   document2 =>
-                    hasKeyEntry(document2, route, target)
-                      ? withKeyProtocol(document2, route, target, protocol)
-                      : withKeyEntry(document2, route, target, undefined),
+                    withKeyProtocol(
+                      hasKeyEntry(document2, route, target) ? document2 : withKeyEntry(document2, route, target),
+                      route, target, protocol,
+                    ),
                   indexFile,
                 )
               } else if (op === 'enable') {
@@ -1758,14 +1915,13 @@ export function apply(ctx: Context, config: Config = {}): void {
                 )
               } else if (op === 'endpoints') {
                 // The provider's base URLs, one per protocol family: the
-                // ChatGPT/OpenAI wire, the Anthropic wire and the Gemini one.
+                // ChatGPT/OpenAI wire and the Anthropic wire.
                 // A key that pins a protocol uses the matching URL; each is
                 // optional and an empty value clears that side.
                 const endpoints = isRecord(body)
                   ? normalizeRouteEndpoints({
                     openai: body['openai'],
                     anthropic: body['anthropic'],
-                    gemini: body['gemini'],
                   })
                   : undefined
                 updateKeyIndex(document => withRouteEndpoints(document, route, endpoints), indexFile)
@@ -1810,6 +1966,10 @@ export function apply(ctx: Context, config: Config = {}): void {
                   refuse(refused)
                   return
                 }
+                forgetServes(route, ref)
+                // A new value is a new upstream account: whatever the old one
+                // refused says nothing about this one.
+                keyRest.clear(restKeyOf(route, ref))
               } else if (op === 'remove') {
                 const document = readKeyIndex(indexFile)
                 if (ref === undefined || (!hasKeyEntry(document, route, ref) && ref !== enabledNow())) {
@@ -1835,6 +1995,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                   // Commit metadata before deleting the secret: a disk failure
                   // must leave the original credential available for rollback.
                   updateKeyIndex(document2 => withoutKeyEntry(document2, route, ref), indexFile)
+                  forgetServes(route, ref)
                   if (configured) {
                     const refused = await forgetCredential(credentials, ref)
                     if (refused !== undefined) throw new Error(refused)
@@ -1859,90 +2020,24 @@ export function apply(ctx: Context, config: Config = {}): void {
                   }
                   throw new Error([error instanceof Error ? error.message : String(error), ...failures].join('; '))
                 }
-              } else if (op === 'applyMerged') {
-                // Offer the provider-wide catalogue to the picker. Only models the
-                // keys advertise that the route does NOT declare yet are appended:
-                // nothing already declared is renamed, reordered or removed, so a
-                // hand-written entry (a display name, a context window) is never
-                // rewritten by a scope probe. The panel asks first, and this op is
-                // the only path that writes a provider's models on a probe's
-                // behalf; nothing here runs on its own.
-                const merged = mergeKeyListings(
-                  keyEntriesOf(readKeyIndex(indexFile), route).map(candidate => ({
-                    ref: candidate.ref,
-                    targets: [],
-                    models: candidate.models === undefined ? undefined : [...candidate.models],
-                  })),
-                )
-                if (merged.ids.length === 0) {
-                  refuse('no key models have been detected yet; detect them first')
-                  return
-                }
-                /**
-                 * Append the undeclared ids to the RAW user models array (never the
-                 * resolved view: materializing schema defaults into the user layer
-                 * is what the autofill pass works hard to avoid).
-                 * @returns undefined when the write landed or nothing was missing,
-                 *   otherwise the refusal and whether it was a revision conflict.
-                 */
-                const appendMerged = async (): Promise<{ conflict: boolean; error: string } | undefined> => {
-                  const descriptor = settings.describe().find(candidate => candidate.ns === PI_NS)
-                  const user = isRecord(descriptor?.['user']) ? descriptor['user'] : undefined
-                  const userProviders = isRecord(user) && isRecord(user['providers']) ? user['providers'] : undefined
-                  const profile = isRecord(userProviders) ? userProviders[route] : undefined
-                  const rawModels: unknown[] = isRecord(profile) && Array.isArray(profile['models'])
-                    ? profile['models']
-                    : []
-                  const declared = new Set(
-                    rawModels
-                      .filter(isRecord)
-                      .map(model => (typeof model['id'] === 'string' ? model['id'].trim() : ''))
-                      .filter(id => id.length > 0),
-                  )
-                  const additions = merged.ids.filter(id => !declared.has(id))
-                  if (additions.length === 0) return undefined
-                  try {
-                    await settings.mutate(
-                      PI_NS,
-                      [{
-                        op: 'set',
-                        path: ['providers', route, 'models'],
-                        value: [...rawModels, ...additions.map(id => ({ id }))],
-                      }],
-                      descriptor?.revision,
-                    )
-                    return undefined
-                  } catch (error) {
-                    return {
-                      conflict: isConflictError(error),
-                      error: error instanceof Error ? error.message : String(error),
-                    }
-                  }
-                }
-                for (let attempt = 0; attempt < 2; attempt += 1) {
-                  const failed = await appendMerged()
-                  if (failed === undefined) break
-                  // The document moved between the read and the write (the official
-                  // card, another tab, the autofill pass): re-read once and retry.
-                  if (attempt === 0 && failed.conflict) continue
-                  refuse(failed.error)
-                  return
-                }
-                // The answer below re-reads the namespace, and our own write is the
-                // freshest thing in it: drop the cached section instead of waiting
-                // for a document-updated event this handler cannot observe.
-                piSectionCached = false
               } else {
                 refuse(`unknown key operation "${op}"`)
                 return
               }
               // The key index is this plugin's own file, so a write to it fires no
               // settings event. Refresh the live routing snapshot here or a key
-              // added/scoped/detected just now would not sign a request until some
+              // added or scoped just now would not sign a request until some
               // unrelated settings change happened to refresh it.
               refreshKeyScopes()
+              if (['add', 'remove', 'value', 'protocol', 'endpoints', 'enable'].includes(op)) {
+                invalidateListings()
+              }
+              // The transaction is committed. Slow display-only credential reads
+              // must not hold the next unrelated mutation in the global queue.
+              releaseMutation?.()
+              releaseMutation = undefined
               const answer = await payload()
-              sendJson(res, 200, answer)
+              sendJson(res, 200, addedRef === undefined ? answer : { ...answer, addedRef })
             } catch (error) {
               sendJson(res, error instanceof HostReadError ? 502 : 500, {
                 ok: false, error: error instanceof Error ? error.message : String(error),

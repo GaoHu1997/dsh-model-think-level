@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { absorbDelta, adaptEveryModel, addModelTriggersOf, createScanState, effectiveStagedIntents, flushOnUnload, hideOfficialReasoning, officialReasoningOf, pinModelListCards, releaseModelListRepins, queueWriteInto, reconcile, showOfficialReasoning, stageEffortsInto, suppressScrollAnchoring, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
 import { suggestEfforts, type ReasoningEfforts } from '../src/knowledge.js'
 import type { RemoteApi } from '../src/client/types.js'
+import { scrollContainerCandidatesOf, scrollHostOf } from '../src/client/injection/row-drag.js'
 
 /** Build an approximation of the official models page section. */
 function buildModelsDom(): HTMLElement {
@@ -230,6 +231,26 @@ function buildCreateDom(route = 'acme-gateway'): HTMLElement {
   return section
 }
 
+describe('scroll ancestor discovery', () => {
+  it('keeps not-yet-overflowing containers out of active drag scrolling', () => {
+    const host = document.createElement('div')
+    host.style.overflowY = 'auto'
+    const button = document.createElement('button')
+    host.appendChild(button)
+    document.body.appendChild(host)
+    let contentHeight = 580
+    Object.defineProperty(host, 'scrollHeight', { get: () => contentHeight, configurable: true })
+    Object.defineProperty(host, 'clientHeight', { value: 600, configurable: true })
+
+    expect(scrollContainerCandidatesOf(button)).toContain(host)
+    expect(scrollHostOf(button)).toBeUndefined()
+
+    contentHeight = 620
+    expect(scrollHostOf(button)).toBe(host)
+    host.remove()
+  })
+})
+
 describe('reconcile', () => {
   it('mounts one editor per model row with the right props', async () => {
     const deps = makeDeps()
@@ -407,6 +428,54 @@ describe('reconcile', () => {
     for (const editor of deps.editors) expect(editor.unmount).toHaveBeenCalledTimes(1)
     expect(group.style.display).toBe('')
     expect(group.hasAttribute('data-bre-reasoning-hidden')).toBe(false)
+  })
+
+  it('keeps the official token counts down for the whole mount, whatever the switch says', async () => {
+    // A row stored as reasoningEfforts:false used to have 上下文窗口 / 最大输出 /
+    // 输入类型 painted back on every scan. The editor now keeps its own card in
+    // BOTH switch states (the collapsed one carries the token counts), so the
+    // official copies stay down for as long as the editor is mounted.
+    const seeded = structuredClone(join)
+    for (const layer of ['value', 'user'] as const) {
+      const models = (seeded.namespace![layer] as { providers: { aliyun: { models: Array<Record<string, unknown>> } } }).providers.aliyun.models
+      models[0] = { ...models[0], reasoningEfforts: false }
+    }
+    const deps = makeDeps({ describeNamespace: async () => seeded })
+    const state = createScanState()
+    const root = buildModelsDom()
+    const advanced = root.querySelectorAll<HTMLElement>('.modelAdvanced')[0]!
+    advanced.insertAdjacentHTML('beforeend', `
+      <div class="bre-effort-editor" data-plugin="dsh-model-think-level"></div>
+      <label class="modelField"><span>Context window</span><input /></label>
+      <label class="modelField"><span>Max output</span><input /></label>
+      <fieldset class="modelInputTypes"><label><input type="checkbox" /><span>Text</span></label></fieldset>
+    `)
+    await settle(() => reconcile(root, deps, state), state)
+    const fields = Array.from(advanced.children).filter((child): child is HTMLElement =>
+      child instanceof HTMLElement && child.className.includes('modelField'))
+    const types = Array.from(advanced.children).find((child): child is HTMLElement =>
+      child instanceof HTMLElement && child.className.includes('modelInputTypes'))!
+    expect(fields).toHaveLength(2)
+    for (const field of fields) {
+      expect(field.style.display).toBe('none')
+      expect(field.getAttribute('data-bre-capacity-hidden')).toBe('1')
+    }
+    expect(types.style.display).toBe('none')
+    expect(types.getAttribute('data-bre-capacity-hidden')).toBe('1')
+
+    // The scanner re-asserts on every pass: a host re-render that repaints the
+    // official fields is stood down again, with no switch state to consult.
+    await settle(() => reconcile(root, deps, state), state)
+    for (const field of fields) expect(field.style.display).toBe('none')
+    expect(types.style.display).toBe('none')
+
+    // And leaving the row hands the chrome back (the editor root is gone).
+    advanced.querySelector('.bre-effort-editor')!.remove()
+    await settle(() => reconcile(root, deps, state), state)
+    // The scan's mount is what stands the chrome down, and the editor was
+    // removed from the DOM behind its back: the scan re-mounts, so the fields
+    // stay down. Only unmount() restores them (covered by the teardown test).
+    for (const field of fields) expect(field.style.display).toBe('none')
   })
 
   it('lifts only a hide of its own', () => {
@@ -846,6 +915,40 @@ describe('reconcile', () => {
     expect(deps.mutate).not.toHaveBeenCalled()
     expect(state.pending.size).toBe(1)
     expect(errorSpy.mock.calls[0]![0]).toContain('idle flush failed')
+    errorSpy.mockRestore()
+  })
+
+  it('withdraws a staged declaration the document can never accept', async () => {
+    // A refusal about the DOCUMENT SHAPE ('invalid-models': a row in the raw
+    // array this code cannot represent, 'no-namespace': no namespace at all)
+    // can never succeed on retry. Keeping it staged left it on the
+    // 500ms..30s backoff clock and made every idle pass read the wire again --
+    // part of the seconds a click on 保存 appeared to cost.
+    const broken: SettingsJoin = structuredClone(join)
+    const shape = { api: 'openai-completions', models: [42, { id: 'deepseek-v4-flash-free' }] }
+    const ns = broken.namespace as unknown as {
+      value: { providers: Record<string, unknown> }
+      user: { providers: Record<string, unknown> }
+    }
+    ns.value.providers['acme-gateway'] = shape
+    ns.user.providers['acme-gateway'] = shape
+    const deps = makeDeps({ describeNamespace: async () => broken })
+    const state = createScanState()
+    stageEffortsInto(state, 'acme-gateway', 'deepseek-v4-flash-free', { high: 'high' })
+    const root = buildCreateDom('acme-gateway')
+    await settle(() => reconcile(root, deps, state), state)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await settleIdle(deps, state)
+    // Withdrawn: nothing staged, and no write reached the wire for a shape the
+    // host would refuse anyway.
+    expect(state.pending.size).toBe(0)
+    expect(deps.mutate).not.toHaveBeenCalled()
+    expect(errorSpy.mock.calls.some(call => String(call[0]).includes('staged flush withdrew'))).toBe(true)
+
+    // And the next idle pass does not try it again.
+    await settleIdle(deps, state)
+    expect(deps.mutate).not.toHaveBeenCalled()
     errorSpy.mockRestore()
   })
 
@@ -2792,6 +2895,11 @@ describe('disclosure re-pin', () => {
     const state = createScanState()
     const deps = makeDeps()
     await settle(() => { reconcile(document.body, deps, state) }, state)
+    // The settle above mounted the row's editors, each opening the MOUNT's own
+    // window (REPIN_MOUNT_MS). Let it close first, so every assertion below
+    // reads the button's click and nothing else.
+    await wait(400)
+    expect(host.style.overflowAnchor).toBe('')
 
     add.click()
 
@@ -2804,6 +2912,248 @@ describe('disclosure re-pin', () => {
     await wait(150)
     expect(host.style.overflowAnchor).toBe('none')
     await wait(700)
+    expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('opens the downward-expansion pin on the add-provider button click', async () => {
+    const section = buildModelsDom()
+    const host = scrollHostAround(section)
+    // The host's own add slot: a dashed button in addActions inside addBlock,
+    // whose click swaps the button for the new-provider card in that SAME
+    // block. The button is gone by the time any card-scoped wiring could see
+    // it, which is why the pin names the block it lives in.
+    const block = document.createElement('div')
+    block.className = 'addBlock'
+    const actions = document.createElement('div')
+    actions.className = 'addActions'
+    const add = document.createElement('button')
+    add.className = 'addButton'
+    add.textContent = '添加模型提供商'
+    actions.appendChild(add)
+    block.appendChild(actions)
+    section.appendChild(block)
+    const state = createScanState()
+    const deps = makeDeps()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+    // The settle above mounted the row's editors, each opening the MOUNT's own
+    // window (REPIN_MOUNT_MS). Let it close first, so the click below opens —
+    // and the assertions below read — the add button's own window.
+    await wait(400)
+    expect(host.style.overflowAnchor).toBe('')
+
+    add.click()
+    // The official swap, as the host's handler commits it: the button's slot
+    // is replaced by the card itself, growing the block downward.
+    actions.remove()
+    const card = document.createElement('div')
+    card.className = 'addCard'
+    block.appendChild(card)
+
+    // Suppressed in the click's own capture phase — before the commit that
+    // inserts the card, which is what the user watched fly upward.
+    expect(host.style.overflowAnchor).toBe('none')
+    // The window outlives the card's staged growth: the mode switch, the key
+    // list landing, the async renders — each a later height change.
+    await wait(150)
+    expect(host.style.overflowAnchor).toBe('none')
+    await wait(700)
+    expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('holds the add slot where the button stood when the page pulls the view up', async () => {
+    const section = buildModelsDom()
+    const host = scrollHostAround(section)
+    const block = document.createElement('div')
+    block.className = 'addBlock'
+    const actions = document.createElement('div')
+    actions.className = 'addActions'
+    const add = document.createElement('button')
+    add.className = 'addButton'
+    add.textContent = '添加模型提供商'
+    actions.appendChild(add)
+    block.appendChild(actions)
+    section.appendChild(block)
+    // jsdom has no layout: give the host a real offset and make the block's
+    // viewport position FOLLOW it, the way a browser's does.
+    let contentTop = 400
+    Object.defineProperty(host, 'scrollTop', { value: 300, writable: true, configurable: true })
+    block.getBoundingClientRect = (): DOMRect => ({
+      top: contentTop - host.scrollTop, bottom: contentTop - host.scrollTop + 300,
+      left: 0, right: 600, width: 600, height: 300, x: 0, y: contentTop - host.scrollTop, toJSON: () => ({}),
+    }) as DOMRect
+    const state = createScanState()
+    const deps = makeDeps()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+    // The settle above mounted the row's editors, each opening the MOUNT's own
+    // window (REPIN_MOUNT_MS) on this very host. Let it close first, or the
+    // click below would only extend THAT window — which pins the row card,
+    // never measured here, and absorbs nothing.
+    await wait(400)
+    expect(host.style.overflowAnchor).toBe('')
+
+    add.click()
+    expect(host.style.overflowAnchor).toBe('none')
+
+    // The browser's anchoring buying the insertion back: the content above
+    // shrank and the add block's position moved up 40px. The window has to put
+    // it back where the user saw it — the card unfolds below the button's
+    // place, never upward through the page.
+    contentTop = 360
+    await wait(80)
+
+    expect(host.style.overflowAnchor).toBe('none')
+    expect(host.scrollTop).toBe(260)
+    expect(Math.round(block.getBoundingClientRect().top)).toBe(100)
+  })
+
+  it('re-bases the add-provider pin when the host already has another pin', async () => {
+    const section = buildModelsDom()
+    const host = scrollHostAround(section)
+    const block = document.createElement('div')
+    block.className = 'addBlock'
+    block.innerHTML = '<div class="addActions"><button class="addButton">添加模型提供商</button></div>'
+    section.appendChild(block)
+    const add = block.querySelector<HTMLButtonElement>('button')!
+    let contentTop = 400
+    Object.defineProperty(host, 'scrollTop', { value: 300, writable: true, configurable: true })
+    block.getBoundingClientRect = (): DOMRect => ({
+      top: contentTop - host.scrollTop, bottom: contentTop - host.scrollTop + 300,
+      left: 0, right: 600, width: 600, height: 300, x: 0, y: contentTop - host.scrollTop, toJSON: () => ({}),
+    }) as DOMRect
+    const state = createScanState()
+    const deps = makeDeps()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+    pinModelListCards(document.body)
+    expect(host.style.overflowAnchor).toBe('none')
+
+    add.click()
+    contentTop = 360
+    await wait(80)
+
+    expect(host.scrollTop).toBe(260)
+    expect(Math.round(block.getBoundingClientRect().top)).toBe(100)
+  })
+
+  it('keeps the add-provider button position when expansion makes its host scrollable', async () => {
+    const section = buildModelsDom()
+    const host = document.createElement('div')
+    host.style.overflowY = 'auto'
+    let contentHeight = 580
+    Object.defineProperty(host, 'scrollHeight', { get: () => contentHeight, configurable: true })
+    Object.defineProperty(host, 'clientHeight', { value: 600, configurable: true })
+    Object.defineProperty(host, 'scrollTop', { value: 0, writable: true, configurable: true })
+    host.appendChild(section)
+    document.body.appendChild(host)
+    const block = document.createElement('div')
+    block.className = 'addBlock'
+    block.innerHTML = '<div class="addActions"><button class="addButton">添加模型提供商</button></div>'
+    section.appendChild(block)
+    const add = block.querySelector<HTMLButtonElement>('button')!
+    let height = 44
+    block.getBoundingClientRect = (): DOMRect => ({
+      top: 400 - host.scrollTop, bottom: 400 - host.scrollTop + height,
+      left: 0, right: 600, width: 600, height, x: 0, y: 400 - host.scrollTop, toJSON: () => ({}),
+    }) as DOMRect
+    const state = createScanState()
+    const deps = makeDeps()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+    await wait(400)
+
+    expect(host.scrollHeight).toBeLessThanOrEqual(host.clientHeight)
+    expect(host.style.overflowAnchor).toBe('')
+    add.addEventListener('click', () => {
+      block.innerHTML = '<div class="addCard"></div>'
+      height = 520
+      contentHeight = 1100
+      host.scrollTop = 120
+    })
+    add.click()
+    await wait(32)
+
+    expect(host.scrollTop).toBe(0)
+    expect(block.getBoundingClientRect().top).toBe(400)
+    expect(host.style.overflowAnchor).toBe('none')
+
+    await wait(120)
+    height = 740
+    contentHeight = 1320
+    host.scrollTop = 80
+    await wait(32)
+    expect(host.scrollTop).toBe(0)
+    expect(block.getBoundingClientRect().top).toBe(400)
+    await wait(600)
+    expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('restores an outer host moved during growth without shifting the inner host', async () => {
+    const section = buildModelsDom()
+    const outer = document.createElement('div')
+    const inner = document.createElement('div')
+    outer.style.overflowY = 'auto'
+    inner.style.overflowY = 'auto'
+    Object.defineProperty(outer, 'scrollHeight', { value: 2000, configurable: true })
+    Object.defineProperty(outer, 'clientHeight', { value: 600, configurable: true })
+    Object.defineProperty(outer, 'scrollTop', { value: 50, writable: true, configurable: true })
+    Object.defineProperty(inner, 'scrollHeight', { value: 2000, configurable: true })
+    Object.defineProperty(inner, 'clientHeight', { value: 600, configurable: true })
+    Object.defineProperty(inner, 'scrollTop', { value: 100, writable: true, configurable: true })
+    inner.appendChild(section)
+    outer.appendChild(inner)
+    document.body.appendChild(outer)
+    const block = document.createElement('div')
+    block.className = 'addBlock'
+    block.innerHTML = '<div class="addActions"><button class="addButton">添加模型提供商</button></div>'
+    section.appendChild(block)
+    const add = block.querySelector<HTMLButtonElement>('button')!
+    let height = 44
+    block.getBoundingClientRect = (): DOMRect => {
+      const top = 500 - inner.scrollTop - outer.scrollTop
+      return { top, bottom: top + height, left: 0, right: 600, width: 600, height, x: 0, y: top, toJSON: () => ({}) } as DOMRect
+    }
+    const state = createScanState()
+    const deps = makeDeps()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+    await wait(400)
+
+    add.addEventListener('click', () => {
+      block.innerHTML = '<div class="addCard"></div>'
+      height = 520
+      outer.scrollTop = 130
+    })
+    add.click()
+    await wait(32)
+
+    expect(inner.scrollTop).toBe(100)
+    expect(outer.scrollTop).toBe(50)
+    expect(block.getBoundingClientRect().top).toBe(350)
+    expect(inner.style.overflowAnchor).toBe('none')
+    expect(outer.style.overflowAnchor).toBe('none')
+    await wait(700)
+    expect(inner.style.overflowAnchor).toBe('')
+    expect(outer.style.overflowAnchor).toBe('')
+  })
+
+  it("never wires the plugin's own add-provider buttons, whatever their class carries", async () => {
+    const section = buildModelsDom()
+    const host = scrollHostAround(section)
+    const block = document.createElement('div')
+    block.className = 'addBlock'
+    const foreign = document.createElement('button')
+    foreign.className = 'addButton'
+    foreign.dataset['plugin'] = 'dsh-model-think-level'
+    block.appendChild(foreign)
+    section.appendChild(block)
+    const state = createScanState()
+    const deps = makeDeps()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+    // The settle above mounted the row's editors, each opening the MOUNT's own
+    // window (REPIN_MOUNT_MS). Let it close first: a still-open window would
+    // mask whether THIS click opened one.
+    await wait(400)
+    expect(host.style.overflowAnchor).toBe('')
+
+    foreign.click()
+
     expect(host.style.overflowAnchor).toBe('')
   })
 

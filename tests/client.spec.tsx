@@ -454,13 +454,15 @@ describe('client apply()', () => {
       h.emitLocal('connection/reset')
       await waitFor(() => {
         // The `false` declaration now renders its editor with the Thinking
-        // switch OFF and no effort card at all: the state that used to be a
-        // warning line inside the card IS the switch's own position. Scoped per
-        // editor — the other row may legitimately keep its card.
+        // switch OFF: the level ladder is gone, and the card that remains is
+        // the capacity-only one (the token counts never leave the plugin's
+        // surface). Scoped per editor — the other row keeps its full card.
         const editors = Array.from(document.querySelectorAll('.bre-effort-editor'))
         return editors.some(editor => {
           const toggle = editor.querySelector<HTMLInputElement>('.bre-thinking-switch input[type="checkbox"]')
-          return toggle !== null && !toggle.checked && editor.querySelector('.bre-effort-card') === null
+          const card = editor.querySelector('.bre-effort-card')
+          return toggle !== null && !toggle.checked
+            && card !== null && card.classList.contains('bre-effort-card--capacity')
         })
       })
       expect(api.describeSpy.mock.calls.length).toBeGreaterThan(initialDescribes)

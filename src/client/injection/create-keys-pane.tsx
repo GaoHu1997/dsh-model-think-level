@@ -29,14 +29,16 @@ import { describeNamespace, routeIsDeclared } from '../ops.js'
 import type { RemoteApi } from '../types.js'
 import { readRoute, routeScopeOf } from './create-card-pane.js'
 import {
+  beginKeysRouteBaseline,
   createDraftKeyClient,
+  failKeysRouteBaseline,
   markKeysRouteBaseline,
-  needsKeysRouteBaseline,
   releaseKeys,
   stageKeys,
   withdrawKeys,
   type DraftKeyStore,
   type StagedKeysState,
+  type StagedKeyDraft,
 } from './staged-keys.js'
 
 export interface CreateKeysPaneProps {
@@ -54,10 +56,12 @@ export interface CreateKeysPaneProps {
   routeIdLabels: () => readonly string[]
   /** The session's deferred-key ledger. */
   staged: StagedKeysState
+  /** Mirror the enabled draft key into the official form used by Fetch models. */
+  onChange?: (drafts: readonly StagedKeyDraft[]) => void
 }
 
 /** One create card's key list: the draft list itself, wired to the live id. */
-export function CreateKeysPane({ host, store, api, t, routeIdLabels, staged }: CreateKeysPaneProps): ReactNode {
+export function CreateKeysPane({ host, store, api, t, routeIdLabels, staged, onChange }: CreateKeysPaneProps): ReactNode {
   const [route, setRoute] = useState<string>(() => readRoute(host.current, routeIdLabels))
   /** The route the ledger currently holds drafts under. */
   const routeRef = useRef(route)
@@ -76,6 +80,7 @@ export function CreateKeysPane({ host, store, api, t, routeIdLabels, staged }: C
       createDraftKeyClient(store, {
         t,
         onChange: (drafts): void => {
+          onChange?.(drafts)
           const current = routeRef.current
           if (current.length === 0) {
             // The one pane-side state that would otherwise end in silence:
@@ -91,7 +96,7 @@ export function CreateKeysPane({ host, store, api, t, routeIdLabels, staged }: C
           stageKeys(staged, current, drafts)
         },
       }),
-    [staged, store, t],
+    [onChange, staged, store, t],
   )
 
   // The id field belongs to the official form's React state, so the DOM event
@@ -114,9 +119,10 @@ export function CreateKeysPane({ host, store, api, t, routeIdLabels, staged }: C
   // key starts out holding what the store already has.
   useEffect(() => {
     const previous = routeRef.current
-    if (previous === route) return
-    withdrawKeys(staged, previous)
-    routeRef.current = route
+    if (previous !== route) {
+      withdrawKeys(staged, previous)
+      routeRef.current = route
+    }
     if (store.drafts.length > 0 && route.length > 0) stageKeys(staged, route, store.drafts)
   }, [route, staged, store])
 
@@ -140,14 +146,14 @@ function askKeysBaseline(
   route: string,
   asking: Set<string>,
 ): void {
-  if (!needsKeysRouteBaseline(staged, route) || asking.has(route)) return
+  if (asking.has(route) || !beginKeysRouteBaseline(staged, route)) return
   asking.add(route)
   void (async () => {
     try {
       const join = await describeNamespace(api)
       markKeysRouteBaseline(staged, route, routeIsDeclared(join.namespace, route))
     } catch (error) {
-      asking.delete(route)
+      failKeysRouteBaseline(staged, route)
       console.warn('[bre] deferred api keys: could not read the settings document for this route:', error)
     }
   })()

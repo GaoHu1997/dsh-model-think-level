@@ -14,8 +14,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   RELEASE_GRACE_MS,
+  beginKeysRouteBaseline,
   createDraftKeyClient,
   createStagedKeysState,
+  failKeysRouteBaseline,
   flushStagedKeys,
   markKeysRouteBaseline,
   needsKeysRouteBaseline,
@@ -93,21 +95,34 @@ interface Call {
 /** The key transport the drain writes through: records every call, mints a new
  * host reference per add (the way the host's own add does), and can be told to
  * refuse specific values. */
-function keysFake(script: { refuseValue?: () => string | undefined } = {}): {
+function keysFake(script: {
+  refuseValue?: () => string | undefined
+  initialRefs?: Readonly<Record<string, readonly string[]>>
+  disabledRefs?: readonly string[]
+  reuseRefs?: readonly string[]
+  beforeAdd?: () => Promise<void>
+} = {}): {
   client: KeyManagerClient
   calls: Call[]
 } {
   const calls: Call[] = []
-  const listed = new Map<string, string[]>()
+  const listed = new Map(Object.entries(script.initialRefs ?? {}).map(([route, refs]) => [route, [...refs]]))
+  let addCount = 0
   const stateOf = (route: string): KeyState => ({
     ok: true,
     route,
-    entries: (listed.get(route) ?? []).map(ref => ({ ref, enabled: true, configured: true, masked: 'sk-x...9z' })),
-    endpoints: { openai: null, anthropic: null, gemini: null },
+    entries: (listed.get(route) ?? []).map(ref => ({
+      ref,
+      enabled: !script.disabledRefs?.includes(ref),
+      configured: true,
+      masked: 'sk-x...9z',
+    })),
+    endpoints: { openai: null, anthropic: null },
   })
   const client: KeyManagerClient = {
     list: async route => stateOf(route),
     add: async (route, value, alias) => {
+      await script.beforeAdd?.()
       const refusing = script.refuseValue?.()
       if (refusing === value) return { ok: false, error: 'the store refused' }
       // Only landed adds are recorded, so a call list is exactly what the host
@@ -115,12 +130,20 @@ function keysFake(script: { refuseValue?: () => string | undefined } = {}): {
       // intent's attempts instead.
       calls.push({ op: 'add', args: [route, value, alias] })
       const refs = listed.get(route) ?? []
-      refs.push(`${route.toUpperCase()}_KEY_${refs.length + 1}`)
+      const addedRef = script.reuseRefs?.[addCount] ?? `${route.toUpperCase()}_KEY_${refs.length + 1}`
+      addCount += 1
+      if (!refs.includes(addedRef)) refs.push(addedRef)
       listed.set(route, refs)
+      return { ...stateOf(route), addedRef }
+    },
+    rename: async (route, ref, alias) => {
+      calls.push({ op: 'rename', args: [route, ref, alias] })
       return stateOf(route)
     },
-    rename: async route => stateOf(route),
-    replace: async route => stateOf(route),
+    replace: async (route, ref, value) => {
+      calls.push({ op: 'replace', args: [route, ref, value] })
+      return stateOf(route)
+    },
     remove: async route => stateOf(route),
     setScope: async route => stateOf(route),
     setEnabled: async (route, ref, enabled) => {
@@ -132,7 +155,6 @@ function keysFake(script: { refuseValue?: () => string | undefined } = {}): {
       return stateOf(route)
     },
     setEndpoints: async route => stateOf(route),
-    applyMerged: async route => stateOf(route),
     reveal: async () => undefined,
   }
   return { client, calls }
@@ -284,11 +306,13 @@ describe('the draft client', () => {
     expect(empty.ok && empty.entries).toHaveLength(0)
 
     const answer = await client.add('my-api', 'sk-very-long-secret-1', undefined)
-    expect(answer.ok && answer.entries).toHaveLength(1)
+    if (!answer.ok) throw new Error('the draft client refused a valid key')
+    expect(answer.entries).toHaveLength(1)
+    expect(answer.addedRef).toBe(answer.entries[0]?.ref)
     // The mask is the head-and-tail form the host uses — the row a user sees
     // before the create is the row they will see after it.
-    expect(answer.ok && answer.entries[0]?.masked).toBe('sk-v...et-1')
-    expect(answer.ok && answer.entries[0]?.enabled).toBe(true)
+    expect(answer.entries[0]?.masked).toBe('sk-v...et-1')
+    expect(answer.entries[0]?.enabled).toBe(true)
     expect(store.drafts).toHaveLength(1)
     expect(changes()).toBe(1)
   })
@@ -394,6 +418,71 @@ describe('flush', () => {
     expect(state.intents.size).toBe(0)
   })
 
+  it('prefers the host-added reference over earlier entries in the returned list', async () => {
+    const fake = settingsFake({ declared: ['my-api'] })
+    const keys = keysFake({ initialRefs: { 'my-api': ['EXISTING'] }, reuseRefs: ['ADDED'] })
+    const state = ledger({ 'my-api': [draft({ protocol: 'anthropic-messages' })] })
+
+    await flushStagedKeys(state, fake.api, keys.client)
+
+    expect(keys.calls.find(call => call.op === 'setProtocol')?.args)
+      .toEqual(['my-api', 'ADDED', 'anthropic-messages'])
+    expect(state.intents.size).toBe(0)
+  })
+
+  it('reconciles an edit made while add is still pending', async () => {
+    const fake = settingsFake({ declared: ['my-api'] })
+    let releaseAdd!: () => void
+    let reportAddStarted!: () => void
+    const addGate = new Promise<void>(resolve => { releaseAdd = resolve })
+    const addStarted = new Promise<void>(resolve => { reportAddStarted = resolve })
+    const keys = keysFake({
+      beforeAdd: async () => {
+        reportAddStarted()
+        await addGate
+      },
+    })
+    const original = draft({ value: 'sk-original-value-01' })
+    const state = ledger({ 'my-api': [original] })
+
+    const flushing = flushStagedKeys(state, fake.api, keys.client)
+    await addStarted
+    stageKeys(state, 'my-api', [{ ...original, value: 'sk-updated-value-02', protocol: 'anthropic-messages' }])
+    releaseAdd()
+    await flushing
+
+    expect(addsOf(keys.calls)).toEqual([['my-api', 'sk-original-value-01', undefined]])
+    expect(keys.calls.find(call => call.op === 'replace')?.args)
+      .toEqual(['my-api', 'MY-API_KEY_1', 'sk-updated-value-02'])
+    expect(keys.calls.find(call => call.op === 'setProtocol')?.args)
+      .toEqual(['my-api', 'MY-API_KEY_1', 'anthropic-messages'])
+    expect(state.intents.size).toBe(0)
+  })
+
+  it('stops applying stale metadata when a route is withdrawn during add', async () => {
+    const fake = settingsFake({ declared: ['my-api'] })
+    let releaseAdd!: () => void
+    let reportAddStarted!: () => void
+    const addGate = new Promise<void>(resolve => { releaseAdd = resolve })
+    const addStarted = new Promise<void>(resolve => { reportAddStarted = resolve })
+    const keys = keysFake({
+      beforeAdd: async () => {
+        reportAddStarted()
+        await addGate
+      },
+    })
+    const state = ledger({ 'my-api': [draft({ protocol: 'anthropic-messages' })] })
+
+    const flushing = flushStagedKeys(state, fake.api, keys.client)
+    await addStarted
+    withdrawKeys(state, 'my-api')
+    releaseAdd()
+    await flushing
+
+    expect(keys.calls.map(call => call.op)).toEqual(['add'])
+    expect(state.intents.size).toBe(0)
+  })
+
   it('resumes a drain that failed half-way without re-adding what landed', async () => {
     const fake = settingsFake({ declared: ['my-api'] })
     // Refuse the second value exactly once — a transient store refusal.
@@ -438,8 +527,62 @@ describe('flush', () => {
     )
   })
 
+  it('does not drain while a route baseline is pending', async () => {
+    const fake = settingsFake({ declared: ['my-api'] })
+    const keys = keysFake()
+    const state = createStagedKeysState()
+    beginKeysRouteBaseline(state, 'my-api')
+    stageKeys(state, 'my-api', [draft()])
+    releaseKeys(state, 'my-api')
+
+    await flushStagedKeys(state, fake.api, keys.client)
+
+    expect(keys.calls).toHaveLength(0)
+    expect(state.intents.size).toBe(1)
+  })
+
+  it('does not infer ownership from a post-save route after baseline failure', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const fake = settingsFake({ declared: ['my-api'] })
+    const keys = keysFake()
+    const state = createStagedKeysState()
+    beginKeysRouteBaseline(state, 'my-api')
+    stageKeys(state, 'my-api', [draft()])
+    failKeysRouteBaseline(state, 'my-api')
+    releaseKeys(state, 'my-api')
+
+    await flushStagedKeys(state, fake.api, keys.client)
+
+    expect(keys.calls).toHaveLength(0)
+    expect(state.intents.size).toBe(1)
+    expect(error).toHaveBeenCalledWith(
+      '[bre] deferred api keys: the pre-save baseline failed and this route now exists; refusing to guess ownership:',
+      'my-api',
+    )
+  })
+
+  it('recovers a failed baseline only when the route is still absent', async () => {
+    const fake = settingsFake()
+    const keys = keysFake()
+    const state = createStagedKeysState()
+    beginKeysRouteBaseline(state, 'my-api')
+    stageKeys(state, 'my-api', [draft()])
+    failKeysRouteBaseline(state, 'my-api')
+    releaseKeys(state, 'my-api')
+
+    await flushStagedKeys(state, fake.api, keys.client)
+
+    expect(state.baseline.get('my-api')).toBe(false)
+    expect(keys.calls).toHaveLength(0)
+    fake.declared.add('my-api')
+    await flushStagedKeys(state, fake.api, keys.client)
+
+    expect(addsOf(keys.calls)).toHaveLength(1)
+    expect(state.intents.size).toBe(0)
+  })
+
   it('holds a list nobody has said a baseline for', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const fake = settingsFake({ declared: ['my-api'] })
     const keys = keysFake()
     const state = createStagedKeysState()
@@ -449,8 +592,8 @@ describe('flush', () => {
     await flushStagedKeys(state, fake.api, keys.client)
     expect(keys.calls).toHaveLength(0)
     expect(state.intents.size).toBe(1)
-    expect(warn).toHaveBeenCalledWith(
-      '[bre] deferred api keys: nobody said whether this id existed before, so the drafts are held:',
+    expect(error).toHaveBeenCalledWith(
+      '[bre] deferred api keys: no pre-save baseline is available; refusing to write held keys:',
       'my-api',
     )
 

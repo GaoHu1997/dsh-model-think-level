@@ -59,6 +59,16 @@ export interface KeyRow {
    */
   readonly models?: readonly string[]
   /**
+   * The model ids this key's OWN listing advertised the last time it answered —
+   * observed by the host, not assigned by the user. A relay may resolve each key
+   * to a different upstream account with its own catalogue, so one key's list can
+   * be smaller than the route's; the panel offers this list as a one-click scope
+   * so "this key only carries half the models" can be made explicit instead of
+   * being discovered as a 404 at request time. Absent means never listed (or the
+   * list named none of the route's models), which is unknown, not empty.
+   */
+  readonly observed?: readonly string[]
+  /**
    * The wire protocol this key pins. Absent means "follow the provider's own
    * protocol". A pinned protocol makes this key speak a different API shape than
    * the rest of the route (e.g. one Anthropic key on an OpenAI route).
@@ -83,7 +93,6 @@ export interface KeyRow {
 export interface KeyEndpoints {
   readonly openai: string | null
   readonly anthropic: string | null
-  readonly gemini: string | null
 }
 
 /** A successful answer: the whole list, in the host's order. */
@@ -91,23 +100,14 @@ export interface KeyState {
   readonly ok: true
   readonly route: string
   readonly entries: readonly KeyRow[]
+  /** The exact reference added or reused by an add operation. */
+  readonly addedRef?: string
   /**
    * The models this route actually offers — the universe a key's scope is
    * chosen from (the models already added to the provider, never its whole
    * catalog). Absent when the route declares none yet.
    */
   readonly models?: readonly string[]
-  /**
-   * The provider's catalogue merged across its keys: every model any key
-   * advertises, in first-advertised order. Absent when no key has been detected
-   * yet or the route itself declares no models.
-   */
-  readonly mergedModels?: readonly string[]
-  /**
-   * The part of {@link mergedModels} the route's own `models` does not declare
-   * yet — what the panel offers to add. Absent when there is nothing to add.
-   */
-  readonly unmergedModels?: readonly string[]
   /** The provider's two base URLs, keyed by protocol family. */
   readonly endpoints: KeyEndpoints
 }
@@ -121,10 +121,28 @@ export interface KeyFailure {
 /** What one call to the key route answers. */
 export type KeyAnswer = KeyState | KeyFailure
 
+/** A route's two base URLs, as the index file stores them (null when unset). */
+export interface RouteEndpointsAnswer {
+  readonly ok: boolean
+  readonly endpoints?: { readonly openai: string | null; readonly anthropic: string | null }
+}
+
 /** The manager's transport, injectable so the panel can be tested without one. */
 export interface KeyManagerClient {
   /** Read the provider's whole key list. */
   list(route: string): Promise<KeyAnswer>
+  /**
+   * Read only the route's two addresses.
+   *
+   * The page's endpoint hydration needs nothing else, and asking for the whole
+   * list for it cost a settings read plus one credential resolve per key on
+   * every hydration -- once per provider card per second -- which is what put
+   * an opened card's own list behind that queue. Optional so a test double (or
+   * an older host) can keep answering from `list`.
+   */
+  endpoints?(route: string): Promise<RouteEndpointsAnswer>
+  /** The last successful masked list, for an immediate re-open paint. */
+  cached?(route: string): KeyState | undefined
   /** Store a new key and list it, returning the list it produced. */
   add(route: string, value: string, alias: string | undefined): Promise<KeyAnswer>
   /** Relabel one listed reference (undefined clears the label). */
@@ -144,13 +162,7 @@ export interface KeyManagerClient {
    * The whole set travels together — the host stores it as one replacement —
    * so callers merge with what the store holds first.
    */
-  setEndpoints(route: string, openai: string | undefined, anthropic: string | undefined, gemini: string | undefined): Promise<KeyAnswer>
-  /**
-   * Append the models the keys advertise but the provider does not declare yet
-   * to the provider's own model list — one click, never an automatic write.
-   * Declared models are untouched.
-   */
-  applyMerged(route: string): Promise<KeyAnswer>
+  setEndpoints(route: string, openai: string | undefined, anthropic: string | undefined): Promise<KeyAnswer>
   /** The stored value of one listed reference, or undefined. */
   reveal(route: string, ref: string): Promise<string | undefined>
 }
@@ -183,6 +195,7 @@ function rowOf(value: unknown): KeyRow | undefined {
   const configured = value['configured']
   const masked = value['masked']
   const models = modelsOf(value['models'])
+  const observed = modelsOf(value['observed'])
   const protocol = value['protocol']
   const rest = value['rest']
   const remainingMs = isRecord(rest) && typeof rest['remainingMs'] === 'number' ? rest['remainingMs'] : undefined
@@ -194,6 +207,7 @@ function rowOf(value: unknown): KeyRow | undefined {
     configured: typeof configured === 'boolean' ? configured : null,
     ...(typeof masked === 'string' && masked.length > 0 ? { masked } : {}),
     ...(models === undefined ? {} : { models }),
+    ...(observed === undefined || observed.length === 0 ? {} : { observed }),
     ...(isRouteProtocol(protocol) ? { protocol } : {}),
     ...(remainingMs !== undefined && remainingMs >= 0 && failures !== undefined
       ? { rest: { remainingMs, failures } }
@@ -210,22 +224,19 @@ function stateOf(body: Record<string, unknown>): KeyState | undefined {
     const row = rowOf(entry)
     if (row !== undefined) rows.push(row)
   }
+  const addedRef = body['addedRef']
   const route = body['route']
   const routeModels = modelsOf(body['models'])
-  const mergedModels = modelsOf(body['mergedModels'])
-  const unmergedModels = modelsOf(body['unmergedModels'])
   const endpoints = body['endpoints']
   const openai = isRecord(endpoints) && typeof endpoints['openai'] === 'string' ? endpoints['openai'] : null
   const anthropic = isRecord(endpoints) && typeof endpoints['anthropic'] === 'string' ? endpoints['anthropic'] : null
-  const gemini = isRecord(endpoints) && typeof endpoints['gemini'] === 'string' ? endpoints['gemini'] : null
   return {
     ok: true,
     route: typeof route === 'string' ? route : '',
     entries: rows,
+    ...(typeof addedRef === 'string' && rows.some(row => row.ref === addedRef) ? { addedRef } : {}),
     ...(routeModels === undefined ? {} : { models: routeModels }),
-    ...(mergedModels === undefined ? {} : { mergedModels }),
-    ...(unmergedModels === undefined || unmergedModels.length === 0 ? {} : { unmergedModels }),
-    endpoints: { openai, anthropic, gemini },
+    endpoints: { openai, anthropic },
   }
 }
 
@@ -273,21 +284,114 @@ async function request(route: string, payload?: Record<string, unknown>): Promis
   }
 }
 
+interface KeyListCache {
+  state?: KeyState
+  read?: Promise<KeyAnswer> | undefined
+  updatedAt: number
+  revision: number
+}
+
+/** Only normalised, masked list answers live here; revealed values never do. */
+const KEY_LISTS = new Map<string, KeyListCache>()
+const KEY_LIST_CACHE_MS = 60_000
+const KEY_LIST_CACHE_LIMIT = 64
+
+function listCache(route: string): KeyListCache {
+  const known = KEY_LISTS.get(route)
+  if (known !== undefined) return known
+  if (KEY_LISTS.size >= KEY_LIST_CACHE_LIMIT) {
+    const oldest = KEY_LISTS.keys().next().value
+    if (oldest !== undefined) KEY_LISTS.delete(oldest)
+  }
+  const fresh: KeyListCache = { updatedAt: 0, revision: 0 }
+  KEY_LISTS.set(route, fresh)
+  return fresh
+}
+
+function cachedList(route: string): KeyState | undefined {
+  const cached = KEY_LISTS.get(route)
+  return cached !== undefined && Date.now() - cached.updatedAt < KEY_LIST_CACHE_MS ? cached.state : undefined
+}
+
+function listKeys(route: string): Promise<KeyAnswer> {
+  const cached = listCache(route)
+  if (cached.read !== undefined) return cached.read
+  const revision = cached.revision
+  const reading = request(route).then(answer => {
+    // A read started before a write must never replace its successful answer.
+    if (cached.revision !== revision) return cached.state ?? answer
+    if (answer.ok) {
+      cached.state = answer
+      cached.updatedAt = Date.now()
+    }
+    return answer
+  }).finally(() => {
+    if (cached.read === reading) cached.read = undefined
+  })
+  cached.read = reading
+  return reading
+}
+
+async function changeKeys(route: string, payload: Record<string, unknown>): Promise<KeyAnswer> {
+  const cached = listCache(route)
+  const revision = ++cached.revision
+  cached.read = undefined
+  const answer = await request(route, payload)
+  if (answer.ok && cached.revision === revision) {
+    cached.revision += 1
+    cached.read = undefined
+    cached.state = answer
+    cached.updatedAt = Date.now()
+  }
+  return answer
+}
+
+/**
+ * Ask the host for one route's two addresses and nothing else.
+ *
+ * Costs the host a single index-file read: no settings describe, no credential
+ * resolve. The endpoint hydration runs this once per visible card per second,
+ * so what it leaves out matters more than what it asks for.
+ */
+async function routeEndpoints(route: string): Promise<RouteEndpointsAnswer> {
+  try {
+    const response = await fetch(
+      `${KEY_INDEX_PATH}?route=${encodeURIComponent(route)}&op=endpoints`,
+      { method: 'GET', cache: 'no-store', credentials: 'same-origin' },
+    )
+    if (!response.ok) return { ok: false }
+    const body: unknown = await response.json().catch(() => undefined)
+    if (!isRecord(body) || body['ok'] !== true) return { ok: false }
+    const endpoints = body['endpoints']
+    if (!isRecord(endpoints)) return { ok: true }
+    return {
+      ok: true,
+      endpoints: {
+        openai: typeof endpoints['openai'] === 'string' ? endpoints['openai'] : null,
+        anthropic: typeof endpoints['anthropic'] === 'string' ? endpoints['anthropic'] : null,
+      },
+    }
+  } catch {
+    return { ok: false }
+  }
+}
+
 /** The live client: same-origin fetch against the host's route. */
 export const httpKeyManagerClient: KeyManagerClient = {
-  list: route => request(route),
-  add: (route, value, alias) => request(route, { op: 'add', value, ...(alias === undefined ? {} : { alias }) }),
-  rename: (route, ref, alias) => request(route, { op: 'rename', ref, ...(alias === undefined ? {} : { alias }) }),
-  remove: (route, ref) => request(route, { op: 'remove', ref }),
-  replace: (route, ref, value) => request(route, { op: 'value', ref, value }),
+  list: listKeys,
+  endpoints: routeEndpoints,
+  cached: cachedList,
+  add: (route, value, alias) => changeKeys(route, { op: 'add', value, ...(alias === undefined ? {} : { alias }) }),
+  rename: (route, ref, alias) => changeKeys(route, { op: 'rename', ref, ...(alias === undefined ? {} : { alias }) }),
+  remove: (route, ref) => changeKeys(route, { op: 'remove', ref }),
+  replace: (route, ref, value) => changeKeys(route, { op: 'value', ref, value }),
   setScope: (route, ref, models) =>
-    request(route, { op: 'scope', ref, ...(models === undefined ? {} : { models }) }),
-  setEnabled: (route, ref, enabled) => request(route, { op: 'enable', ref, enabled }),
+    changeKeys(route, { op: 'scope', ref, ...(models === undefined ? {} : { models }) }),
+  setEnabled: (route, ref, enabled) => changeKeys(route, { op: 'enable', ref, enabled }),
   setProtocol: (route, ref, protocol) =>
-    request(route, { op: 'protocol', ref, ...(protocol === undefined ? {} : { protocol }) }),
-  setEndpoints: (route, openai, anthropic, gemini) =>
-    request(route, { op: 'endpoints', openai: openai ?? '', anthropic: anthropic ?? '', gemini: gemini ?? '' }),
-  applyMerged: route => request(route, { op: 'applyMerged' }),
+    changeKeys(route, { op: 'protocol', ref, ...(protocol === undefined ? {} : { protocol }) }),
+  setEndpoints: (route, openai, anthropic) =>
+    changeKeys(route, { op: 'endpoints', openai: openai ?? '', anthropic: anthropic ?? '' }),
   async reveal(route, ref) {
     try {
       const response = await fetch(

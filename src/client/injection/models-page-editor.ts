@@ -43,12 +43,12 @@ import {
   pendingWriteOf,
   sameModality,
 } from '../EffortEditor.js'
-import { compatOf, createEditorApi, defaultEffortOf, effortsOf, imageGenOf, inputOf, invalidateProbeCache, nameOf, providersOf, writeModelRows, type RowIntent } from '../ops.js'
+import { compatOf, createEditorApi, defaultEffortOf, describeNamespace, effortsOf, imageGenOf, inputOf, invalidateProbeCache, nameOf, providersOf, writeModelRows, type RowIntent } from '../ops.js'
 import type { EffortEditorApi, EffortWriteIntent, HeldWrite, RemoteApi, SettingsJoin } from '../types.js'
 import { cataloguesOf, reconcileAutoEffortSeats, type AutoEffortSeatTarget } from './auto-effort-seat.js'
 import type { AutoAdaptReport } from '../auto-effort.js'
 import { panelRoot } from './mount.js'
-import { scrollChainOf } from './row-drag.js'
+import { scrollChainOf, scrollContainerCandidatesOf } from './row-drag.js'
 import { decorateProviderCard, type EndpointLabels } from './provider-endpoints.js'
 
 export type { SettingsJoin }
@@ -164,7 +164,7 @@ export interface InjectorDeps {
    */
   api: RemoteApi
   /** Read the pi-ai namespace plus writability from the settings join. */
-  describeNamespace(): Promise<SettingsJoin>
+  describeNamespace(options?: { fresh?: boolean; allowStale?: boolean }): Promise<SettingsJoin>
   /** Localized copy. */
   t: (key: string, params?: Record<string, string | number>) => string
   /**
@@ -181,7 +181,7 @@ export interface InjectorDeps {
    * browser half hangs its autofill complement here: "the user stopped
    * editing" is the only moment this side may safely write the document.
    */
-  onIdle?(): void
+  onIdle?(join?: SettingsJoin): void
   /** Wake the debounced scan after provider-wide adaptation stages a row. */
   onPendingChanged?(): void
   /**
@@ -237,10 +237,6 @@ export interface EditorMountProps {
    * DOM, never a kernel version.
    */
   officialInputTypes?: boolean
-  /** The card reports whether it still covers the official capacity and
-   * input-type fields: it does while its thinking switch is on, and steps
-   * aside when the switch turns the card off. */
-  onCoverageChange?: (covered: boolean) => void
   api: EffortEditorApi
   readOnly: boolean
   t: (key: string, params?: Record<string, string | number>) => string
@@ -329,6 +325,9 @@ export interface ScanState {
   editWired: WeakSet<Element>
   /** The model lists' add-model buttons already wired for the top re-pin. */
   addModelWired: WeakSet<Element>
+  /** The provider list's own add-provider button already wired for the top
+   * re-pin — the click that replaces the button with the new-provider card. */
+  addProviderWired: WeakSet<Element>
 }
 
 /**
@@ -558,6 +557,7 @@ export function createScanState(): ScanState {
     disclosureWired: new WeakSet(),
     editWired: new WeakSet(),
     addModelWired: new WeakSet(),
+    addProviderWired: new WeakSet(),
   }
   restoreLedger(state)
   return state
@@ -572,13 +572,24 @@ export function createScanState(): ScanState {
  * instead of being lost on the first failure.
  * @param deps - the injection dependencies.
  * @param state - mutable scan state.
+ * @param justClosed - the editing card went from open to closed on this scan.
+ *   That is the moment a host Save has just landed, and the scope mirror lags
+ *   that write (the same lag a brand-new provider's header flush already
+ *   accounts for). One fresh read then, shared by both ledgers, sees the
+ *   provider immediately instead of waiting for the mirror to catch up, and
+ *   seeds the write so it is not described a second time. A close with nothing
+ *   held pays nothing; every other pass keeps the cheap mirror.
  */
-async function runIdlePass(deps: InjectorDeps, state: ScanState): Promise<void> {
+async function runIdlePass(deps: InjectorDeps, state: ScanState, justClosed = false): Promise<void> {
   if (state.flushing) return
   state.flushing = true
+  let seed: SettingsJoin | undefined
   try {
-    const queuedFailed = await flushQueued(deps, state)
-    const pendingFailed = await flushPending(deps, state)
+    seed = justClosed && hasOutstanding(state)
+      ? await describeNamespace(deps.api, { fresh: true })
+      : undefined
+    const queuedFailed = await flushQueued(deps, state, false, seed)
+    const pendingFailed = await flushPending(deps, state, false, seed)
     if (queuedFailed || pendingFailed) {
       // A refusal arrives as a VALUE, not a throw: folding it into the same
       // backoff keeps a doomed route from being re-mutated on every scan, and
@@ -598,11 +609,20 @@ async function runIdlePass(deps: InjectorDeps, state: ScanState): Promise<void> 
   // it must not reject the pass (the caller void-s the promise) and become an
   // unhandled rejection.
   try {
-    deps.onIdle?.()
+    deps.onIdle?.(seed)
   } catch (error) {
     console.error(`[bre] idle hook failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
+
+/**
+ * Error codes no retry can ever fix: the document itself refuses this write
+ * (there is no namespace to write into, or rows this code cannot represent).
+ * Keeping such an intent on the backoff clock bought nothing and cost a visible
+ * 0.5 s + 1 s + 2 s + 4 s of latency before the first hopeless retry settled, so
+ * they are withdrawn instead.
+ */
+const PERMANENT_WRITE_ERRORS: ReadonlySet<string> = new Set(['no-namespace', 'invalid-models'])
 
 /**
  * Push the next attempt out on the exponential backoff and tell the host to
@@ -610,7 +630,9 @@ async function runIdlePass(deps: InjectorDeps, state: ScanState): Promise<void> 
  */
 function armBackoff(deps: InjectorDeps, state: ScanState): void {
   state.flushFailures += 1
-  const delay = Math.min(2 ** state.flushFailures * 500, 30_000)
+  // First step is 500 ms: `2 ** failures` alone doubled it to a full second
+  // before the first retry, which read as the page hanging after a save.
+  const delay = Math.min(2 ** (state.flushFailures - 1) * 500, 30_000)
   state.nextFlushAt = Date.now() + delay
   deps.onBackoff?.(delay)
 }
@@ -897,11 +919,14 @@ async function flushRoute(
   route: string,
   models: ReadonlyMap<string, StagedDeclaration>,
   ignoreFence = false,
+  seed?: SettingsJoin,
 ): Promise<boolean> {
   // ONE read for the whole route: the rows all live in the same array, so a
-  // per-model read was pure repetition. Every arbitration below still runs
-  // per model against this same snapshot -- the write is one whole-array set.
-  const join = await deps.describeNamespace()
+  // per-model read was pure repetition. A caller that already read (the idle
+  // pass after Save) hands that snapshot in, so this route does not describe
+  // again. Every arbitration below still runs per model against this same
+  // snapshot -- the write is one whole-array set.
+  const join = seed ?? await deps.describeNamespace()
   const providers = providersOf(join.namespace)
   // Snapshot: the loop below withdraws entries whose edit proved empty, and
   // the batch then reports back per model as its results land.
@@ -961,12 +986,23 @@ async function flushRoute(
       stageEffortsInto(state, route, intent.modelId, undefined)
       return
     }
+    // A shape the document will never accept: withdraw the staging and say so
+    // once, instead of leaving it on a retry clock that can only ever fail.
+    if (result?.error !== undefined && PERMANENT_WRITE_ERRORS.has(result.error)) {
+      stageEffortsInto(state, route, intent.modelId, undefined)
+      console.error(`[bre] staged flush withdrew "${route}"/"${intent.modelId}": ${result.error}`)
+      return
+    }
     // Anything else keeps the staging (the next scan retries it), but a
     // silent keep is unobservable -- surface the failure for diagnostics, and
     // report it so the pass can back off instead of hammering.
     failed = true
     console.error(`[bre] staged flush write failed for "${route}"/"${intent.modelId}": ${result?.error ?? 'unknown'}`)
   })
+  // A route whose every intent was settled (written, answered, or withdrawn)
+  // leaves no staging behind: an empty entry would keep the route "pending" and
+  // have every later idle pass read the wire for nothing.
+  if ((state.pending.get(route)?.size ?? 0) === 0) state.pending.delete(route)
   return failed
 }
 
@@ -992,7 +1028,7 @@ async function flushRoute(
  * @param state - mutable scan state.
  * @returns whether this pass left a write unlanded (the caller backs off).
  */
-async function flushQueued(deps: InjectorDeps, state: ScanState, ignoreFence = false): Promise<boolean> {
+async function flushQueued(deps: InjectorDeps, state: ScanState, ignoreFence = false, seed?: SettingsJoin): Promise<boolean> {
   // A commit marker with nothing queued is SPENT: the official Save carried no
   // plugin edit (or the route was already landed). Dropping it here keeps it
   // from authorizing a later edit the user never saved.
@@ -1009,7 +1045,7 @@ async function flushQueued(deps: InjectorDeps, state: ScanState, ignoreFence = f
     persistLedger(state)
     return false
   }
-  const join = await deps.describeNamespace()
+  const join = seed ?? await deps.describeNamespace()
   if (join.writable !== true) {
     persistLedger(state)
     return false
@@ -1032,7 +1068,10 @@ async function flushQueued(deps: InjectorDeps, state: ScanState, ignoreFence = f
       ...(write.imageGen === undefined ? {} : { imageGen: write.imageGen }),
       ...(write.defaultEffort === undefined ? {} : { defaultEffort: write.defaultEffort }),
     }))
-    const results = await writeModelRows(deps.api, route, intents, undefined, ignoreFence ? undefined : officialCardOpen)
+    // Seed the write's first read with the snapshot this pass already took, the
+    // same way {@link flushRoute} does. A conflict retry re-describes fresh on
+    // its own, so the seed never costs the write its recovery path.
+    const results = await writeModelRows(deps.api, route, intents, () => Promise.resolve(join), ignoreFence ? undefined : officialCardOpen)
     let aborted = false
     intents.forEach((intent, at) => {
       const result = results[at]
@@ -1040,6 +1079,13 @@ async function flushQueued(deps: InjectorDeps, state: ScanState, ignoreFence = f
       if (result?.aborted === true) { aborted = true; return }
       if (result?.ok === true || result?.modelNotFound === true) {
         models.delete(intent.modelId)
+        return
+      }
+      // A write the document can never accept: drop the intent rather than
+      // retrying a hopeless one on the backoff clock.
+      if (result?.error !== undefined && PERMANENT_WRITE_ERRORS.has(result.error)) {
+        models.delete(intent.modelId)
+        console.error(`[bre] held write withdrawn for "${route}"/"${intent.modelId}": ${result.error}`)
         return
       }
       console.error(`[bre] held write failed for "${route}"/"${intent.modelId}": ${result?.error ?? 'unknown'}`)
@@ -1061,16 +1107,17 @@ async function flushQueued(deps: InjectorDeps, state: ScanState, ignoreFence = f
 }
 
 /**
- * Land the create-card declarations whose route has appeared. Each route goes
- * through its own live describe, so one refused route cannot poison a sibling
- * that would have landed.
+ * Land the create-card declarations whose route has appeared. One snapshot
+ * covers every route (a caller that just read — the Save-close pass — hands
+ * it in), and a refusal of one route stays in the ledger without dropping a
+ * sibling that landed.
  * @param deps - the injection dependencies.
  * @param state - mutable scan state.
  * @returns whether a write was refused and left unlanded.
  */
-async function flushPending(deps: InjectorDeps, state: ScanState, ignoreFence = false): Promise<boolean> {
+async function flushPending(deps: InjectorDeps, state: ScanState, ignoreFence = false, seed?: SettingsJoin): Promise<boolean> {
   if (state.pending.size === 0) return false
-  const join = await deps.describeNamespace()
+  const join = seed ?? await deps.describeNamespace()
   if (join.writable !== true) return false
   const providers = providersOf(join.namespace)
   let failed = false
@@ -1081,7 +1128,7 @@ async function flushPending(deps: InjectorDeps, state: ScanState, ignoreFence = 
     }
     // A create card still owns a route the document has not taken yet.
     if (!hasOwn(providers, route)) continue
-    if (await flushRoute(deps, state, route, models, ignoreFence)) failed = true
+    if (await flushRoute(deps, state, route, models, ignoreFence, join)) failed = true
   }
   persistLedger(state)
   return failed
@@ -1243,45 +1290,68 @@ export function showOfficialReasoning(container: HTMLElement): void {
 
 /**
  * The official capacity/input-type chrome THIS plugin stood down. The editor
- * carries both decisions now (the design board puts 文本/图片 beside 默认思考
- * 强度 and the two token counts inside the same card), so the official copies
- * would be a second, smaller surface for the same fields.
+ * always carries 支持模态 and the two token counts — switch on or off — so the
+ * official copies would be a second, smaller surface for the same fields.
  */
 const CAPACITY_HIDDEN_ATTR = 'data-bre-capacity-hidden'
 
-/** The official disclosure's capacity labels and the input-types fieldset. */
-function capacityChromeOf(container: HTMLElement): HTMLElement[] {
+/** Direct children of the disclosure matching one class stem. */
+function chromeOf(container: HTMLElement, stem: string): HTMLElement[] {
   return Array.from(container.children).filter((child): child is HTMLElement => {
     if (child.nodeType !== 1) return false
-    const element = child as HTMLElement
-    return element.matches('[class*="modelField"]') || element.matches('[class*="modelInputTypes"]')
+    return (child as HTMLElement).matches(`[class*="${stem}"]`)
   })
 }
 
+/** The official context-window / max-output labels. */
+function capacityFieldsOf(container: HTMLElement): HTMLElement[] {
+  return chromeOf(container, 'modelField')
+}
+
+/** The official input-types fieldset. */
+function inputTypesChromeOf(container: HTMLElement): HTMLElement[] {
+  return chromeOf(container, 'modelInputTypes')
+}
+
+/** The official disclosure's capacity labels and the input-types fieldset. */
+function capacityChromeOf(container: HTMLElement): HTMLElement[] {
+  return [...capacityFieldsOf(container), ...inputTypesChromeOf(container)]
+}
+
 /**
- * Stand the official context-window / max-output labels and the input-types
- * fieldset down for a row whose editor renders those same decisions.
+ * Stand the named chrome down.
  *
  * Only DIRECT children of the disclosure are touched: the editor's own inputs
- * (and its own modality pills) live inside `.bre-effort-slot`, which carries
- * neither class stem. The marker attribute distinguishes this hide from one the
- * host wrote itself, exactly like {@link hideOfficialReasoning}.
+ * live inside `.bre-effort-slot`, which carries neither class stem. The marker
+ * attribute distinguishes this hide from one the host wrote itself, exactly
+ * like {@link hideOfficialReasoning}. An element the host already hid is left
+ * unmarked, so handing the chrome back never reveals a host-hidden control.
  */
-export function hideOfficialCapacityChrome(container: HTMLElement): void {
-  for (const element of capacityChromeOf(container)) {
+function hideChrome(elements: readonly HTMLElement[]): void {
+  for (const element of elements) {
     if (element.style.display === 'none') continue
     element.setAttribute(CAPACITY_HIDDEN_ATTR, '1')
     element.style.display = 'none'
   }
 }
 
-/** Hand the official capacity/input-type chrome back when the editor goes. */
-export function showOfficialCapacityChrome(container: HTMLElement): void {
-  for (const element of capacityChromeOf(container)) {
+/** Hand back only the chrome this plugin marked. */
+function showChrome(elements: readonly HTMLElement[]): void {
+  for (const element of elements) {
     if (element.getAttribute(CAPACITY_HIDDEN_ATTR) !== '1') continue
     element.removeAttribute(CAPACITY_HIDDEN_ATTR)
     if (element.style.display === 'none') element.style.display = ''
   }
+}
+
+/** Stand both official copies down. Used when the editor leaves the row. */
+export function hideOfficialCapacityChrome(container: HTMLElement): void {
+  hideChrome(capacityChromeOf(container))
+}
+
+/** Hand the official capacity/input-type chrome back when the editor goes. */
+export function showOfficialCapacityChrome(container: HTMLElement): void {
+  showChrome(capacityChromeOf(container))
 }
 
 /** The official input-types checkbox an image verdict belongs to, or undefined
@@ -2401,7 +2471,7 @@ const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'Ar
  * @param windowMs - how long to hold them still.
  */
 export function suppressScrollAnchoring(node: HTMLElement, windowMs: number = REPIN_MOUNT_MS): void {
-  for (const target of scrollChainOf(node)) {
+  for (const target of scrollContainerCandidatesOf(node)) {
     const known = ANCHOR_HOLDS.get(target)
     if (known !== undefined) {
       window.clearTimeout(known.timer)
@@ -2433,24 +2503,28 @@ function releaseAnchoring(target: HTMLElement): void {
   target.style.overflowAnchor = known.saved
 }
 
-function pinCardTop(card: HTMLElement, windowMs: number): void {
+function pinCardTop(card: HTMLElement, windowMs: number, replaceRunning = false): void {
   // The whole chain, not just the nearest scrollable ancestor: a card's place
   // on screen is the sum of every offset between it and the document, and a
   // deletion near the bottom of a long page moves the PAGE's offset, not the
   // panel's. The nearest one still names the window (that is what the
   // de-duplication and the "one card at a time" rule key on).
-  const chain = scrollChainOf(card)
+  const chain = scrollContainerCandidatesOf(card)
   const host = chain[0]
   if (host === undefined || !card.isConnected) return
   const now = performance.now()
   const running = REPINS.get(host)
   if (running !== undefined) {
-    // Same host: keep the position the first request measured and just hold on
-    // longer, so the two height changes are pinned against one origin. The
-    // extension is still bounded by the ceiling measured from the first
-    // request, so two windows can never chain into an unbounded one.
-    running.deadline = Math.min(Math.max(running.deadline, now + windowMs), running.startedAt + REPIN_MAX_MS)
-    return
+    if (replaceRunning) {
+      running.release()
+    } else {
+      // Same host: keep the position the first request measured and just hold on
+      // longer, so the two height changes are pinned against one origin. The
+      // extension is still bounded by the ceiling measured from the first
+      // request, so two windows can never chain into an unbounded one.
+      running.deadline = Math.min(Math.max(running.deadline, now + windowMs), running.startedAt + REPIN_MAX_MS)
+      return
+    }
   }
   const rectBefore = card.getBoundingClientRect()
   const topBefore = rectBefore.top
@@ -2518,7 +2592,7 @@ function pinCardTop(card: HTMLElement, windowMs: number): void {
       release()
       return
     }
-    const rect = card.getBoundingClientRect()
+    let rect = card.getBoundingClientRect()
     // Still growing: the height change that follows has to stay inside this
     // window, so the release is pushed back to a quiet period after it.
     const grew = Math.abs(rect.height - heightBefore) > 0.5
@@ -2531,8 +2605,23 @@ function pinCardTop(card: HTMLElement, windowMs: number): void {
       release()
       return
     }
+    const moved: HTMLElement[] = []
+    if (grew) {
+      // A render can grow the card AND focus-scroll one of its containers in the
+      // same frame. Restore those hosts to their pre-frame offsets first, then
+      // measure the remaining layout shift. This keeps the correction on the
+      // container that actually moved instead of redistributing it inward.
+      for (const target of chain) {
+        const before = lastSet.get(target)
+        if (before === undefined || target.scrollTop === before) continue
+        moved.push(target)
+        target.scrollTop = before
+        lastSet.set(target, target.scrollTop)
+      }
+      rect = card.getBoundingClientRect()
+    }
     const delta = rect.top - topBefore
-    if (delta !== 0) absorbDelta(chain, watched, lastSet, delta)
+    if (delta !== 0) absorbDelta(chain, watched, lastSet, delta, moved)
     const at = performance.now()
     if (grew) {
       heightBefore = rect.height
@@ -2565,9 +2654,10 @@ export function absorbDelta(
   watched: Set<HTMLElement>,
   lastSet: Map<HTMLElement, number>,
   delta: number,
+  priority: readonly HTMLElement[] = [],
 ): void {
   let remaining = delta
-  for (const target of [...watched, ...chain]) {
+  for (const target of new Set([...priority, ...watched, ...chain])) {
     if (remaining === 0) break
     const before = target.scrollTop
     if (before !== lastSet.get(target)) continue
@@ -3067,6 +3157,33 @@ function wireAddModelRepin(trigger: HTMLElement, card: HTMLElement, wired: WeakS
 }
 
 /**
+ * Wire the provider list's own add-provider button so the new-provider card
+ * unfolds DOWNWARD instead of popping up the page (the user's report: clicking
+ * 添加模型提供商 still opened the card upward; it must expand down).
+ *
+ * The click swaps the button for the new-provider card in the same flex slot —
+ * the host's addBlock — so the layout itself grows downward from the button.
+ * What walks the page up is the scroll OFFSET: the browser's scroll anchoring
+ * buying the insertion back, and any focus scroll the official handler
+ * performs, both landing before the mutation microtask can measure anything.
+ * The button's own container answers it: the addBlock persists across the swap
+ * (the button is replaced IN it), so its top is the button's top, the card's
+ * top, and the position to hold. Pinning it from the click's CAPTURE phase
+ * measures the baseline before the official handler runs and absorbs every
+ * offset written behind it; the window extends while the block is still
+ * changing height — the card grows in stages: the mode switch, the key list
+ * landing, the async renders — so the whole expansion lands below where the
+ * button stood. Capture phase, like the chevrons and Edit buttons.
+ */
+function wireAddProviderRepin(trigger: HTMLElement, wired: WeakSet<Element>): void {
+  wireOnce(trigger, wired, () => {
+    const block = trigger.closest<HTMLElement>('[class*="addBlock"]')
+    if (block === null) return
+    pinCardTop(block, REPIN_CLICK_MS, true)
+  })
+}
+
+/**
  * Whether an official editing card is open on the page, told from the card's
  * own action row (its Cancel/commit pair) with the model-row containers as a
  * fallback signal.
@@ -3173,6 +3290,17 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   for (const card of Array.from(root.querySelectorAll<HTMLElement>('[class*="rowCard"], [class*="setupCard"], [class*="addCard"]'))) {
     for (const trigger of addModelTriggersOf(card, labels)) wireAddModelRepin(trigger, card, state.addModelWired)
   }
+  // The provider list's own add-provider button rides the same pre-gate wiring:
+  // its click is the height change that grows the NEW card into the button's
+  // own slot, and the button is gone by the time any card-scoped wiring below
+  // could see it (the swap is one commit). Structural match on the host's
+  // hashed addBlock/addButton classes — the button carries no aria-label —
+  // with this plugin's own DOM skipped like every other trigger above. See
+  // {@link wireAddProviderRepin}.
+  for (const trigger of Array.from(root.querySelectorAll<HTMLElement>('button[class*="addButton"]'))) {
+    if (trigger.closest('[data-plugin]') !== null) continue
+    wireAddProviderRepin(trigger, state.addProviderWired)
+  }
   // The provider card's own layout (display name → API protocol → base URL, the
   // protocol-labelled address, the 更多端点 second endpoint). Wired before every
   // gate below and applied to BOTH the edit card and the add card, so 添加供应商
@@ -3210,7 +3338,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     const wasEditing = state.editing
     state.editing = false
     if (wasEditing !== false || (hasOutstanding(state) && Date.now() >= state.nextFlushAt)) {
-      void runIdlePass(deps, state).catch(error => {
+      void runIdlePass(deps, state, wasEditing === true).catch(error => {
         console.error(`[bre] idle pass failed: ${error instanceof Error ? error.message : String(error)}`)
       })
     }
@@ -3229,7 +3357,12 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       entry.editor.unmount()
     }
     state.mounted.clear()
-    state.describePromise ??= deps.describeNamespace()
+    // RENDER-ONLY read: while the mirror reloads (the state right after any save)
+  // its last accepted snapshot still draws these rows, and paying a wire
+  // describe here instead -- one that echoes `document-updated` and so re-arms
+  // this very scan -- is what turned a save into seconds of round trips.
+  // Never used as a write seed (that is what `allowStale` is opt-in for).
+  state.describePromise ??= deps.describeNamespace({ allowStale: true })
     const seatLabels = labels
     void state.describePromise.then(join => {
       seatEmptyCatalog(root, deps, state, join, seatLabels)
@@ -3261,7 +3394,12 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // on pushed invalidations (settings/document-updated, connection/reset —
   // see apply()), so a stale snapshot never outlives the change that made it
   // stale.
-  state.describePromise ??= deps.describeNamespace()
+  // RENDER-ONLY read: while the mirror reloads (the state right after any save)
+  // its last accepted snapshot still draws these rows, and paying a wire
+  // describe here instead -- one that echoes `document-updated` and so re-arms
+  // this very scan -- is what turned a save into seconds of round trips.
+  // Never used as a write seed (that is what `allowStale` is opt-in for).
+  state.describePromise ??= deps.describeNamespace({ allowStale: true })
   const run = (join: SettingsJoin): void => {
     if (state.disposed || !root.isConnected) return
     const namespace = join.namespace
@@ -3467,12 +3605,6 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         index,
         staged,
         officialInputTypes: officialInputTypesOf(container),
-        // The card covers these controls only while its thinking switch is on;
-        // it reports every flip so an off row gets its own fields back.
-        onCoverageChange: covered => {
-          if (covered) hideOfficialCapacityChrome(container)
-          else showOfficialCapacityChrome(container)
-        },
         api: {
           ...createEditorApi(
             deps.api,
@@ -3531,14 +3663,15 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       // that finally gives the model a ladder), under a container whose editor
       // has long been mounted.
       hideOfficialReasoning(container)
-      // The official copy of both capacity fields and of the input-types
-      // checkbox follows the card's own switch: with thinking on the card
-      // renders those decisions, so the row's smaller controls stand down.
-      // With it off the card disappears, and leaving its stand-in hidden would
-      // take away every way to edit the model's window. Asserted every scan for
-      // the same re-render reason as the reasoning group.
-      if (efforts === false) showOfficialCapacityChrome(container)
-      else hideOfficialCapacityChrome(container)
+      // 支持模态 sits above the thinking switch, and the two token counts sit
+      // in the card below it, so the official 输入类型 fieldset AND the official
+      // 上下文窗口 / 最大输出 labels stay down for as long as this editor is
+      // mounted — switch on or off. Handing the counts back when the switch was
+      // off put a second, smaller pair of the same numbers above 支持模态 (the
+      // reported bug); the card keeps them in both states instead, so a model
+      // that declares no reasoning still has an editable window. Asserted every
+      // scan: the host re-creates that chrome whenever the row re-renders.
+      hideOfficialCapacityChrome(container)
       const existing = state.mounted.get(container)
       if (existing !== undefined) {
         // The official page kept the container but moved the document under

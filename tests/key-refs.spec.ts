@@ -131,9 +131,10 @@ describe('maskKeyValue', () => {
 })
 
 describe('protocols and endpoints', () => {
-  it('recognises exactly the four wire protocols a key can pin (three route-level, plus native Gemini)', () => {
-    expect(ROUTE_PROTOCOLS).toEqual(['anthropic-messages', 'openai-completions', 'openai-responses', 'google-generative-ai'])
+  it('recognises exactly the three supported wire protocols a key can pin', () => {
+    expect(ROUTE_PROTOCOLS).toEqual(['anthropic-messages', 'openai-completions', 'openai-responses'])
     for (const protocol of ROUTE_PROTOCOLS) expect(isRouteProtocol(protocol)).toBe(true)
+    expect(isRouteProtocol('google-generative-ai')).toBe(false)
     expect(isRouteProtocol('google')).toBe(false)
     expect(isRouteProtocol(undefined)).toBe(false)
     expect(isRouteProtocol(42)).toBe(false)
@@ -143,12 +144,11 @@ describe('protocols and endpoints', () => {
     expect(endpointFamilyOf('anthropic-messages')).toBe('anthropic')
     expect(endpointFamilyOf('openai-completions')).toBe('openai')
     expect(endpointFamilyOf('openai-responses')).toBe('openai')
-    expect(endpointFamilyOf('google-generative-ai')).toBe('gemini')
   })
 
   it('normalises a pinned protocol, treating anything unknown as "any"', () => {
     expect(normalizeKeyProtocol('openai-responses')).toBe('openai-responses')
-    expect(normalizeKeyProtocol('google-generative-ai')).toBe('google-generative-ai')
+    expect(normalizeKeyProtocol('google-generative-ai')).toBeUndefined()
     expect(normalizeKeyProtocol('carrier-pigeon')).toBeUndefined()
     expect(normalizeKeyProtocol('')).toBeUndefined()
     expect(normalizeKeyProtocol(undefined)).toBeUndefined()
@@ -168,8 +168,8 @@ describe('protocols and endpoints', () => {
     })
     expect(normalizeRouteEndpoints({ gemini: 'https://c.example/v1beta', anthropic: 'https://b.example' })).toEqual({
       anthropic: 'https://b.example',
-      gemini: 'https://c.example/v1beta',
     })
+    expect(normalizeRouteEndpoints({ gemini: 'https://c.example/v1beta' })).toBeUndefined()
     // A non-URL side is dropped, not stored; the good side survives.
     expect(normalizeRouteEndpoints({ openai: 'ftp://nope', anthropic: 'https://b.example' })).toEqual({
       anthropic: 'https://b.example',

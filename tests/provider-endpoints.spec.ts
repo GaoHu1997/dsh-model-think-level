@@ -18,8 +18,6 @@ const LABELS: EndpointLabels = {
 const COPY: Record<string, string> = {
   keysEndpointOpenAI: 'OpenAI',
   keysEndpointAnthropic: 'Anthropic',
-  keysEndpointGemini: 'Gemini',
-  keysProtocolGemini: 'Gemini',
   keysProtocolShortChat: 'Chat',
   keysProtocolShortResponses: 'Responses',
   keysProtocolShortAnthropic: 'Anthropic',
@@ -34,21 +32,20 @@ const t = (key: string, params?: Record<string, string | number>): string => {
 }
 
 /** A stand-in transport that records what was persisted. */
-function fakeClient(stored: { openai: string | null; anthropic: string | null; gemini?: string | null } = { openai: null, anthropic: null, gemini: null }) {
-  const writes: Array<{ route: string; openai: string | undefined; anthropic: string | undefined; gemini: string | undefined }> = []
+function fakeClient(stored: { openai: string | null; anthropic: string | null } = { openai: null, anthropic: null }) {
+  const writes: Array<{ route: string; openai: string | undefined; anthropic: string | undefined }> = []
   const list = vi.fn(async (route: string): Promise<KeyAnswer> => ({
     ok: true,
     route,
     entries: [],
     models: [],
-    endpoints: { openai: stored.openai, anthropic: stored.anthropic, gemini: stored.gemini ?? null },
+    endpoints: { openai: stored.openai, anthropic: stored.anthropic },
   }))
-  const setEndpoints = vi.fn(async (route: string, openai: string | undefined, anthropic: string | undefined, gemini: string | undefined): Promise<KeyAnswer> => {
-    writes.push({ route, openai, anthropic, gemini })
+  const setEndpoints = vi.fn(async (route: string, openai: string | undefined, anthropic: string | undefined): Promise<KeyAnswer> => {
+    writes.push({ route, openai, anthropic })
     stored.openai = openai ?? null
     stored.anthropic = anthropic ?? null
-    stored.gemini = gemini ?? null
-    return { ok: true, route, entries: [], models: [], endpoints: { openai: stored.openai, anthropic: stored.anthropic, gemini: stored.gemini } }
+    return { ok: true, route, entries: [], models: [], endpoints: { openai: stored.openai, anthropic: stored.anthropic } }
   })
   const client = { list, setEndpoints } as unknown as KeyManagerClient
   return { client, writes, list, setEndpoints }
@@ -125,7 +122,7 @@ describe('the reshaped provider card', () => {
     // toggle, and one row per family the main address does not serve.
     expect(card.querySelectorAll('[data-bre-endpoint-toggle]')).toHaveLength(1)
     expect(card.querySelectorAll('[data-bre-endpoint-rows]')).toHaveLength(1)
-    expect(card.querySelectorAll('[data-bre-endpoint-row]')).toHaveLength(2)
+    expect(card.querySelectorAll('[data-bre-endpoint-row]')).toHaveLength(1)
     // The main field's family tag; the rows' tags are classed, not marked.
     expect(card.querySelectorAll('[data-bre-endpoint-family]')).toHaveLength(1)
   })
@@ -218,7 +215,7 @@ describe('the reshaped provider card', () => {
     // One row per family the main address does not serve.
     const families = Array.from(card.querySelectorAll<HTMLElement>('[data-bre-endpoint-row]'))
       .map(row => row.getAttribute('data-bre-endpoint-row'))
-    expect(families).toEqual(['anthropic', 'gemini'])
+    expect(families).toEqual(['anthropic'])
 
     toggle?.click()
     expect(toggle?.getAttribute('aria-expanded')).toBe('true')
@@ -266,11 +263,11 @@ describe('the reshaped provider card', () => {
     expect(folded.children).toBe(1)
     expect(folded.text).toBe('Base URLMore endpoints')
     // The count still reaches the user, out of the line's flow.
-    expect(toggle.getAttribute('title')).toBe('2 more')
+    expect(toggle.getAttribute('title')).toBe('1 more')
 
     toggle.click()
     expect({ children: title.children.length, text: title.textContent }).toEqual(folded)
-    expect(toggle.getAttribute('title')).toBe('2 more')
+    expect(toggle.getAttribute('title')).toBe('1 more')
   })
 
   it('keeps the extra address rows out of the way until they are asked for', () => {
@@ -292,7 +289,7 @@ describe('the reshaped provider card', () => {
     decorateProviderCard(card, LABELS, { t, client })
     // The card's own field already shows an address, so the store learns it first.
     await vi.waitFor(() => { expect(writes).toHaveLength(1) })
-    expect(writes[0]).toEqual({ route: 'acme', openai: 'https://gw.example.com/v1', anthropic: '', gemini: '' })
+    expect(writes[0]).toEqual({ route: 'acme', openai: 'https://gw.example.com/v1', anthropic: '' })
 
     const row = card.querySelector<HTMLElement>('[data-bre-endpoint-row="anthropic"]')
     const input = row?.querySelector<HTMLInputElement>('.bre-endpoint-url')
@@ -309,7 +306,6 @@ describe('the reshaped provider card', () => {
       route: 'acme',
       openai: 'https://gw.example.com/v1',
       anthropic: 'https://api.anthropic.com',
-      gemini: '',
     })
   })
 
@@ -352,22 +348,18 @@ describe('the reshaped provider card', () => {
       route: 'acme',
       openai: 'https://api.openai.example/v1',
       anthropic: 'https://api.anthropic.com',
-      gemini: '',
     })
   })
 
   it('fills each extra row from what the route already stores', async () => {
-    const { client } = fakeClient({ openai: null, anthropic: 'https://api.anthropic.com', gemini: 'https://gemini.example/v1beta' })
+    const { client } = fakeClient({ openai: null, anthropic: 'https://api.anthropic.com' })
     const card = buildCard({ route: 'acme', protocol: 'openai-responses' })
     decorateProviderCard(card, LABELS, { t, client })
 
     const anthropic = card.querySelector<HTMLInputElement>('[data-bre-endpoint-row="anthropic"] .bre-endpoint-url')
-    const gemini = card.querySelector<HTMLInputElement>('[data-bre-endpoint-row="gemini"] .bre-endpoint-url')
     expect(anthropic).not.toBeNull()
-    expect(gemini).not.toBeNull()
     await vi.waitFor(() => {
       expect(anthropic?.value).toBe('https://api.anthropic.com')
-      expect(gemini?.value).toBe('https://gemini.example/v1beta')
     })
   })
 
@@ -455,12 +447,12 @@ describe('the reshaped provider card', () => {
     const select = card.querySelector<HTMLSelectElement>('select[aria-label="API protocol"]')
     if (select === null) throw new Error('the fixture lost its select')
     expect(Array.from(card.querySelectorAll<HTMLElement>('[data-bre-endpoint-row]')).map((row) => row.getAttribute('data-bre-endpoint-row')))
-      .toEqual(['anthropic', 'gemini'])
+      .toEqual(['anthropic'])
     select.value = 'anthropic-messages'
     select.dispatchEvent(new Event('change', { bubbles: true }))
     decorateProviderCard(card, LABELS, { t })
     expect(Array.from(card.querySelectorAll<HTMLElement>('[data-bre-endpoint-row]')).map((row) => row.getAttribute('data-bre-endpoint-row')))
-      .toEqual(['openai', 'gemini'])
+      .toEqual(['openai'])
   })
 
   it('hides the collapsed row container in CSS, since `display: contents` beats the UA rule', () => {
@@ -474,29 +466,22 @@ describe('the reshaped provider card', () => {
     expect(STYLES).toContain('font-size: 12px;')
   })
 
-  it('injects a Gemini option the host select does not carry, and offers it as a card', () => {
-    // 协议选择里没有 Gemini: the host's option list predates the gemini family,
-    // so the cards could never offer it. The plugin adds the option to the
-    // select itself — the host saves the select's value like any other — and
-    // the cards mirror the whole list.
+  it('offers only the host protocols and no native Gemini path', () => {
     const card = buildCard({ protocol: 'openai-completions' })
-    decorateProviderCard(card, LABELS, { t })
     const select = card.querySelector<HTMLSelectElement>('select')
     if (select === null) throw new Error('the fixture lost its select')
-    const injected = select.querySelector<HTMLOptionElement>('option[data-bre-protocol-option]')
-    expect(injected).not.toBeNull()
-    expect(injected?.value).toBe('google-generative-ai')
-    expect(injected?.textContent).toBe('Gemini')
-    const cards = Array.from(card.querySelectorAll<HTMLButtonElement>('[data-bre-protocol-value]'))
-    expect(cards.map((button) => button.getAttribute('data-bre-protocol-value'))).toEqual([
-      'openai-completions',
-      'anthropic-messages',
-      'openai-responses',
-      'google-generative-ai',
-    ])
-    // Reconciling again relabels the marked option instead of stacking a second.
+    const protocols = Array.from(select.options).map(option => option.value)
     decorateProviderCard(card, LABELS, { t })
-    expect(select.querySelectorAll('option[data-bre-protocol-option]')).toHaveLength(1)
+    decorateProviderCard(card, LABELS, { t })
+
+    // The main picker must keep the host's exact option list.
+    expect(Array.from(select.options).map(option => option.value)).toEqual(protocols)
+    const cards = Array.from(card.querySelectorAll<HTMLButtonElement>('[data-bre-protocol-value]'))
+    expect(cards.map(button => button.getAttribute('data-bre-protocol-value'))).toEqual(protocols)
+    // Native Gemini is offlined: no option, no setup hint, no address row.
+    expect(select.querySelector('option[value="google-generative-ai"]')).toBeNull()
+    expect(card.querySelectorAll('[data-bre-gemini-hint]')).toHaveLength(0)
+    expect(card.querySelector('[data-bre-endpoint-row="gemini"]')).toBeNull()
   })
 
   it('picks the API protocol from cards while the host keeps its own value', () => {
@@ -514,9 +499,9 @@ describe('the reshaped provider card', () => {
     expect(select.getAttribute('data-bre-protocol-source')).toBe('1')
 
     const cards = Array.from(card.querySelectorAll<HTMLButtonElement>('[data-bre-protocol-value]'))
-    // The known protocols carry their SHORT names — four cards have to sit one
+    // The known protocols carry their SHORT names — three cards have to sit one
     // row (协议选项卡换行了) — and each keeps the host's own text as its tooltip.
-    expect(cards.map((button) => button.textContent)).toEqual(['Chat', 'Anthropic', 'Responses', 'Gemini'])
+    expect(cards.map((button) => button.textContent)).toEqual(['Chat', 'Anthropic', 'Responses'])
     expect(cards.map((button) => button.title)).toEqual(
       Array.from(select.options).map((option) => option.text.trim()),
     )
@@ -542,7 +527,7 @@ describe('the reshaped provider card', () => {
     // Only the chosen card is a tab stop, so the arrow keys have to walk the rest.
     const group = card.querySelector<HTMLElement>('[data-bre-protocol-cards]')
     if (group === null) throw new Error('no group')
-    expect(cards.map((button) => button.tabIndex)).toEqual([-1, 0, -1, -1])
+    expect(cards.map((button) => button.tabIndex)).toEqual([-1, 0, -1])
     anthropic.focus()
     group.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
     expect(select.value).toBe('openai-completions')
@@ -563,7 +548,7 @@ describe('the reshaped provider card', () => {
     select.appendChild(extra)
     decorateProviderCard(card, LABELS, { t })
     const cards = Array.from(card.querySelectorAll('[data-bre-protocol-value]'))
-    expect(cards.map((button) => button.textContent)).toEqual(['Chat', 'Anthropic', 'Responses', 'Gemini', 'Custom API'])
+    expect(cards.map((button) => button.textContent)).toEqual(['Chat', 'Anthropic', 'Responses', 'Custom API'])
   })
 
   it('puts 更多端点 on the address label line, with the extra addresses inside the field', () => {
@@ -616,7 +601,7 @@ describe('the reshaped provider card', () => {
     // Switching families must not lose what the field was showing: the value it
     // held belongs to the family coming off screen, and the family coming on brings
     // its own stored address (user item 1 — no tab switch needed).
-    const store = { openai: null as string | null, anthropic: 'https://anthropic.example', gemini: null as string | null }
+    const store = { openai: null as string | null, anthropic: 'https://anthropic.example' }
     const { client, writes } = fakeClient(store)
     const card = buildCard({ protocol: 'openai-completions' })
     decorateProviderCard(card, LABELS, { t, client })
@@ -634,15 +619,13 @@ describe('the reshaped provider card', () => {
       route: 'acme',
       openai: 'https://gw.example.com/v1',
       anthropic: 'https://anthropic.example',
-      gemini: '',
     })
     expect(input.value).toBe('https://anthropic.example')
     // The OpenAI row now carries the family that came off screen, with its newly
-    // filed URL; the Gemini row never moved.
+    // filed URL.
     const openaiRow = card.querySelector<HTMLElement>('[data-bre-endpoint-row="openai"]')
     expect(openaiRow?.querySelector<HTMLInputElement>('input')?.value).toBe('https://gw.example.com/v1')
     expect(openaiRow?.querySelector<HTMLElement>('.bre-endpoint-family')?.textContent).toBe('OpenAI')
-    expect(card.querySelector<HTMLElement>('[data-bre-endpoint-row="gemini"] .bre-endpoint-family')?.textContent).toBe('Gemini')
   })
 
   it('reads the route off the card row, since the edit card names no route field', async () => {
@@ -661,7 +644,7 @@ describe('the reshaped provider card', () => {
     // Filing the address the card already shows proves the route was found: a card
     // with no route files nothing at all.
     await vi.waitFor(() => { expect(writes).toHaveLength(1) })
-    expect(writes[0]).toEqual({ route: 'ofox', openai: 'https://gw.example.com/v1', anthropic: '', gemini: '' })
+    expect(writes[0]).toEqual({ route: 'ofox', openai: 'https://gw.example.com/v1', anthropic: '' })
 
     const input = card.querySelector<HTMLInputElement>('[data-bre-endpoint-row="anthropic"] .bre-endpoint-url')
     if (input === null) throw new Error('the card has no Anthropic row')
@@ -673,7 +656,6 @@ describe('the reshaped provider card', () => {
       route: 'ofox',
       openai: 'https://gw.example.com/v1',
       anthropic: 'https://api.anthropic.com',
-      gemini: '',
     })
   })
 
@@ -693,7 +675,6 @@ describe('the reshaped provider card', () => {
       route: 'ofox-anthropic',
       openai: '',
       anthropic: 'https://api.ofox.io/anthropic',
-      gemini: '',
     })
   })
 
@@ -715,7 +696,6 @@ describe('the reshaped provider card', () => {
       route: 'ofox-anthropic',
       openai: '',
       anthropic: 'https://api.ofox.io/anthropic',
-      gemini: '',
     })
   })
 
@@ -746,7 +726,6 @@ describe('the reshaped provider card', () => {
       route: 'acme',
       openai: 'https://new.example/v1',
       anthropic: '',
-      gemini: '',
     })
   })
 
@@ -787,6 +766,36 @@ describe('the reshaped provider card', () => {
     expect(STYLES).toContain('.bre-keys-actions .bre-link-button {')
     expect(STYLES).toContain('color: var(--dsw-alias-label-secondary, #61666b);')
     expect(STYLES).toContain('.bre-keys-actions .bre-keys-danger {')
+  })
+})
+
+describe('the address hydration', () => {
+  it('reads the pair without pulling the key list', async () => {
+    // This hydration repeats once per visible card per second. Asking for the
+    // whole key list cost the host a settings read plus one credential resolve
+    // per key on a serialising service, and the opened card's own list queued
+    // behind that -- seconds of "正在读取密钥…".
+    const list = vi.fn(async (route: string): Promise<KeyAnswer> => ({
+      ok: true,
+      route,
+      entries: [{ ref: 'SHOULD_NOT_BE_READ', enabled: true, configured: true }],
+      models: [],
+      endpoints: { openai: 'https://wrong.example.com', anthropic: null },
+    }))
+    const endpoints = vi.fn(async () => ({
+      ok: true,
+      endpoints: { openai: 'https://right.example.com', anthropic: null },
+    }))
+    const setEndpoints = vi.fn(async (): Promise<KeyAnswer> => ({
+      ok: true, route: 'acme-pair', entries: [], models: [], endpoints: { openai: null, anthropic: null },
+    }))
+    const client = { list, endpoints, setEndpoints } as unknown as KeyManagerClient
+    const card = buildCard({ route: 'acme-pair', protocol: 'openai-completions' })
+    decorateProviderCard(card, LABELS, { t, client })
+
+    await vi.waitFor(() => { expect(endpoints).toHaveBeenCalled() })
+    expect(endpoints).toHaveBeenCalledWith('acme-pair')
+    expect(list).not.toHaveBeenCalled()
   })
 })
 

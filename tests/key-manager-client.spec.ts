@@ -67,7 +67,7 @@ describe('the row status payload', () => {
           { ref: 'K2', enabled: true, configured: true, masked: 'sk-2', rest: { remainingMs: -5, failures: 1 } },
           { ref: 'K3', enabled: true, configured: true, masked: 'sk-3', rest: { remainingMs: 'soon' } },
         ],
-        endpoints: { openai: null, anthropic: null, gemini: null },
+        endpoints: { openai: null, anthropic: null },
       },
     })
     const answer = await httpKeyManagerClient.list('ofox')
@@ -81,6 +81,54 @@ describe('the row status payload', () => {
   })
 })
 
+describe('list cache', () => {
+  it('returns a masked cached list immediately', async () => {
+    let finish!: (response: Response) => void
+    vi.stubGlobal('fetch', async () => await new Promise<Response>(resolve => { finish = resolve }))
+    const pending = httpKeyManagerClient.list('cache-route')
+    finish({
+      ok: true,
+      json: async () => ({ ok: true, route: 'cache-route', entries: [
+        { ref: 'A', configured: true, masked: 'sk-a...z9' },
+      ] }),
+    } as unknown as Response)
+    await pending
+    const cached = httpKeyManagerClient.cached?.('cache-route')
+    expect(cached?.entries[0]?.masked).toBe('sk-a...z9')
+    expect(JSON.stringify(cached)).not.toContain('sk-live-secret')
+  })
+
+  it('coalesces concurrent reads and preserves a write against a stale read', async () => {
+    let finishRead!: (response: Response) => void
+    let readCount = 0
+    vi.stubGlobal('fetch', async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return {
+          ok: true,
+          json: async () => ({ ok: true, route: 'race-route', entries: [
+            { ref: 'NEW', configured: true, masked: 'sk-n...w' },
+          ] }),
+        } as unknown as Response
+      }
+      readCount += 1
+      return await new Promise<Response>(resolve => { finishRead = resolve })
+    })
+    const first = httpKeyManagerClient.list('race-route')
+    const second = httpKeyManagerClient.list('race-route')
+    expect(readCount).toBe(1)
+    const written = await httpKeyManagerClient.add('race-route', 'sk-live-secret', undefined)
+    expect(written.ok).toBe(true)
+    finishRead({
+      ok: true,
+      json: async () => ({ ok: true, route: 'race-route', entries: [
+        { ref: 'OLD', configured: true, masked: 'sk-o...d' },
+      ] }),
+    } as unknown as Response)
+    await Promise.all([first, second])
+    expect(httpKeyManagerClient.cached?.('race-route')?.entries[0]?.ref).toBe('NEW')
+  })
+})
+
 describe('list', () => {
   it('GETs the route with no caching and same-origin credentials', async () => {
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
@@ -90,7 +138,7 @@ describe('list', () => {
     expect(calls[0]?.url).toBe(`${KEY_INDEX_PATH}?route=ofox`)
     expect(optionsOf()).toMatchObject({ method: 'GET', cache: 'no-store', credentials: 'same-origin' })
     expect(optionsOf()['body']).toBeUndefined()
-    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null, gemini: null } })
+    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null } })
   })
 
   it('escapes the route it interpolates', async () => {
@@ -125,7 +173,7 @@ describe('list', () => {
         { ref: 'C', enabled: true, configured: null },
         { ref: 'D', enabled: true, configured: true },
       ],
-      endpoints: { openai: null, anthropic: null, gemini: null },
+      endpoints: { openai: null, anthropic: null },
     })
   })
 
@@ -152,7 +200,7 @@ describe('list', () => {
         { ref: 'C', enabled: true, configured: true },
         { ref: 'D', enabled: true, configured: true },
       ],
-      endpoints: { openai: null, anthropic: null, gemini: null },
+      endpoints: { openai: null, anthropic: null },
     })
   })
 
@@ -177,43 +225,22 @@ describe('list', () => {
         { ref: 'B', enabled: true, configured: true, models: [] },
         { ref: 'C', enabled: true, configured: true },
       ],
-      endpoints: { openai: null, anthropic: null, gemini: null },
+      endpoints: { openai: null, anthropic: null },
     })
   })
 
-  it('carries the merged catalogue and the part of it the provider is missing', async () => {
-    stubFetch({
-      body: {
-        ok: true,
-        route: 'ofox',
-        entries: [],
-        models: ['qwen-max'],
-        mergedModels: ['qwen-max', 'glm-4', ''],
-        unmergedModels: ['glm-4', 42],
-      },
-    })
-
-    expect(await httpKeyManagerClient.list('ofox')).toEqual({
-      ok: true,
-      route: 'ofox',
-      entries: [],
-      models: ['qwen-max'],
-      mergedModels: ['qwen-max', 'glm-4'],
-      unmergedModels: ['glm-4'],
-      endpoints: { openai: null, anthropic: null, gemini: null },
-    })
-  })
-
-  it('drops an empty offer instead of drawing one with nothing in it', async () => {
-    stubFetch({ body: { ok: true, route: 'ofox', entries: [], mergedModels: ['qwen-max'], unmergedModels: [] } })
-
-    const answer = await httpKeyManagerClient.list('ofox')
-    expect(answer).not.toHaveProperty('unmergedModels')
-    expect(answer).toMatchObject({ mergedModels: ['qwen-max'] })
-  })
 })
 
 describe('mutations', () => {
+  it('keeps an added or reused reference only when the response lists it', async () => {
+    const entries = [{ ref: 'SPARE' }, { ref: 'ACTIVE' }]
+    stubFetch({ body: { ok: true, route: 'added-ref', entries, addedRef: 'ACTIVE' } })
+    expect(await httpKeyManagerClient.add('added-ref', 'sk-active', undefined)).toMatchObject({ addedRef: 'ACTIVE' })
+
+    stubFetch({ body: { ok: true, route: 'added-ref', entries, addedRef: 'UNLISTED' } })
+    expect(await httpKeyManagerClient.add('added-ref', 'sk-active', undefined)).not.toHaveProperty('addedRef')
+  })
+
   it('POSTs an add with the value and an optional label', async () => {
     stubFetch({ body: { ok: true, route: 'ofox', enabledRef: null, entries: [] } })
     await httpKeyManagerClient.add('ofox', 'sk-abc', 'main')
@@ -269,28 +296,23 @@ describe('mutations', () => {
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     await httpKeyManagerClient.setEnabled('ofox', 'A', true)
     expect(bodyOf()).toEqual({ op: 'enable', ref: 'A', enabled: true })
-
-    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
-    await httpKeyManagerClient.applyMerged('ofox')
-    expect(bodyOf()).toEqual({ op: 'applyMerged' })
   })
 
-  it('POSTs the endpoint trio with unset addresses folded to empty strings', async () => {
-    // The host reads the three family addresses as a record of STRINGS and
+  it('POSTs the endpoint pair with unset addresses folded to empty strings', async () => {
+    // The host reads the two family addresses as a record of STRINGS and
     // treats an empty one as "clear this side", so a missing address must ride
     // the wire as '' — not as a missing key the host would default itself.
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
-    await httpKeyManagerClient.setEndpoints('ofox', 'https://openai.example/v1', undefined, 'https://gemini.example/v1beta')
+    await httpKeyManagerClient.setEndpoints('ofox', 'https://openai.example/v1', undefined)
     expect(bodyOf()).toEqual({
       op: 'endpoints',
       openai: 'https://openai.example/v1',
       anthropic: '',
-      gemini: 'https://gemini.example/v1beta',
     })
 
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
-    await httpKeyManagerClient.setEndpoints('ofox', undefined, undefined, undefined)
-    expect(bodyOf()).toEqual({ op: 'endpoints', openai: '', anthropic: '', gemini: '' })
+    await httpKeyManagerClient.setEndpoints('ofox', undefined, undefined)
+    expect(bodyOf()).toEqual({ op: 'endpoints', openai: '', anthropic: '' })
   })
 })
 
@@ -303,7 +325,7 @@ describe('replace', () => {
     expect(optionsOf()).toMatchObject({ method: 'POST', cache: 'no-store', credentials: 'same-origin' })
     expect(headersOf()['content-type']).toBe('application/json')
     expect(bodyOf()).toEqual({ op: 'value', ref: 'key-2', value: 'sk-live-secret' })
-    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null, gemini: null } })
+    expect(answer).toEqual({ ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null } })
   })
 
   it('passes the host’s refusal through untouched', async () => {
@@ -379,5 +401,50 @@ describe('reveal', () => {
     stubFetch({ body: { ok: true, key: 'k' } })
     await httpKeyManagerClient.reveal('a b', 'A B')
     expect(calls[0]?.url).toBe(`${PROVIDER_KEY_PATH}?route=a%20b&ref=A%20B`)
+  })
+})
+
+describe('the address pair read', () => {
+  it('asks for the endpoints only, never for the key list', async () => {
+    stubFetch({
+      body: { ok: true, route: 'ofox', endpoints: { openai: 'https://a.example.com', anthropic: null } },
+    })
+    const answer = await httpKeyManagerClient.endpoints?.('ofox')
+    expect(answer).toEqual({
+      ok: true,
+      endpoints: { openai: 'https://a.example.com', anthropic: null },
+    })
+    // The page hydrates this once per visible card per second; it must not pull
+    // the whole list, which costs the host a settings read and one credential
+    // resolve per key on a serialising service.
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.url).toBe(`${KEY_INDEX_PATH}?route=ofox&op=endpoints`)
+    expect(optionsOf()).toMatchObject({ method: 'GET', cache: 'no-store', credentials: 'same-origin' })
+    expect(bodyOf()).toBeUndefined()
+  })
+
+  it('reports a refusal as a refusal, and never guesses an address', async () => {
+    const cases: Array<{ status?: number; body?: unknown; raw?: string; throws?: boolean }> = [
+      { status: 403, body: { ok: false, error: 'forbidden' } },
+      { status: 400, body: { ok: false, error: 'a route is required' } },
+      { body: { ok: true } },
+      { body: { ok: true, endpoints: { openai: 42, anthropic: '' } } },
+      { raw: 'not json' },
+      { throws: true },
+    ]
+    for (const answer of cases) {
+      stubFetch(answer)
+      const result = await httpKeyManagerClient.endpoints?.('ofox')
+      expect(result?.ok).toBe(answer.body !== undefined && (answer.body as { ok?: unknown }).ok === true)
+      // A missing/malformed pair reads as "nothing stored", which is what the
+      // hydration merges with the other families' addresses.
+      expect(result?.endpoints?.openai ?? null).toBeNull()
+    }
+  })
+
+  it('escapes the route', async () => {
+    stubFetch({ body: { ok: true, endpoints: { openai: null, anthropic: null } } })
+    await httpKeyManagerClient.endpoints?.('a b')
+    expect(calls[0]?.url).toBe(`${KEY_INDEX_PATH}?route=a%20b&op=endpoints`)
   })
 })

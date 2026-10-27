@@ -736,14 +736,30 @@ export function routeIsDeclared(namespace: SettingsNamespaceView | undefined, ro
  * @param api - the settings Remote (plus the optional scope).
  * @param options - `fresh` forces the wire read.
  */
-export async function describeNamespace(api: RemoteApi, options: { fresh?: boolean } = {}): Promise<SettingsJoin> {
-  const viaScope = options.fresh === true ? undefined : joinFromScope(api)
+export async function describeNamespace(
+  api: RemoteApi,
+  options: { fresh?: boolean; allowStale?: boolean } = {},
+): Promise<SettingsJoin> {
+  const viaScope = options.fresh === true ? undefined : joinFromScope(api, options.allowStale === true)
   if (viaScope !== undefined) return viaScope
   const response = await api.settings.describe()
   if (!response.ok) return { namespace: undefined, writable: false, source: 'wire' }
   const namespace = response.value.namespaces.find(ns => ns.ns === PI_AI_NS)
   return { namespace, writable: response.value.writable, source: 'wire' }
 }
+
+/**
+ * The last snapshot each scope mirror accepted as ready, by scope.
+ *
+ * A scan that runs while the mirror reloads -- which is exactly the state the
+ * mirror is in right after any save moves the document -- would otherwise pay a
+ * wire `describe()`, and the host's `describe()` itself emits
+ * `settings/document-updated`, so each such read schedules the refresh that
+ * reads again: a 5 Hz describe loop for the whole reload window. Rendering from
+ * the last accepted snapshot instead costs nothing and shows the same rows the
+ * user just left behind.
+ */
+const lastReadyJoin = new WeakMap<object, SettingsJoin>()
 
 /**
  * The namespace join as the official scope's snapshot holds it, or undefined
@@ -754,22 +770,34 @@ export async function describeNamespace(api: RemoteApi, options: { fresh?: boole
  * never reads; every field this half touches (`value`, `user`, `base`,
  * `revision`) comes from the mirror verbatim.
  */
-function joinFromScope(api: RemoteApi): SettingsJoin | undefined {
-  const snapshot = api.scope?.getSnapshot()
-  if (snapshot === undefined || snapshot.status !== 'ready') return undefined
-  if (typeof snapshot.revision !== 'number') return undefined
-  return {
-    namespace: {
-      ns: PI_AI_NS,
-      schema: {},
-      value: snapshot.value,
-      user: snapshot.user,
-      base: snapshot.base,
-      revision: snapshot.revision,
-      applies: 'live',
-      secrets: [],
-    } as unknown as SettingsNamespaceView,
-    writable: snapshot.writable === true,
-    source: 'scope',
+function joinFromScope(api: RemoteApi, allowStale = false): SettingsJoin | undefined {
+  const scope = api.scope
+  if (scope === undefined) return undefined
+  const snapshot = scope.getSnapshot()
+  if (snapshot === undefined) return undefined
+  if (snapshot.status === 'ready' && typeof snapshot.revision === 'number') {
+    const join: SettingsJoin = {
+      namespace: {
+        ns: PI_AI_NS,
+        schema: {},
+        value: snapshot.value,
+        user: snapshot.user,
+        base: snapshot.base,
+        revision: snapshot.revision,
+        applies: 'live',
+        secrets: [],
+      } as unknown as SettingsNamespaceView,
+      writable: snapshot.writable === true,
+      source: 'scope',
+    }
+    lastReadyJoin.set(scope, join)
+    return join
   }
+  // The mirror is reloading (or has not accepted a section yet). A read-only
+  // caller may render the last snapshot it accepted; a writer must not, because
+  // that revision may already be superseded.
+  if (!allowStale || scope === undefined) return undefined
+  const stale = lastReadyJoin.get(scope)
+  if (stale === undefined) return undefined
+  return { ...stale, source: 'scope-stale' }
 }

@@ -18,16 +18,19 @@
 
 import { isRecord } from './shared.js'
 import { selectOverride, type HeaderIndex, type HeaderOverride } from './headers-core.js'
-import { anthropicRequestBaseUrl, geminiRequestBaseUrl } from './listing.js'
+import { anthropicRequestBaseUrl } from './listing.js'
 import {
   classifyFailure,
+  clearRest,
   isHonoured,
+  isRestingFor,
   keyRest,
   planKeys,
   recordRoutePlan,
   restKeyOf,
   wireOf,
   WIRE_DISPATCH_HEADER,
+  type FailureKind,
   type KeyCandidate,
 } from './key-route-core.js'
 import { endpointFamilyOf, type RouteProtocol } from './key-refs.js'
@@ -198,11 +201,6 @@ function loadProtocol(protocol: RouteProtocol): Promise<ProtocolStreams> {
         return await import('@earendil-works/pi-ai/api/anthropic-messages') as unknown as ProtocolStreams
       case 'openai-responses':
         return await import('@earendil-works/pi-ai/api/openai-responses') as unknown as ProtocolStreams
-      case 'google-generative-ai':
-        // Not offered by the harness adapter's registry — only a key pin ever
-        // dispatches here, and a runtime older than the module rejects the
-        // import, which the failover loop benches like any refused key.
-        return await import('@earendil-works/pi-ai/api/google-generative-ai') as unknown as ProtocolStreams
       case 'openai-completions':
       default:
         return await import('@earendil-works/pi-ai/api/openai-completions') as unknown as ProtocolStreams
@@ -351,12 +349,7 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
               : modelObject['baseUrl'] as string
           const baseUrl = protocol === 'anthropic-messages'
             ? anthropicRequestBaseUrl(selectedBaseUrl)
-            : protocol === 'google-generative-ai'
-              // The Google client takes baseUrl verbatim with no apiVersion, so
-              // the version segment must be in the path (a bare origin gains
-              // /v1beta; a spelled-out path is the gateway's own spelling).
-              ? geminiRequestBaseUrl(selectedBaseUrl)
-              : selectedBaseUrl
+            : selectedBaseUrl
           const switched = protocol !== api || baseUrl !== modelObject['baseUrl']
           if (!switched) {
             return (streamSimple as UnknownFunction).call(target, model, context, {
@@ -411,17 +404,27 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
             model: modelId,
             preferredWire: servedWire.get(servedKey),
             avoidWire,
-            isResting: candidate => keyRest.isResting(restKeyOf(route ?? '', candidate.ref), Date.now()),
+            isResting: candidate => isRestingFor(keyRest, route ?? '', candidate.ref, modelId, Date.now()),
           })
           // The plan is reproduced in `?diag=1`; it carries references and ranks,
           // never a key value.
           recordRoutePlan(route ?? '', plan, { model: modelId })
           const wireOfAttempt = (candidate: KeyCandidate): RouteProtocol =>
             plan.entries.find(entry => entry.candidate === candidate)?.wire ?? wireOf(candidate, api, modelId, avoidWire)
+          /**
+           * The cooldown a failed attempt answers for. A refusal that names the
+           * model is a fact about the (key, model) pair — a relay whose accounts
+           * sit in different groups carries some models on one key and not the
+           * other — so it benches only that pair; everything else (a bad
+           * credential, a quota, a dead server) benches the key itself.
+           */
+          const restKeyFor = (candidate: KeyCandidate, kind: FailureKind): string =>
+            kind === 'unserved' && modelId !== undefined
+              ? restKeyOf(route ?? '', candidate.ref, modelId)
+              : restKeyOf(route ?? '', candidate.ref)
           let lastErrorEvent: Record<string, unknown> | undefined
           let lastError: unknown
           for (const candidate of plan.ordered) {
-            const restKey = restKeyOf(route ?? '', candidate.ref)
             let stream: AsyncIterable<Record<string, unknown>>
             try {
               stream = await startAttempt(candidate, avoidWire)
@@ -433,7 +436,8 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
               // credential, not the wire.
               lastError = error
               if (candidate.protocol === undefined) rememberWireFact(failedWire, servedKey, wireOfAttempt(candidate))
-              keyRest.note(restKey, classifyFailure(undefined, error instanceof Error ? error.message : '') ?? 'refused')
+              const kind = classifyFailure(undefined, error instanceof Error ? error.message : '') ?? 'refused'
+              keyRest.note(restKeyFor(candidate, kind), kind)
               continue
             }
             let committed = false
@@ -447,11 +451,12 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
                   lastErrorEvent = event as Record<string, unknown>
                   failed = true
                   if (candidate.protocol === undefined) rememberWireFact(failedWire, servedKey, wireOfAttempt(candidate))
-                  keyRest.note(restKey, classifyFailure(undefined, errorTextOf(event as Record<string, unknown>)) ?? 'refused')
+                  const kind = classifyFailure(undefined, errorTextOf(event as Record<string, unknown>)) ?? 'refused'
+                  keyRest.note(restKeyFor(candidate, kind), kind)
                   break
                 }
                 committed = true
-                keyRest.clear(restKey)
+                clearRest(keyRest, route ?? '', candidate.ref, modelId)
                 // This is the wire that actually serves the model; start here
                 // next time instead of paying the rejected round trip again.
                 // The refused-wire memory is deliberately kept: a wire that

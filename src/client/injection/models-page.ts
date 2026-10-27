@@ -28,7 +28,7 @@ import {
 } from './models-page-editor.js'
 import { teardownProviderEndpoints } from './provider-endpoints.js'
 import { describeNamespace } from '../ops.ts'
-import type { ClientContext, RemoteApi } from '../types.js'
+import type { ClientContext, RemoteApi, SettingsJoin } from '../types.js'
 import { EffortBoundary, panelRoot } from './mount.js'
 import {
   createEditorTabsState,
@@ -136,8 +136,13 @@ export interface ModelsPageDeps {
   api: RemoteApi
   /** The plugin's locale-bound translator. */
   t: Translate
-  /** Run once per idle pass, after everything the session held back landed. */
-  onIdle: () => void
+  /**
+   * Run once per idle pass, after everything the session held back landed.
+   * The pass's own snapshot (a fresh wire read taken when the official card
+   * just closed) is handed over so a complement that needs to look at the
+   * document does not pay a second round trip for the same view.
+   */
+  onIdle: (join?: SettingsJoin) => void
   /** Wrap a subtree so it re-translates on a language switch. */
   refreshed: (children: () => ReactNode) => ReactNode
 }
@@ -302,7 +307,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
    */
   const injectorDeps: InjectorDeps = {
     api,
-    describeNamespace: () => describeNamespace(api),
+    describeNamespace: (options) => describeNamespace(api, options),
     t,
     labels,
     // The idle pass landed everything the session held back; the caller's

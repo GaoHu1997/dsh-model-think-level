@@ -469,12 +469,34 @@ export function scrollChainOf(node: HTMLElement): HTMLElement[] {
   return chain
 }
 
-/** Whether an element is a scroll container with something left to scroll. */
-function scrolls(node: HTMLElement): boolean {
-  if (node.scrollHeight <= node.clientHeight) return false
+/**
+ * Every declared scroll container that can hold `node` after layout changes,
+ * nearest first, plus the page scroller. Unlike {@link scrollChainOf}, this
+ * includes auto/scroll containers before they overflow so a card can be pinned
+ * across the same render that creates their scroll range.
+ */
+export function scrollContainerCandidatesOf(node: HTMLElement): HTMLElement[] {
+  const chain: HTMLElement[] = []
+  let current: HTMLElement | null = node.parentElement
+  while (current !== null) {
+    if (canScroll(current)) chain.push(current)
+    current = current.parentElement
+  }
+  const root = document.scrollingElement
+  if (root instanceof HTMLElement && !chain.includes(root)) chain.push(root)
+  return chain
+}
+
+/** Whether CSS allows `node` to become a scroll container. */
+function canScroll(node: HTMLElement): boolean {
   const declared = node.style.overflowY
   const overflow = declared.length > 0 ? declared : window.getComputedStyle(node).overflowY
   return overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay'
+}
+
+/** Whether an element is a scroll container with something left to scroll. */
+function scrolls(node: HTMLElement): boolean {
+  return node.scrollHeight > node.clientHeight && canScroll(node)
 }
 
 /** The pixels per frame `host` should scroll while the pointer is at `clientY`. */

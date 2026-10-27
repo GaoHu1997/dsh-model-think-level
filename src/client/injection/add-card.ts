@@ -155,7 +155,7 @@ function applyAddCard(card: HTMLElement, deps: AddCardDeps, state: AddCardState)
     // so the custom half is committed by the time it returns — mounting into it
     // now makes the bar and the form arrive in ONE frame, where the early
     // return made the form paint and then grow the bar on the visit after.
-    chooseCustomMode(card)
+    chooseCustomMode(card, () => suppressScrollAnchoring(card))
     custom = panelWithSuffix(card, CUSTOM_PANEL_SUFFIX)
     if (custom === undefined || custom.hidden) return
   }
@@ -302,7 +302,7 @@ function pickerOf(card: HTMLElement): HTMLElement | undefined {
 }
 
 /** Click the switch's custom option, unless it is already the selected one. */
-function chooseCustomMode(card: HTMLElement): void {
+function chooseCustomMode(card: HTMLElement, beforeClick: () => void): void {
   const picker = pickerOf(card)
   if (picker === undefined) return
   for (const option of Array.from(picker.querySelectorAll<HTMLButtonElement>('[role="tab"]'))) {
@@ -311,7 +311,10 @@ function chooseCustomMode(card: HTMLElement): void {
     // declare": the switch stays exactly where it is, because it is the only
     // thing on the card that says so.
     if (option.disabled) return
-    if (option.getAttribute('aria-selected') !== 'true') option.click()
+    if (option.getAttribute('aria-selected') !== 'true') {
+      beforeClick()
+      option.click()
+    }
     return
   }
 }

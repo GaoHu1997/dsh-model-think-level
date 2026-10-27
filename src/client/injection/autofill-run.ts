@@ -11,7 +11,7 @@
 import { AUTOFILL_CONFIG_PATH, PI_AI_NS } from '../../constants.js'
 import { buildAutofillPatch } from '../../autofill.js'
 import { describeNamespace, userProvidersOf } from '../ops.js'
-import type { RemoteApi } from '../types.js'
+import type { RemoteApi, SettingsJoin } from '../types.js'
 
 /** What the complement needs from its host. */
 export interface IdleAutofillDeps {
@@ -22,7 +22,7 @@ export interface IdleAutofillDeps {
 /** The complement's face. */
 export interface IdleAutofill {
   /** Run the complement; fire-and-forget on the injector's idle pass. */
-  run: () => void
+  run: (join?: SettingsJoin) => void
   /** Drop the host-switch snapshot; the next idle run reads it again. */
   invalidate: () => void
 }
@@ -73,7 +73,7 @@ export function createIdleAutofill(deps: IdleAutofillDeps): IdleAutofill {
    * host's boot pass uses (so one suggestion can never produce two different
    * documents). Runs on the idle pass only.
    */
-  const runIdleAutofill = async (): Promise<void> => {
+  const runIdleAutofill = async (seeded?: SettingsJoin): Promise<void> => {
     const runGeneration = generation
     try {
       const switches = await autofillSwitchesOf()
@@ -87,7 +87,10 @@ export function createIdleAutofill(deps: IdleAutofillDeps): IdleAutofill {
       // responding the moment the Models page opened. The scope mirror already
       // carries the resolved section, so "is there anything to fill" costs no
       // round trip and echoes nothing.
-      const join = await describeNamespace(deps.api)
+      // The idle pass hands over the snapshot it just took (a fresh wire read
+      // after the official card closed), so this pass starts from the same view
+      // for free instead of describing again.
+      const join = seeded ?? await describeNamespace(deps.api)
       const namespace = join.namespace
       if (runGeneration !== generation || namespace === undefined || join.writable !== true) return
       const userProviders = userProvidersOf(namespace)

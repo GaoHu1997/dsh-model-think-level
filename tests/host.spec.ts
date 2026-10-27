@@ -1157,379 +1157,24 @@ describe('apply() key-index route', () => {
   async function mounted(
     providers: Record<string, unknown>,
     credentials?: Store,
-  ): Promise<{ handler: (req: unknown, res: unknown) => Promise<void>; settings: ReturnType<typeof fakeSettings> }> {
+  ): Promise<{
+    handler: (req: unknown, res: unknown) => Promise<void>
+    settings: ReturnType<typeof fakeSettings>
+    /** Fire a settings event, as the host does after any document move. */
+    emitUpdated: (ns: unknown) => void
+  }> {
     const settings = fakeSettings(providers)
-    const { ctx, routes } = fakeHost(settings, credentials === undefined ? undefined : { credentials })
+    const { ctx, routes, emitUpdated } = fakeHost(settings, credentials === undefined ? undefined : { credentials })
     const { apply } = await import('../src/index.js')
     apply(ctx)
     const handler = routes.get(INDEX_PATH)
     expect(handler).toBeDefined()
-    return { handler: handler!, settings }
+    return { handler: handler!, settings, emitUpdated }
   }
 
-  it('fetches the native model listing with every key protocol and merges the results', async () => {
-    writeKeyIndex({
-      version: 1,
-      providers: {
-        aliyun: [
-          { ref: 'ALIYUN_KEY' },
-          { ref: 'ANTHROPIC_KEY', protocol: 'anthropic-messages' },
-        ],
-      },
-      endpoints: { aliyun: { anthropic: 'https://anth.example.com/v1' } },
-    }, indexFile())
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-openai', ANTHROPIC_KEY: 'sk-anthropic' })
-    const requests: Array<{ url: string; headers: Headers }> = []
-    const originalFetch = globalThis.fetch
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
-      requests.push({ url, headers: new Headers(init?.headers) })
-      const id = url.includes('anth.example.com') ? 'claude-model' : 'qwen-model'
-      return new Response(JSON.stringify({ data: [{ id }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    })
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
-    const settings = fakeSettings({ aliyun: { ...profile, headers: { 'x-account': 'tenant-a' } } })
-    const { ctx, dispose } = fakeHost(settings, { credentials })
-    try {
-      const { apply } = await import('../src/index.js')
-      apply(ctx, { autofill: false })
-      const response = await globalThis.fetch('https://gw.example.com/v1/models', {
-        headers: { authorization: 'Bearer route-default', 'x-attribution': 'sdk' },
-      })
-      const body = await response.json() as { data: Array<{ id: string }> }
-
-      // The merged catalogue reads in one natural id order, not key order —
-      // the claude-model from the second key sorts beside the qwen-model.
-      expect(body.data.map(model => model.id)).toEqual(['claude-model', 'qwen-model'])
-      // The unpinned key is AUTOMATIC, so it is asked on the route's wire AND on
-      // the Anthropic family's address it could dispatch on; the pinned key is
-      // asked on its own wire alone. The targets of one key are independent
-      // listings and run together, so each key's requests land as a group —
-      // which is asserted by content rather than by index.
-      expect(requests).toHaveLength(3)
-      const routeWire = requests.filter(request => request.url === 'https://gw.example.com/v1/models')
-      const anthropicWire = requests.filter(request => request.url === 'https://anth.example.com/v1/models?limit=1000')
-      expect(routeWire).toHaveLength(1)
-      expect(routeWire[0]?.headers.get('authorization')).toBe('Bearer sk-openai')
-      expect(anthropicWire).toHaveLength(2)
-      expect(anthropicWire.map(request => request.headers.get('x-api-key')).sort()).toEqual(['sk-anthropic', 'sk-openai'])
-      for (const request of anthropicWire) {
-        // The Anthropic arm carries its own key and never a Bearer.
-        expect(request.headers.get('authorization')).toBeNull()
-      }
-      expect(requests.map(request => request.headers.get('x-attribution'))).toEqual(['sdk', 'sdk', 'sdk'])
-      expect(requests.map(request => request.headers.get('x-account'))).toEqual(['tenant-a', 'tenant-a', 'tenant-a'])
-    } finally {
-      dispose()
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('merges the cross-family endpoints into a single listed key\'s listing', async () => {
-    // One listed key, two addresses: the plain GET would ask only the route's
-    // own wire, so the models of the other family would never appear (报告:
-    // 单个密钥 + 多端点,获取模型只拿到供应商协议的模型).
-    writeKeyIndex({
-      version: 1,
-      providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] },
-      endpoints: { aliyun: { anthropic: 'https://anth.example.com/v1' } },
-    }, indexFile())
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-openai' })
-    const requests: Array<{ url: string; headers: Headers }> = []
-    const originalFetch = globalThis.fetch
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
-      requests.push({ url, headers: new Headers(init?.headers) })
-      const id = url.includes('anth.example.com') ? 'claude-model' : 'qwen-model'
-      return new Response(JSON.stringify({ data: [{ id }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    })
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
-    const settings = fakeSettings({ aliyun: profile })
-    const { ctx, dispose } = fakeHost(settings, { credentials })
-    try {
-      const { apply } = await import('../src/index.js')
-      apply(ctx, { autofill: false })
-      const response = await globalThis.fetch('https://gw.example.com/v1/models')
-      const body = await response.json() as { data: Array<{ id: string }> }
-
-      expect(body.data.map(model => model.id)).toEqual(['claude-model', 'qwen-model'])
-      // The single key is AUTOMATIC: it is asked on the route's wire and on the
-      // Anthropic family's address it could dispatch on — one key, both wires.
-      expect(requests).toHaveLength(2)
-      expect(requests[0]?.url).toBe('https://gw.example.com/v1/models')
-      expect(requests[0]?.headers.get('authorization')).toBe('Bearer sk-openai')
-      expect(requests[1]?.url).toBe('https://anth.example.com/v1/models?limit=1000')
-      expect(requests[1]?.headers.get('x-api-key')).toBe('sk-openai')
-      expect(requests[1]?.headers.get('authorization')).toBeNull()
-    } finally {
-      dispose()
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('serves a repeated listing from the catalogue cache instead of re-probing every key', async () => {
-    // The harness re-requests `/models` on reconnect and on refresh, and each
-    // request used to re-probe every key of the route: two keys of a slow
-    // gateway made the second refresh as slow as the first.
-    writeKeyIndex({
-      version: 1,
-      providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
-    }, indexFile())
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-one', ALIYUN_KEY_2: 'sk-two' })
-    const originalFetch = globalThis.fetch
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const authorization = new Headers(init?.headers).get('authorization')
-      const id = authorization === 'Bearer sk-two' ? 'zeta-model' : 'alpha-model'
-      return new Response(JSON.stringify({ data: [{ id }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    })
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
-    const settings = fakeSettings({ aliyun: profile })
-    const { ctx, dispose } = fakeHost(settings, { credentials })
-    try {
-      const { apply } = await import('../src/index.js')
-      apply(ctx, { autofill: false })
-      const first = await globalThis.fetch('https://gw.example.com/v1/models')
-      const firstBody = await first.json() as { data: Array<{ id: string }> }
-      const second = await globalThis.fetch('https://gw.example.com/v1/models')
-      const secondBody = await second.json() as { data: Array<{ id: string }> }
-
-      expect(firstBody.data.map(model => model.id)).toEqual(['alpha-model', 'zeta-model'])
-      expect(secondBody.data.map(model => model.id)).toEqual(['alpha-model', 'zeta-model'])
-      // One probe per key, not one per refresh: the second GET is a memory read.
-      expect(fetchMock).toHaveBeenCalledTimes(2)
-    } finally {
-      dispose()
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('keeps a key\'s last known models when its next probe stops answering', async () => {
-    // The intermittency the user reported: two keys, one of them answers a
-    // refresh and the other times out or is rate limited — the catalogue then
-    // showed ONE key's models, and the other key's models vanished until a
-    // later refresh happened to succeed. A key that answered once keeps its
-    // models through a failed pass.
-    writeKeyIndex({
-      version: 1,
-      providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
-    }, indexFile())
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-one', ALIYUN_KEY_2: 'sk-two' })
-    const originalFetch = globalThis.fetch
-    let secondKeyFails = false
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const authorization = new Headers(init?.headers).get('authorization')
-      if (secondKeyFails && authorization === 'Bearer sk-two') {
-        return new Response(JSON.stringify({ error: { message: 'rate limited' } }), { status: 429 })
-      }
-      const id = authorization === 'Bearer sk-two' ? 'zeta-model' : 'alpha-model'
-      return new Response(JSON.stringify({ data: [{ id }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    })
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
-    const settings = fakeSettings({ aliyun: profile })
-    const { ctx, dispose, emitUpdated } = fakeHost(settings, { credentials })
-    try {
-      const { apply } = await import('../src/index.js')
-      apply(ctx, { autofill: false })
-      const first = await globalThis.fetch('https://gw.example.com/v1/models')
-      const firstBody = await first.json() as { data: Array<{ id: string }> }
-      expect(firstBody.data.map(model => model.id)).toEqual(['alpha-model', 'zeta-model'])
-
-      // A settings write drops the catalogue cache, so the next GET is a real
-      // probe again — and that probe now loses one of the two keys.
-      secondKeyFails = true
-      emitUpdated('llm-pi-ai')
-      const second = await globalThis.fetch('https://gw.example.com/v1/models')
-      const secondBody = await second.json() as { data: Array<{ id: string }> }
-
-      expect(secondBody.data.map(model => model.id)).toEqual(['alpha-model', 'zeta-model'])
-      // Both keys were asked on the second pass: the failing one takes part, it
-      // simply contributes its remembered models instead of a fresh answer.
-      expect(fetchMock).toHaveBeenCalledTimes(4)
-    } finally {
-      dispose()
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('covers the cross-family endpoints for the unlisted seat key too', async () => {
-    // The provider's own configured key — never listed in the panel — is an
-    // automatic key like any other: without the route's endpoints riding
-    // along, a single-key provider would neither list nor route the families
-    // whose addresses the user configured.
-    writeKeyIndex({
-      version: 1,
-      providers: {},
-      endpoints: { aliyun: { anthropic: 'https://anth.example.com/v1' } },
-    }, indexFile())
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-openai' })
-    const requests: string[] = []
-    const originalFetch = globalThis.fetch
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
-      requests.push(url)
-      const id = url.includes('anth.example.com') ? 'claude-model' : 'qwen-model'
-      return new Response(JSON.stringify({ data: [{ id }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    })
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
-    const settings = fakeSettings({ aliyun: profile })
-    const { ctx, dispose } = fakeHost(settings, { credentials })
-    try {
-      const { apply } = await import('../src/index.js')
-      apply(ctx, { autofill: false })
-      const response = await globalThis.fetch('https://gw.example.com/v1/models')
-      const body = await response.json() as { data: Array<{ id: string }> }
-
-      expect(body.data.map(model => model.id)).toEqual(['claude-model', 'qwen-model'])
-      expect(requests).toEqual([
-        'https://gw.example.com/v1/models',
-        'https://anth.example.com/v1/models?limit=1000',
-      ])
-    } finally {
-      dispose()
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('offers the models the keys advertise but the provider does not declare', async () => {
-    // Two keys, different scopes, and the provider itself declares only one of
-    // the models they serve: the merged catalogue is what a picker should show,
-    // and `unmergedModels` is exactly the part the provider cannot see yet.
-    writeKeyIndex({
-      version: 1,
-      providers: {
-        aliyun: [
-          { ref: 'ALIYUN_KEY', models: ['qwen-model', 'glm-4'] },
-          { ref: 'ALIYUN_KEY_2', models: ['glm-4', 'kimi-k2'] },
-        ],
-      },
-    }, indexFile())
-    const { handler } = await mounted(
-      { aliyun: { ...profile, models: [{ id: 'qwen-model', name: 'Qwen Model' }] } },
-      credentialStore({ ALIYUN_KEY: 'sk-a', ALIYUN_KEY_2: 'sk-b' }),
-    )
-
-    const { res, out } = fakeRes()
-    await handler(fakeReq(), res)
-
-    expect(out().status).toBe(200)
-    expect(out().body['models']).toEqual(['qwen-model'])
-    expect(out().body['mergedModels']).toEqual(['glm-4', 'kimi-k2', 'qwen-model'])
-    expect(out().body['unmergedModels']).toEqual(['glm-4', 'kimi-k2'])
-  })
-
-  it('adds the undeclared models to the provider only when the panel asks', async () => {
-    writeKeyIndex({
-      version: 1,
-      providers: {
-        aliyun: [
-          { ref: 'ALIYUN_KEY', models: ['qwen-model', 'glm-4'] },
-          { ref: 'ALIYUN_KEY_2', models: ['kimi-k2', 'glm-4'] },
-        ],
-      },
-    }, indexFile())
-    const { handler, settings } = await mounted(
-      { aliyun: { ...profile, models: [{ id: 'qwen-model', name: 'Qwen Model' }] } },
-      credentialStore({ ALIYUN_KEY: 'sk-a', ALIYUN_KEY_2: 'sk-b' }),
-    )
-
-    // Reading the list writes nothing: the offer is the panel's to accept.
-    const read = fakeRes()
-    await handler(fakeReq(), read.res)
-    expect(settings.mutations).toHaveLength(0)
-
-    const applied = fakeRes()
-    await handler(fakeReq({ method: 'POST', body: { op: 'applyMerged' } }), applied.res)
-
-    expect(applied.out().status).toBe(200)
-    expect(settings.mutations).toHaveLength(1)
-    // The declared entry keeps its display name and its seat; the undeclared ids
-    // are appended as bare ids, in first-advertised order.
-    expect(settings.providers()?.['aliyun']).toEqual({
-      ...profile,
-      models: [
-        { id: 'qwen-model', name: 'Qwen Model' },
-        { id: 'glm-4' },
-        { id: 'kimi-k2' },
-      ],
-    })
-    const entries = applied.out().body['entries'] as Array<Record<string, unknown>>
-    expect(applied.out().body['models']).toEqual(['qwen-model', 'glm-4', 'kimi-k2'])
-    expect(applied.out().body['unmergedModels']).toBeUndefined()
-    expect(entries).toHaveLength(2)
-  })
-
-  it('does not write again once every advertised model is declared', async () => {
-    writeKeyIndex({
-      version: 1,
-      providers: { aliyun: [{ ref: 'ALIYUN_KEY', models: ['qwen-model'] }] },
-    }, indexFile())
-    const { handler, settings } = await mounted(
-      { aliyun: { ...profile, models: [{ id: 'qwen-model' }] } },
-      credentialStore({ ALIYUN_KEY: 'sk-a' }),
-    )
-
-    const { res, out } = fakeRes()
-    await handler(fakeReq({ method: 'POST', body: { op: 'applyMerged' } }), res)
-
-    expect(out().status).toBe(200)
-    expect(settings.mutations).toHaveLength(0)
-    expect(out().body['unmergedModels']).toBeUndefined()
-  })
-
-  it('re-reads once when the document moved before the merger could write', async () => {
-    // The official card and this panel can save at the same time; the merge is a
-    // convenience, so it retries the write instead of showing a conflict.
-    writeKeyIndex({
-      version: 1,
-      providers: { aliyun: [{ ref: 'ALIYUN_KEY', models: ['glm-4'] }] },
-    }, indexFile())
-    const { handler, settings } = await mounted(
-      { aliyun: { ...profile, models: [{ id: 'qwen-model' }] } },
-      credentialStore({ ALIYUN_KEY: 'sk-a' }),
-    )
-    settings.failNextMutation(1)
-
-    const { res, out } = fakeRes()
-    await handler(fakeReq({ method: 'POST', body: { op: 'applyMerged' } }), res)
-
-    expect(out().status).toBe(200)
-    expect(settings.mutations).toHaveLength(1)
-    expect((settings.providers()?.['aliyun'] as { models: unknown[] }).models).toEqual([
-      { id: 'qwen-model' },
-      { id: 'glm-4' },
-    ])
-  })
-
-  it('refuses to merge before any key has had its models detected', async () => {
-    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
-    const { handler, settings } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'sk-a' }))
-
-    const { res, out } = fakeRes()
-    await handler(fakeReq({ method: 'POST', body: { op: 'applyMerged' } }), res)
-
-    expect(out().status).toBe(400)
-    expect(String(out().body['error'])).toContain('no key models have been detected')
-    expect(settings.mutations).toHaveLength(0)
-  })
-
   it('leaves a switched-off key out of the key pool entirely', async () => {
-    // The listing probe is the one visible consumer of the pool: a key switched
-    // off on its row must not be asked for models, let alone sign anything.
+    // A key switched off on its row must not be asked for anything, let alone
+    // sign anything: it is out of the pool the request path resolves.
     writeKeyIndex({
       version: 1,
       providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'SPARE', disabled: true }] },
@@ -1550,9 +1195,9 @@ describe('apply() key-index route', () => {
       const { apply } = await import('../src/index.js')
       apply(ctx, { autofill: false })
       await globalThis.fetch('https://gw.example.com/v1/models', {
-        headers: { authorization: 'Bearer route-default' },
+        headers: { authorization: 'Bearer sk-openai' },
       })
-      // Only the enabled key was resolved and probed; the paused one stayed home.
+      // Only the enabled key was resolved and asked; the paused one stayed home.
       expect(requests).toHaveLength(1)
       expect(requests[0]?.headers.get('authorization')).toBe('Bearer sk-openai')
     } finally {
@@ -1572,6 +1217,7 @@ describe('apply() key-index route', () => {
     expect(reply.status).toBe(200)
     expect(headers['cache-control']).toBe('no-store')
     expect(reply.body['route']).toBe('aliyun')
+    expect(reply.body).not.toHaveProperty('addedRef')
     // The value can be read, so the row carries its display form as well.
     expect(reply.body['entries']).toEqual([
       { ref: 'ALIYUN_KEY', enabled: true, configured: true, masked: maskKeyValue('sk-secret') },
@@ -1638,6 +1284,91 @@ describe('apply() key-index route', () => {
     expect(entries[0]).not.toHaveProperty('masked')
   })
 
+  it('limits legacy manual selections to the models the provider has added', async () => {
+    // A scope may name models the provider has since dropped from its list: the
+    // payload shows only the assignment inside today's universe, while the
+    // stored assignment itself is never rewritten.
+    writeKeyIndex({ version: 1, providers: { aliyun: [{
+      ref: 'ALIYUN_KEY', models: ['chosen', 'legacy-unadded'],
+    }] } }, indexFile())
+    const { handler } = await mounted({ aliyun: { ...profile, models: [{ id: 'chosen' }] } }, credentialStore({ ALIYUN_KEY: 'fake-key' }))
+    const answer = fakeRes()
+    await handler(fakeReq(), answer.res)
+    expect(answer.out().body['entries']).toEqual([
+      expect.objectContaining({ models: ['chosen'] }),
+    ])
+    expect(readKeyIndex(indexFile()).providers['aliyun']?.[0]?.models).toEqual(['chosen', 'legacy-unadded'])
+  })
+
+  it('reads credential previews concurrently instead of adding one delay per key', async () => {
+    const refs = ['ALIYUN_KEY', ...Array.from({ length: 11 }, (_, index) => 'SPARE_' + index)]
+    writeKeyIndex({ version: 1, providers: { aliyun: refs.map(ref => ({ ref })) } }, indexFile())
+    const resolve = vi.fn(async () => await new Promise<{ value: string }>(done => setTimeout(() => done({ value: 'fake-preview-value' }), 50)))
+    const describe = vi.fn(async (asked: string[]) => await new Promise<unknown>(done => setTimeout(() => done(Object.fromEntries(asked.map(ref => [ref, { configured: true }]))), 50)))
+    const { handler } = await mounted({ aliyun: profile }, { resolve, describe })
+    vi.useFakeTimers()
+    try {
+      const answer = fakeRes()
+      const pending = handler(fakeReq(), answer.res)
+      expect(resolve).toHaveBeenCalledTimes(refs.length)
+      expect(describe).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(50)
+      await pending
+      expect(answer.out().status).toBe(200)
+      expect(answer.out().body['entries']).toHaveLength(refs.length)
+      expect(answer.out().body['entries']).toEqual(refs.map(ref => ({
+        ref, enabled: true, configured: true, masked: maskKeyValue('fake-preview-value'),
+      })))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('returns the list at its display deadline even when a store read never settles', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'STALLED' }] } }, indexFile())
+    const { handler } = await mounted({ aliyun: profile }, {
+      async resolve(ref) { return ref === 'STALLED' ? await new Promise<undefined>(() => {}) : { value: 'fake-readable' } },
+      async describe() { return await new Promise<unknown>(() => {}) },
+    })
+    vi.useFakeTimers()
+    try {
+      const answer = fakeRes()
+      const pending = handler(fakeReq(), answer.res)
+      await vi.advanceTimersByTimeAsync(250)
+      await pending
+      expect(answer.out().status).toBe(200)
+      expect(answer.out().body['entries']).toEqual([
+        { ref: 'ALIYUN_KEY', enabled: true, configured: true, masked: maskKeyValue('fake-readable') },
+        { ref: 'STALLED', enabled: true, configured: null },
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('releases a committed mutation before waiting for display-only credential previews', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
+    const { handler } = await mounted({ aliyun: profile }, { async resolve() { return await new Promise<undefined>(() => {}) } })
+    vi.useFakeTimers()
+    try {
+      const first = fakeRes()
+      const firstPending = handler(fakeReq({ method: 'POST', body: { op: 'rename', ref: 'ALIYUN_KEY', alias: 'first' } }), first.res)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(readKeyIndex(indexFile()).providers['aliyun']?.[0]?.alias).toBe('first')
+      const second = fakeRes()
+      const secondPending = handler(fakeReq({ method: 'POST', body: { op: 'rename', ref: 'ALIYUN_KEY', alias: 'second' } }), second.res)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(readKeyIndex(indexFile()).providers['aliyun']?.[0]?.alias).toBe('second')
+      expect(first.out().status).toBe(0)
+      await vi.advanceTimersByTimeAsync(250)
+      await Promise.all([firstPending, secondPending])
+      expect(first.out().status).toBe(200)
+      expect(second.out().status).toBe(200)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('reports a route the settings do not name', async () => {
     const { handler } = await mounted({ aliyun: profile })
 
@@ -1691,6 +1422,7 @@ describe('apply() key-index route', () => {
 
     const reply = out()
     expect(reply.status).toBe(200)
+    expect(reply.body['addedRef']).toBe('ALIYUN_API_KEY')
     expect(credentials.values['ALIYUN_API_KEY']).toBe('sk-spare')
     expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_API_KEY', alias: 'spare' }])
     // The new key is listed first, so a model both keys serve is signed with it
@@ -1699,6 +1431,30 @@ describe('apply() key-index route', () => {
       { ref: 'ALIYUN_API_KEY', enabled: true, configured: true, alias: 'spare', masked: maskKeyValue('sk-spare') },
       { ref: 'ALIYUN_KEY', enabled: true, configured: true, masked: maskKeyValue('sk-secret') },
     ])
+  })
+
+  it('adopts the exact key the official form already saved without duplicating its credential', async () => {
+    const credentials = credentialStore({ ALIYUN_KEY: 'fake-created' })
+    const set = vi.spyOn(credentials, 'set')
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+    for (const body of [
+      { op: 'add', value: 'fake-created', alias: 'first draft' },
+      { op: 'protocol', ref: 'ALIYUN_KEY', protocol: 'openai-responses' },
+      { op: 'add', value: 'fake-created', alias: 'first draft' },
+    ]) {
+      const answer = fakeRes()
+      await handler(fakeReq({ method: 'POST', body }), answer.res)
+      expect(answer.out().status).toBe(200)
+      expect(answer.out().body['entries']).toHaveLength(1)
+      if (body.op === 'add') expect(answer.out().body['addedRef']).toBe('ALIYUN_KEY')
+      else expect(answer.out().body).not.toHaveProperty('addedRef')
+    }
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{
+      ref: 'ALIYUN_KEY', alias: 'first draft', protocol: 'openai-responses',
+    }])
+    expect(set).not.toHaveBeenCalled()
+    expect(settings.mutations).toHaveLength(0)
+    expect(Object.keys(credentials.values)).toEqual(['ALIYUN_KEY'])
   })
 
   it('makes the first key on a route that names none the one in use', async () => {
@@ -1876,11 +1632,54 @@ describe('apply() key-index route', () => {
   })
 
   it('reports settings outages rather than a nonexistent route', async () => {
-    const { handler, settings } = await mounted({ aliyun: profile }, credentialStore())
+    const { handler, settings, emitUpdated } = await mounted({ aliyun: profile }, credentialStore())
     settings.describe = () => { throw new Error('unavailable') }
+    // A list read renders the profile from the section the guard and probe
+    // routes cache -- the page repaints this list once per card per second, and
+    // a fresh describe per repaint is what put an opened card behind seconds of
+    // queued settings reads. That cache is dropped on every document update,
+    // which is the one moment a read has to reach the service; an outage there
+    // must still be reported as an outage, never as "this provider is gone".
+    emitUpdated('llm-pi-ai')
     const { res, out } = fakeRes()
     await handler(fakeReq(), res)
     expect(out().status).toBe(502)
+  })
+
+  it('answers a list read from the cached section instead of describing again', async () => {
+    const { handler, settings } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'sk-one' }))
+    const describe = vi.spyOn(settings, 'describe')
+    // The page hydrates one card per second; each of those reads used to call
+    // `describe()`, a call the settings service serialises across the host.
+    for (let round = 0; round < 5; round += 1) {
+      const { res, out } = fakeRes()
+      await handler(fakeReq(), res)
+      expect(out().status).toBe(200)
+    }
+    expect(describe).not.toHaveBeenCalled()
+  })
+
+  it('answers the address pair without reading settings or any key value', async () => {
+    writeKeyIndex({
+      version: 1,
+      providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] },
+      endpoints: { aliyun: { openai: 'https://openai.example.com/v1', anthropic: 'https://anthropic.example.com' } },
+    }, indexFile())
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-secret' })
+    const resolve = vi.spyOn(credentials, 'resolve')
+    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+    const describe = vi.spyOn(settings, 'describe')
+    const { res, out } = fakeRes()
+    await handler(fakeReq({ url: '?route=aliyun&op=endpoints' }), res)
+    expect(out().status).toBe(200)
+    expect(out().body['endpoints']).toEqual({
+      openai: 'https://openai.example.com/v1',
+      anthropic: 'https://anthropic.example.com',
+    })
+    // This is the hydration the page repeats for every visible card; it must
+    // stay a file read, not a settings read plus one credential resolve a key.
+    expect(describe).not.toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
   })
 
   it('rolls back a new key when activating the first key fails', async () => {
@@ -1957,7 +1756,7 @@ describe('apply() key-index route', () => {
   it('records a model scope for a listed key without moving it in the list', async () => {
     writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] } }, indexFile())
     const credentials = credentialStore({ ALIYUN_KEY: 'a', ALIYUN_KEY_2: 'b' })
-    const { handler, settings } = await mounted({ aliyun: profile }, credentials)
+    const { handler, settings } = await mounted({ aliyun: { ...profile, models: [{"id":"glm-4"},{"id":"glm-4-air"}] } }, credentials)
 
     const { res, out } = fakeRes()
     await handler(fakeReq({ method: 'POST', body: { op: 'scope', ref: 'ALIYUN_KEY', models: ['glm-4', 'glm-4-air'] } }), res)
@@ -1979,7 +1778,7 @@ describe('apply() key-index route', () => {
       indexFile(),
     )
     const credentials = credentialStore({ ALIYUN_KEY: 'a' })
-    const { handler } = await mounted({ aliyun: profile }, credentials)
+    const { handler } = await mounted({ aliyun: { ...profile, models: [{"id":"glm-4"},{"id":"glm-4-flash"}] } }, credentials)
 
     const scoped = fakeRes()
     await handler(
@@ -1993,6 +1792,55 @@ describe('apply() key-index route', () => {
     await handler(fakeReq({ method: 'POST', body: { op: 'scope', ref: 'ALIYUN_KEY' } }), cleared.res)
     expect(cleared.out().status).toBe(200)
     expect(readKeyIndex(indexFile()).providers['aliyun']?.[0]).toEqual({ ref: 'ALIYUN_KEY' })
+  })
+
+  it('refuses unadded models without changing manual assignments', async () => {
+    const document = { version: 1 as const, providers: { aliyun: [{
+      ref: 'ALIYUN_KEY', models: ['chosen'],
+    }] } }
+    writeKeyIndex(document, indexFile())
+    const { handler } = await mounted({ aliyun: { ...profile, models: [{ id: 'chosen' }] } }, credentialStore({ ALIYUN_KEY: 'fake-key' }))
+    const answer = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { op: 'scope', ref: 'ALIYUN_KEY', models: ['unadded'] } }), answer.res)
+    expect(answer.out().status).toBe(400)
+    expect(String(answer.out().body['error'])).toContain('already added')
+    expect(readKeyIndex(indexFile())).toEqual(document)
+  })
+
+  it.each([
+    [{ op: 'scope', ref: 'ALIYUN_KEY', models: ['chosen'] }, { models: ['chosen'] }],
+    [{ op: 'protocol', ref: 'ALIYUN_KEY', protocol: 'openai-responses' }, { protocol: 'openai-responses' }],
+  ])('keeps the first metadata edit for an unlisted official seat: %j', async (body, expected) => {
+    const { handler } = await mounted({ aliyun: { ...profile, models: [{ id: 'chosen' }] } }, credentialStore({ ALIYUN_KEY: 'fake-key' }))
+    const answer = fakeRes()
+    await handler(fakeReq({ method: 'POST', body }), answer.res)
+    expect(answer.out().status).toBe(200)
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY', ...expected }])
+  })
+
+  it('commits key metadata and value saves without a single remote request', async () => {
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(async () => { throw new Error('No remote request belongs to a key save') })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    try {
+      const { handler, settings } = await mounted({ aliyun: { ...profile, models: [{ id: 'chosen' }] } }, credentialStore({ ALIYUN_KEY: 'fake-key' }))
+      for (const body of [
+        { op: 'scope', ref: 'ALIYUN_KEY', models: ['chosen'] },
+        { op: 'rename', ref: 'ALIYUN_KEY', alias: 'renamed' },
+        { op: 'protocol', ref: 'ALIYUN_KEY', protocol: 'openai-responses' },
+        { op: 'endpoints', endpoints: { anthropic: 'https://anth.example.com/v1' } },
+        { op: 'value', ref: 'ALIYUN_KEY', value: 'fake-replacement' },
+      ]) {
+        const answer = fakeRes()
+        await handler(fakeReq({ method: 'POST', body }), answer.res)
+        expect(answer.out().status).toBe(200)
+      }
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(settings.mutations).toHaveLength(0)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   it('refuses to scope, rename or remove a key the provider does not list', async () => {
@@ -2163,6 +2011,8 @@ describe('apply() key-index route', () => {
     writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
     const { handler } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'a' }))
 
+    // A client still carrying a legacy Gemini field has it ignored on the way
+    // in: the provider keeps two families now, OpenAI and Anthropic.
     const saved = fakeRes()
     await handler(
       fakeReq({
@@ -2180,19 +2030,17 @@ describe('apply() key-index route', () => {
     expect(readKeyIndex(indexFile()).endpoints?.['aliyun']).toEqual({
       openai: 'https://openai.example/v1',
       anthropic: 'https://anthropic.example',
-      gemini: 'https://gemini.example/v1beta',
     })
     expect(saved.out().body['endpoints']).toEqual({
       openai: 'https://openai.example/v1',
       anthropic: 'https://anthropic.example',
-      gemini: 'https://gemini.example/v1beta',
     })
 
     // Clearing one side drops only that side.
     const partial = fakeRes()
-    await handler(fakeReq({ method: 'POST', body: { op: 'endpoints', openai: '', anthropic: 'https://anthropic.example', gemini: 'https://gemini.example/v1beta' } }), partial.res)
+    await handler(fakeReq({ method: 'POST', body: { op: 'endpoints', openai: '', anthropic: 'https://anthropic.example' } }), partial.res)
     expect(partial.out().status).toBe(200)
-    expect(readKeyIndex(indexFile()).endpoints?.['aliyun']).toEqual({ anthropic: 'https://anthropic.example', gemini: 'https://gemini.example/v1beta' })
+    expect(readKeyIndex(indexFile()).endpoints?.['aliyun']).toEqual({ anthropic: 'https://anthropic.example' })
   })
 
   it('reports a resting key cooldown in the list payload', async () => {

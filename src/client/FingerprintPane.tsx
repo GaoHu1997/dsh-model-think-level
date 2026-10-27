@@ -18,6 +18,7 @@
 
 import { createElement, useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import { estimateRun, type RunEstimate } from '../fingerprint/estimate.js'
 import { isEligibleModel } from '../fingerprint/eligibility.js'
 import { FULL_RUN_QUERIES, type FingerprintRecord } from '../fingerprint/verdict.js'
 import { modelsOf } from '../shared.js'
@@ -66,6 +67,18 @@ function seconds(ms: number | undefined): string {
   return (Math.round(ms / 100) / 10).toFixed(1)
 }
 
+/**
+ * 未检测行的成本提示：题数 + 这家供应商测过之后的大致耗时。
+ *
+ * 没有历史就只说题数（`fpCostUnknown`）—— 没测过却报一个秒数，是在替上游
+ * 打包票，而这次可能正是排队高峰。
+ */
+function cost(t: Translate, estimate: RunEstimate | undefined): string {
+  if (estimate === undefined) return t('fpCostUnknown', { count: FULL_RUN_QUERIES })
+  if (estimate.unit === 'minutes') return t('fpCostMinutes', { count: FULL_RUN_QUERIES, minutes: estimate.value })
+  return t('fpCost', { count: FULL_RUN_QUERIES, seconds: estimate.value })
+}
+
 /** 一家供应商的指纹检测面板。 */
 export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPaneProps): ReactNode {
   // 新增供应商卡片整个不出现（m00883）。判定放在这里而不是只放在页签可用性
@@ -78,13 +91,14 @@ export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPanePro
   /** 运输层失败：没有记录可看，只能把原因说出来。 */
   const [runError, setRunError] = useState<{ model: string; error: string } | undefined>(undefined)
   /**
-   * 每行结果卡的折叠状态（用户需求 2：检测结果需要可以折叠）。默认全部展开
-   * —— 行数少时信息一屏可读，行为与旧版一致；用户逐行收起是显式动作。折叠
-   * 的只是结果卡：行头的徽章、证据行与检测按钮始终在场。
+   * 每行结果卡的展开状态（用户需求 2：检测结果需要可以折叠；m00003：相似度
+   * 移进展开内容，且默认不展开）。默认全部收起 —— 行头一行就够回答「测出来
+   * 了吗」，相似度等明细住在展开的结果卡里；逐行展开是显式动作。收起的只是
+   * 结果卡：行头的徽章、证据行与检测按钮始终在场。
    */
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const toggleRow = useCallback((model: string): void => {
-    setCollapsed((current) => {
+    setExpanded((current) => {
       const next = new Set(current)
       if (next.has(model)) next.delete(model)
       else next.add(model)
@@ -164,6 +178,8 @@ export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPanePro
   const failed = rows.filter((row) => records.get(row.model)?.status === 'failed').length
   const busy = runnerState.running.size > 0
   const pending = runnerState.running.size + runnerState.queued.length
+  /** 未检测行的「约 X 秒」：按这家供应商已测出的耗时估，没测过就不报秒数。 */
+  const estimate = useMemo(() => estimateRun([...records.values()]), [records])
 
   return createElement(
     'div',
@@ -216,7 +232,7 @@ export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPanePro
     createElement(
       'div',
       { className: 'bre-fp-rows' },
-      ...rows.map((row) => renderRow(row, { t, runner, runnerState, records, route, collapsed, onToggle: toggleRow })),
+      ...rows.map((row) => renderRow(row, { t, runner, runnerState, records, route, expanded, estimate, onToggle: toggleRow })),
     ),
   )
 }
@@ -227,8 +243,10 @@ interface RowDeps {
   runnerState: FingerprintRunnerState
   records: ReadonlyMap<string, FingerprintRecord>
   route: string
-  /** The models whose result card is folded away. */
-  collapsed: ReadonlySet<string>
+  /** The models whose result card is unfolded. */
+  expanded: ReadonlySet<string>
+  /** 这家供应商已测出的大致耗时，提示未检测行要等多久。 */
+  estimate: RunEstimate | undefined
   /** Fold or unfold one model's result card. */
   onToggle: (model: string) => void
 }
@@ -255,13 +273,13 @@ function chevron(open: boolean): ReactNode {
 }
 
 function renderRow(row: Row, deps: RowDeps): ReactNode {
-  const { t, runner, runnerState, records, collapsed, onToggle } = deps
+  const { t, runner, runnerState, records, expanded, estimate, onToggle } = deps
   const record = records.get(row.model)
   const done = runnerState.running.get(row.model)
   const position = runnerState.queued.indexOf(row.model)
   const running = done !== undefined
   const queued = position >= 0
-  const open = !collapsed.has(row.model)
+  const open = expanded.has(row.model)
 
   const badge = running
     ? { className: 'is-running', text: t('fpStateRunning', { done, total: FULL_RUN_QUERIES }) }
@@ -314,11 +332,10 @@ function renderRow(row: Row, deps: RowDeps): ReactNode {
         'span',
         { className: 'bre-fp-evidence' },
         record === undefined
-          ? t('fpCost', { count: FULL_RUN_QUERIES, seconds: 15 })
+          ? cost(t, estimate)
           : t('fpEvidence', {
               used: record.usedOutputs,
               total: FULL_RUN_QUERIES,
-              similarity: percent(record.top?.[0]?.similarity),
             }),
       ),
       createElement(
@@ -344,7 +361,7 @@ function renderRow(row: Row, deps: RowDeps): ReactNode {
   )
 }
 
-/** 结果卡：家族占比、前三候选、耗时画像、闭集告警。 */
+/** 结果卡：家族占比、相似度、前三候选、耗时画像、闭集告警。 */
 function renderResult(record: FingerprintRecord, t: Translate): ReactNode {
   const top = record.top ?? []
   const timing = record.timing
@@ -360,6 +377,10 @@ function renderResult(record: FingerprintRecord, t: Translate): ReactNode {
         { className: 'bre-fp-v' },
         `${record.familyPrediction ?? '—'} · ${percent(record.familyProbability)}`,
       ),
+      // 相似度住在结果卡里（m00003）：行头一行放不下它，而它是"第一名像到
+      // 什么程度"的明细，展开后才需要读。
+      createElement('span', { className: 'bre-fp-k' }, t('fpSimilarity')),
+      createElement('span', { className: 'bre-fp-v' }, percent(record.top?.[0]?.similarity)),
       createElement('span', { className: 'grow' }),
       createElement('span', { className: 'bre-fp-k' }, t('fpCheckedAt', { time: clock(record.checkedAt) })),
     ),

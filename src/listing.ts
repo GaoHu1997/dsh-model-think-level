@@ -20,18 +20,14 @@ export const ANTHROPIC_VERSION = '2023-06-01'
 /** Largest model-list page accepted by Anthropic's public endpoint. */
 export const ANTHROPIC_MODEL_LIMIT = 1000
 
-/** Largest model-list page requested of Gemini's native endpoint. */
-export const GEMINI_MODEL_LIMIT = 1000
-
 /** Largest listing reply a probe accepts (the official discovery's bound). */
 export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
-/** Protocols whose model listing this module can read (the harness discovery set, plus the plugin's pinned Gemini). */
+/** Protocols whose model listing this module can read (the harness discovery set). */
 export const LISTABLE_PROTOCOLS: ReadonlySet<string> = new Set([
   'anthropic-messages',
   'openai-completions',
   'openai-responses',
-  'google-generative-ai',
 ])
 
 /**
@@ -54,13 +50,10 @@ export function displayUrl(raw: string): string {
  * OpenAI-compatible protocols list at `{baseURL}/models`; Anthropic Messages
  * uses its native route at `{root}/v1/models?limit=1000`, where the root is the
  * base without trailing slashes and without one trailing `/v1` segment
- * (gateway documentation publishes both spellings of the same root). Gemini's
- * native protocol lists at `{base}/v1beta/models?pageSize=1000` on the same
- * version-qualified base its requests speak (see {@link geminiRequestBaseUrl}).
+ * (gateway documentation publishes both spellings of the same root).
  */
 export function probeListingUrl(baseURL: string, api: string): string {
   const base = baseURL.replace(/\/+$/, '')
-  if (api === 'google-generative-ai') return `${geminiRequestBaseUrl(base)}/models?pageSize=${String(GEMINI_MODEL_LIMIT)}`
   if (api !== 'anthropic-messages') return `${base}/models`
   const root = base.endsWith('/v1') ? base.slice(0, -3) : base
   return `${root}/v1/models?limit=${String(ANTHROPIC_MODEL_LIMIT)}`
@@ -74,22 +67,6 @@ export function probeListingUrl(baseURL: string, api: string): string {
 export function anthropicRequestBaseUrl(baseURL: string): string {
   const base = baseURL.replace(/\/+$/, '')
   return base.endsWith('/v1') ? base.slice(0, -3) : base
-}
-
-/**
- * The base URL a Gemini-native request needs. pi-ai's Google client takes
- * `model.baseUrl` verbatim with `apiVersion: ''`, so the version segment must
- * already sit in the path; a bare origin is completed with `/v1beta` (the
- * official spelling), while a path the user spelled out is kept as the
- * gateway's own.
- */
-export function geminiRequestBaseUrl(baseURL: string): string {
-  const base = baseURL.replace(/\/+$/, '')
-  try {
-    return new URL(base).pathname === '/' ? `${base}/v1beta` : base
-  } catch {
-    return base
-  }
 }
 
 /**
@@ -130,11 +107,6 @@ export function composeProbeHeaders(
   if (api === 'anthropic-messages') {
     headers.set('anthropic-version', ANTHROPIC_VERSION)
     if (apiKey !== undefined) headers.set('x-api-key', apiKey)
-  } else if (api === 'google-generative-ai') {
-    // The native Google wire authenticates through its own header and no
-    // Bearer, exactly as the official client signs; a profile `authorization`
-    // survives untouched, the same courtesy the Anthropic arm extends.
-    if (apiKey !== undefined) headers.set('x-goog-api-key', apiKey)
   } else if (apiKey !== undefined) {
     headers.set('authorization', `Bearer ${apiKey}`)
   }
@@ -185,11 +157,7 @@ export async function readBounded(response: Response, url: string): Promise<stri
  * official parser: the standard `data` array takes precedence; the
  * enriched `models` map uses each property key as the endpoint-facing id
  * (the nested `id` only falls back for an empty key — gateways may put a
- * canonical identity there instead of the alias they accept on requests);
- * Gemini's native `models` ARRAY unwraps each `models/<id>` resource name into
- * the bare id the request path needs, keeps only entries a chat request can
- * address (`generateContent`), and reads the display label from
- * `displayName` (the raw `name` is the resource path, not a label). Only
+ * canonical identity there instead of the alias they accept on requests). Only
  * object-valued entries are models, and entries without a usable id are
  * dropped. Returns undefined when the listing names none of these shapes.
  */
@@ -198,25 +166,6 @@ export function listingEntries(body: unknown): Record<string, unknown>[] | undef
   const data = listing['data']
   if (Array.isArray(data)) return data.filter(isRecord)
   const models = listing['models']
-  if (Array.isArray(models)) {
-    const out: Record<string, unknown>[] = []
-    for (const raw of models) {
-      if (!isRecord(raw)) continue
-      const resource = typeof raw['name'] === 'string' ? raw['name'] : ''
-      const id = resource.startsWith('models/') ? resource.slice('models/'.length) : resource
-      if (id.length === 0) continue
-      const methods = raw['supportedGenerationMethods']
-      // A methods list names what the model can serve; without one there is
-      // nothing to exclude and the entry keeps the benefit of the doubt.
-      if (Array.isArray(methods) && !methods.includes('generateContent')) continue
-      const display = typeof raw['displayName'] === 'string' ? raw['displayName'] : undefined
-      const entry: Record<string, unknown> = { ...raw, id }
-      if (display !== undefined && display.trim().length > 0) entry['name'] = display
-      else delete entry['name']
-      out.push(entry)
-    }
-    return out
-  }
   if (isRecord(models)) {
     return Object.entries(models)
       .filter(([, raw]) => isRecord(raw))
@@ -274,10 +223,10 @@ function capacities(entry: Record<string, unknown>, keys: readonly string[]): nu
   return capacity(top?.['max_completion_tokens'])
 }
 
-/** Context-window field names, in the official parser's priority order (Gemini's native spelling included). */
+/** Context-window field names, in the official parser's priority order. */
 const CONTEXT_WINDOW_KEYS = ['contextWindow', 'context_window', 'context_length', 'max_input_tokens', 'inputTokenLimit'] as const
 
-/** Output-limit field names, in the official parser's priority order (Gemini's native spelling included). */
+/** Output-limit field names, in the official parser's priority order. */
 const MAX_TOKENS_KEYS = ['maxOutputTokens', 'max_output_tokens', 'maxTokens', 'max_tokens', 'outputTokenLimit'] as const
 
 /**

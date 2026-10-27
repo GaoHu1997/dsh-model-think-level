@@ -66,14 +66,14 @@ export interface StagedKeyDraft {
 }
 
 /** How far the drain got with one draft: its host reference once the value
- * landed, and whether the metadata after it has landed too. */
+ * landed, and the draft fields the host currently holds for it. */
 interface StagedKeyLanding {
   /** The draft this landing belongs to ({@link StagedKeyDraft.ref}). */
   readonly ref: string
-  /** The reference the host minted when it stored the value. */
+  /** The reference the host minted or reused when it stored the value. */
   readonly hostRef: string
-  /** Whether the protocol pin and the switch-off have landed too. */
-  done: boolean
+  /** Snapshot of the fields currently applied to the host reference. */
+  draft: StagedKeyDraft
 }
 
 /** One pane's held key list, keyed by the route it will be written to. */
@@ -82,13 +82,16 @@ export interface StagedKeyIntent {
   drafts: readonly StagedKeyDraft[]
   /** Which drafts have already landed, with the host references they landed as. */
   readonly landed: StagedKeyLanding[]
-  /** Whether this route was already declared when the intent was staged. */
+  /** Changes whenever the pane replaces this intent's desired draft list. */
+  revision: number
+  /** Whether this route was already declared when this card first asked. */
   declaredBefore?: boolean
   /** When the pane that staged this intent unmounted, if it has. */
   releasedAt?: number
-  /** Whether the drain has already said — once — that this route has no
-   * baseline, the one holding state that ends in silence. */
+  /** Whether a missing pre-save baseline has already been reported. */
   noted?: boolean
+  /** A post-save route exists, but its pre-save ownership is unknown. */
+  baselineMissing?: boolean
   /** Failed drain passes since the last one that wrote something. */
   attempts: number
 }
@@ -98,17 +101,30 @@ export interface StagedKeysState {
   /** Held drafts, by route. Readable so a test (and the console) can see what
    * the session is still holding. */
   readonly intents: Map<string, StagedKeyIntent>
-  /** What each route's baseline read found, kept for the session so a list
-   * restaged after the drain retired its intent does not have to ask again. */
+  /** The first successful pre-save answer for each route. */
   readonly baseline: Map<string, boolean>
-  /** One drain at a time: an unmount's release-triggered flush and a scan's
-   * drain must not both walk the ledger and write the same route. */
+  /** Baseline reads currently in flight. */
+  readonly baselinePending: Set<string>
+  /** Baseline reads that failed before producing a pre-save answer. */
+  readonly baselineFailures: Set<string>
+  /** Active intents keep late add references available to a restaged route. */
+  readonly activeIntents: Map<string, StagedKeyIntent>
+  /** One drain at a time, with another pass requested on concurrent edits. */
   draining: boolean
+  drainAgain: boolean
 }
 
 /** A fresh, empty ledger. */
 export function createStagedKeysState(): StagedKeysState {
-  return { intents: new Map(), baseline: new Map(), draining: false }
+  return {
+    intents: new Map(),
+    baseline: new Map(),
+    baselinePending: new Set(),
+    baselineFailures: new Set(),
+    activeIntents: new Map(),
+    draining: false,
+    drainAgain: false,
+  }
 }
 
 /**
@@ -126,25 +142,45 @@ export function createStagedKeysState(): StagedKeysState {
 export function stageKeys(state: StagedKeysState, route: string, drafts: readonly StagedKeyDraft[]): void {
   if (route.length === 0) return
   if (drafts.length === 0) {
-    state.intents.delete(route)
+    withdrawKeys(state, route)
     return
   }
   const known = state.intents.get(route)
   if (known === undefined) {
+    const active = state.activeIntents.get(route)
     state.intents.set(route, {
       drafts: [...drafts],
-      landed: [],
+      landed: active?.landed ?? [],
+      revision: 0,
       declaredBefore: state.baseline.get(route),
       attempts: 0,
     })
+    if (state.draining) state.drainAgain = true
     return
   }
+  if (sameDrafts(known.drafts, drafts)) return
   known.drafts = [...drafts]
+  known.revision += 1
+  known.baselineMissing = false
+  if (state.draining) state.drainAgain = true
 }
 
-/** Drop the drafts held for one route. */
+function sameDrafts(left: readonly StagedKeyDraft[], right: readonly StagedKeyDraft[]): boolean {
+  return left.length === right.length && left.every((draft, index) => {
+    const next = right[index]
+    return next !== undefined
+      && draft.ref === next.ref
+      && draft.value === next.value
+      && draft.alias === next.alias
+      && draft.protocol === next.protocol
+      && draft.enabled === next.enabled
+  })
+}
+
+/** Drop the drafts for a route; an active request will stop after it settles. */
 export function withdrawKeys(state: StagedKeysState, route: string): void {
   state.intents.delete(route)
+  if (state.draining) state.drainAgain = true
 }
 
 /**
@@ -164,9 +200,31 @@ export function releaseKeys(state: StagedKeysState, route: string): void {
  */
 export function markKeysRouteBaseline(state: StagedKeysState, route: string, declared: boolean): void {
   if (route.length === 0) return
-  state.baseline.set(route, declared)
+  // The first successful answer belongs to the card's pre-save decision; later
+  // reads must not replace it with a route declaration created by this card.
+  if (!state.baseline.has(route)) state.baseline.set(route, declared)
+  state.baselinePending.delete(route)
+  state.baselineFailures.delete(route)
   const known = state.intents.get(route)
-  if (known !== undefined) known.declaredBefore = declared
+  if (known !== undefined) {
+    known.declaredBefore = state.baseline.get(route)
+    known.baselineMissing = false
+  }
+  if (state.draining) state.drainAgain = true
+}
+
+/** Mark a baseline read as in flight before issuing the pre-save request. */
+export function beginKeysRouteBaseline(state: StagedKeysState, route: string): boolean {
+  if (!needsKeysRouteBaseline(state, route)) return false
+  state.baselinePending.add(route)
+  return true
+}
+
+/** Record a failed baseline read without allowing a later route state to replace it. */
+export function failKeysRouteBaseline(state: StagedKeysState, route: string): void {
+  state.baselinePending.delete(route)
+  if (!state.baseline.has(route)) state.baselineFailures.add(route)
+  if (state.draining) state.drainAgain = true
 }
 
 /**
@@ -174,7 +232,10 @@ export function markKeysRouteBaseline(state: StagedKeysState, route: string, dec
  * @returns True when the pane should ask the settings document.
  */
 export function needsKeysRouteBaseline(state: StagedKeysState, route: string): boolean {
-  return route.length > 0 && !state.baseline.has(route)
+  return route.length > 0
+    && !state.baseline.has(route)
+    && !state.baselinePending.has(route)
+    && !state.baselineFailures.has(route)
 }
 
 /**
@@ -202,49 +263,99 @@ export async function flushStagedKeys(
   if (state.intents.size === 0) return 0
   state.draining = true
   try {
-    const join = await describeNamespace(api)
-    // The mirror lags a write that has just landed, so the document itself is
-    // asked before an intent is told to keep waiting (see staged-headers).
-    let wire: Awaited<ReturnType<typeof describeNamespace>> | undefined
-    const declaredNow = async (route: string): Promise<boolean> => {
-      if (routeIsDeclared(join.namespace, route)) return true
-      wire ??= await describeNamespace(api, { fresh: true })
-      return routeIsDeclared(wire.namespace, route)
-    }
-    const now = Date.now()
-    for (const [route, intent] of Array.from(state.intents)) {
-      if (intent.declaredBefore === undefined) {
-        if (intent.releasedAt !== undefined && intent.noted !== true) {
-          intent.noted = true
-          console.warn(
-            '[bre] deferred api keys: nobody said whether this id existed before, so the drafts are held:',
-            route,
-          )
+    do {
+      state.drainAgain = false
+      const join = await describeNamespace(api)
+      // The mirror can lag a write, so confirm a missing route against the document.
+      let wire: Awaited<ReturnType<typeof describeNamespace>> | undefined
+      const declaredNow = async (route: string): Promise<boolean> => {
+        if (routeIsDeclared(join.namespace, route)) return true
+        wire ??= await describeNamespace(api, { fresh: true })
+        return routeIsDeclared(wire.namespace, route)
+      }
+      const now = Date.now()
+      for (const [route, intent] of Array.from(state.intents)) {
+        if (state.intents.get(route) !== intent) continue
+        const revision = intent.revision
+        state.activeIntents.set(route, intent)
+        try {
+          if (intent.declaredBefore === undefined) {
+            if (state.baselinePending.has(route)) {
+              if (intent.releasedAt !== undefined && now - intent.releasedAt > RELEASE_GRACE_MS) {
+                state.intents.delete(route)
+                console.error('[bre] deferred api keys: the pre-save baseline timed out; refusing to write held keys:', route)
+              }
+              continue
+            }
+            if (state.baselineFailures.has(route)) {
+              // A retry may record a route as new only while it is still absent.
+              // If it is present, that may be this card's save, so ownership is unknown.
+              const exists = await declaredNow(route)
+              if (state.intents.get(route) !== intent) continue
+              if (intent.revision !== revision || intent.declaredBefore !== undefined) {
+                state.drainAgain = true
+                continue
+              }
+              if (!exists) {
+                markKeysRouteBaseline(state, route, false)
+                if (intent.releasedAt !== undefined && now - intent.releasedAt > RELEASE_GRACE_MS) {
+                  state.intents.delete(route)
+                  console.info('[bre] deferred api keys: gave up on drafts whose card closed first:', route)
+                }
+              } else {
+                intent.baselineMissing = true
+                if (intent.noted !== true) {
+                  intent.noted = true
+                  console.error('[bre] deferred api keys: the pre-save baseline failed and this route now exists; refusing to guess ownership:', route)
+                }
+                if (intent.releasedAt !== undefined && now - intent.releasedAt > RELEASE_GRACE_MS) {
+                  state.intents.delete(route)
+                  console.error('[bre] deferred api keys: the pre-save baseline remained unknown; refusing to write held keys:', route)
+                }
+              }
+              continue
+            }
+            intent.baselineMissing = true
+            if (intent.noted !== true) {
+              intent.noted = true
+              console.error('[bre] deferred api keys: no pre-save baseline is available; refusing to write held keys:', route)
+            }
+            if (intent.releasedAt !== undefined && now - intent.releasedAt > RELEASE_GRACE_MS) {
+              state.intents.delete(route)
+            }
+            continue
+          }
+          if (intent.declaredBefore) {
+            // This route belonged to an existing provider before the card opened.
+            state.intents.delete(route)
+            continue
+          }
+          const exists = await declaredNow(route)
+          if (state.intents.get(route) !== intent) continue
+          if (intent.revision !== revision) {
+            state.drainAgain = true
+            continue
+          }
+          if (!exists) {
+            if (intent.releasedAt !== undefined && now - intent.releasedAt > RELEASE_GRACE_MS) {
+              state.intents.delete(route)
+              console.info('[bre] deferred api keys: gave up on drafts whose card closed first:', route)
+            }
+            continue
+          }
+          const landed = await drainIntent(state, route, intent, client)
+          if (state.intents.get(route) !== intent || intent.revision !== revision) continue
+          if (landed) {
+            state.intents.delete(route)
+            console.info('[bre] deferred api keys: the route is declared, saved the held key list:', route)
+          }
+        } finally {
+          if (state.activeIntents.get(route) === intent) state.activeIntents.delete(route)
         }
-        continue
       }
-      if (intent.declaredBefore) {
-        // The id named a provider that already existed: whatever is declared
-        // under it is not this card's, so the drafts are written nowhere.
-        state.intents.delete(route)
-        continue
-      }
-      if (!(await declaredNow(route))) {
-        if (intent.releasedAt !== undefined && now - intent.releasedAt > RELEASE_GRACE_MS) {
-          state.intents.delete(route)
-          console.info('[bre] deferred api keys: gave up on drafts whose card closed first:', route)
-        }
-        continue
-      }
-      const landed = await drainIntent(route, intent, client)
-      if (landed) {
-        state.intents.delete(route)
-        console.info('[bre] deferred api keys: the route is declared, saved the held key list:', route)
-      }
-    }
+    } while (state.drainAgain && state.intents.size > 0)
   } catch (error) {
-    // A scan that cannot read the settings document must not cost the session
-    // its held drafts: they stay for the next scan.
+    // A scan that cannot read settings must not cost the session its held drafts.
     console.error('[bre] deferred api keys: could not read the settings document:', error)
   } finally {
     state.draining = false
@@ -252,82 +363,140 @@ export async function flushStagedKeys(
   return waitingCount(state)
 }
 
-/**
- * Land one intent's drafts. Values and aliases first, then each row's pin and
- * switch-off; a failure stops the intent (it keeps its progress and retries
- * next pass) unless it has failed too many times in a row, in which case the
- * drafts go with the console line that says so — a draft the host keeps
- * refusing must not keep the scan coming for ever.
- * @returns True when the whole list has landed.
- */
-async function drainIntent(route: string, intent: StagedKeyIntent, client: KeyManagerClient): Promise<boolean> {
+async function drainIntent(
+  state: StagedKeysState,
+  route: string,
+  intent: StagedKeyIntent,
+  client: KeyManagerClient,
+): Promise<boolean> {
+  const revision = intent.revision
+  const drafts = [...intent.drafts]
   let failed = false
   let progressed = false
-  /** One refused answer stops this pass; the attempt count decides the rest. */
+  const stopIfStale = (): boolean => {
+    if (state.intents.get(route) !== intent) return true
+    if (intent.revision !== revision) {
+      state.drainAgain = true
+      return true
+    }
+    return false
+  }
   const refuse = (): void => {
     failed = true
     intent.attempts += 1
   }
 
-  // Phase one: every value. The host mints its own reference per key and seats
-  // the first one, so the order here is the preference order the pane showed.
-  for (const draft of intent.drafts) {
-    if (intent.landed.some(entry => entry.ref === draft.ref)) continue
-    const answer = await client.add(route, draft.value, draft.alias)
-    if (!answer.ok) {
-      refuse()
-      break
+  // Phase one: all values and aliases land before any key is switched off.
+  for (const draft of drafts) {
+    if (stopIfStale()) return false
+    let landing = intent.landed.find(entry => entry.ref === draft.ref)
+    if (landing === undefined) {
+      const answer = await client.add(route, draft.value, draft.alias)
+      if (!answer.ok) {
+        if (stopIfStale()) return false
+        refuse()
+        break
+      }
+      const explicitRef = answer.addedRef !== undefined
+        && answer.entries.some(entry => entry.ref === answer.addedRef)
+        ? answer.addedRef
+        : undefined
+      const hostRef = explicitRef ?? answer.entries.map(entry => entry.ref).find(
+        ref => !intent.landed.some(entry => entry.hostRef === ref),
+      )
+      if (hostRef === undefined) {
+        if (stopIfStale()) return false
+        refuse()
+        break
+      }
+      const hostEntry = answer.entries.find(entry => entry.ref === hostRef)
+      const { alias: _desiredAlias, protocol: _desiredProtocol, ...draftBase } = draft
+      landing = {
+        ref: draft.ref,
+        hostRef,
+        draft: {
+          ...draftBase,
+          ...(hostEntry?.alias === undefined ? {} : { alias: hostEntry.alias }),
+          ...(hostEntry?.protocol === undefined ? {} : { protocol: hostEntry.protocol }),
+          enabled: hostEntry?.enabled ?? true,
+        },
+      }
+      intent.landed.push(landing)
+      progressed = true
+      if (stopIfStale()) return false
+      continue
     }
-    // The host's answer carries the whole list; the one reference no landing
-    // knows is the key this very call added. (An unlisted seat, if the official
-    // save left one, is appended AFTER the listed keys, so the diff still finds
-    // ours first.)
-    const hostRef = answer.entries.map(entry => entry.ref).find(
-      ref => !intent.landed.some(entry => entry.hostRef === ref),
-    )
-    if (hostRef === undefined) {
-      refuse()
-      break
+
+    if (landing.draft.value !== draft.value) {
+      const answer = await client.replace(route, landing.hostRef, draft.value)
+      if (!answer.ok) {
+        if (stopIfStale()) return false
+        refuse()
+        break
+      }
+      landing.draft = { ...landing.draft, value: draft.value }
+      progressed = true
+      if (stopIfStale()) return false
     }
-    intent.landed.push({ ref: draft.ref, hostRef, done: false })
-    progressed = true
+    if (landing.draft.alias !== draft.alias) {
+      const { alias: _previous, ...rest } = landing.draft
+      const answer = await client.rename(route, landing.hostRef, draft.alias)
+      if (!answer.ok) {
+        if (stopIfStale()) return false
+        refuse()
+        break
+      }
+      landing.draft = { ...rest, ...(draft.alias === undefined ? {} : { alias: draft.alias }) }
+      progressed = true
+      if (stopIfStale()) return false
+    }
   }
   if (!failed) {
-    // Phase two: each row's pin and switch-off, now that every key exists —
-    // a switch-off may leave exactly one key enabled, and the host refuses to
-    // switch off the LAST enabled one, so this must not run before the other
-    // values have landed.
-    for (const draft of intent.drafts) {
+    // Phase two: apply all protocol pins, then enable before switching anything off.
+    for (const draft of drafts) {
+      if (stopIfStale()) return false
       const landing = intent.landed.find(entry => entry.ref === draft.ref)
-      if (landing === undefined || landing.done) continue
-      if (draft.protocol !== undefined) {
-        const answer = await client.setProtocol(route, landing.hostRef, draft.protocol)
-        if (!answer.ok) {
-          refuse()
-          break
-        }
-        progressed = true
+      if (landing === undefined || landing.draft.protocol === draft.protocol) continue
+      const answer = await client.setProtocol(route, landing.hostRef, draft.protocol)
+      if (!answer.ok) {
+        if (stopIfStale()) return false
+        refuse()
+        break
       }
-      if (!draft.enabled) {
-        const answer = await client.setEnabled(route, landing.hostRef, false)
-        if (!answer.ok) {
-          refuse()
-          break
-        }
-        progressed = true
-      }
-      landing.done = true
+      const { protocol: _previous, ...rest } = landing.draft
+      landing.draft = { ...rest, ...(draft.protocol === undefined ? {} : { protocol: draft.protocol }) }
+      progressed = true
+      if (stopIfStale()) return false
     }
   }
-  if (!failed) return true
-  // Progress this pass buys another round of retries; a pass that only failed
-  // counts toward the bound.
+  if (!failed) {
+    for (const enabled of [true, false]) {
+      for (const draft of drafts) {
+        if (stopIfStale()) return false
+        if (draft.enabled !== enabled) continue
+        const landing = intent.landed.find(entry => entry.ref === draft.ref)
+        if (landing === undefined || landing.draft.enabled === enabled) continue
+        const answer = await client.setEnabled(route, landing.hostRef, enabled)
+        if (!answer.ok) {
+          if (stopIfStale()) return false
+          refuse()
+          break
+        }
+        landing.draft = { ...landing.draft, enabled }
+        progressed = true
+        if (stopIfStale()) return false
+      }
+      if (failed) break
+    }
+  }
+  if (!failed) {
+    intent.attempts = 0
+    return !stopIfStale()
+  }
+  // Progress buys another retry; a pass that only failed counts toward the bound.
   if (progressed) intent.attempts = 0
   if (intent.attempts >= MAX_DRAIN_ATTEMPTS) {
-    console.error(
-      '[bre] deferred api keys: the write was refused; giving up on the held key list:',
-      route,
-    )
+    console.error('[bre] deferred api keys: the write was refused; giving up on the held key list:', route)
     return true
   }
   return false
@@ -362,7 +531,7 @@ export interface DraftKeyClientDeps {
 
 /** The addresses a draft knows: none — the provider's own form fields carry
  * them, and the route does not exist to hold them yet. */
-const NO_ENDPOINTS: KeyState['endpoints'] = { openai: null, anthropic: null, gemini: null }
+const NO_ENDPOINTS: KeyState['endpoints'] = { openai: null, anthropic: null }
 
 /** The first free draft row name in the sequence `key-1`, `key-2`… */
 function nextDraftRef(drafts: readonly StagedKeyDraft[]): string {
@@ -402,9 +571,9 @@ export function createDraftKeyClient(store: DraftKeyStore, deps: DraftKeyClientD
   })
 
   /** Adopt a change and report the list it produced. */
-  const changed = (): KeyAnswer => {
+  const changed = (addedRef?: string): KeyAnswer => {
     deps.onChange(store.drafts)
-    return answer()
+    return { ...answer(), ...(addedRef === undefined ? {} : { addedRef }) }
   }
 
   const findDraft = (ref: string): StagedKeyDraft | undefined =>
@@ -417,10 +586,12 @@ export function createDraftKeyClient(store: DraftKeyStore, deps: DraftKeyClientD
 
   return {
     list: async () => answer(),
+    cached: () => answer(),
     add: async (_route, value, alias) => {
       if (!isLegalKeyValue(value)) return { ok: false, error: deps.t('keysAddIllegal') }
-      store.drafts = [...store.drafts, { ref: nextDraftRef(store.drafts), value, enabled: true, ...(alias === undefined ? {} : { alias }) }]
-      return changed()
+      const ref = nextDraftRef(store.drafts)
+      store.drafts = [...store.drafts, { ref, value, enabled: true, ...(alias === undefined ? {} : { alias }) }]
+      return changed(ref)
     },
     rename: async (_route, ref, alias) => {
       const draft = findDraft(ref)
@@ -459,7 +630,6 @@ export function createDraftKeyClient(store: DraftKeyStore, deps: DraftKeyClientD
       return replaceAt(ref, { ...rest, ...(protocol === undefined ? {} : { protocol }) })
     },
     setEndpoints: async () => answer(),
-    applyMerged: async () => answer(),
     reveal: async (_route, ref) => findDraft(ref)?.value,
   }
 }

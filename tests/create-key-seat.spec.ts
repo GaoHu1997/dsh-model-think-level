@@ -8,7 +8,8 @@
 
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ReactNode } from 'react'
+import { createElement, useState, type ReactNode } from 'react'
+import { mountReact, unmountReact, type ForeignMount } from '../src/client/injection/mount.js'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   enhanceCreateKeySeat,
@@ -108,6 +109,7 @@ function buttonByText(scope: HTMLElement, text: string): HTMLButtonElement {
 }
 
 let warnings: ReturnType<typeof vi.spyOn>
+let officialMount: ForeignMount | undefined
 
 beforeEach(() => {
   warnings = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
@@ -115,6 +117,8 @@ beforeEach(() => {
 
 afterEach(() => {
   teardownCreateKeySeats()
+  if (officialMount !== undefined) unmountReact(officialMount)
+  officialMount = undefined
   document.body.innerHTML = ''
   warnings.mockRestore()
 })
@@ -159,7 +163,7 @@ describe('the seat', () => {
     // User items 9 and 10: the official create card fetches its models with the
     // key the FORM currently shows, and its in-field eye only exists while the
     // box has text — so the seat must keep the value where the user put it.
-    // The list below stays empty; the official 保存 stores the first key.
+    // The list adopts the same key; the official 保存 stores its first value.
     const fixture = buildCard()
     fixture.keyInput.value = 'sk-already-typed-01'
 
@@ -168,7 +172,7 @@ describe('the seat', () => {
 
     expect(fixture.keyInput.value).toBe('sk-already-typed-01')
     const host = seatHostOf(fixture)
-    expect(host?.querySelectorAll('.bre-keys-mask')).toHaveLength(0)
+    expect(host?.querySelectorAll('.bre-keys-mask')).toHaveLength(1)
   })
 
   it('mirrors the field’s pane region onto the host', async () => {
@@ -233,6 +237,36 @@ describe('the pane’s staging', () => {
     buttonByText(fixture.customPanel, en.keysAddConfirm).click()
     await flush()
   }
+
+  it('uses the enabled draft key in the official React form for Fetch models and Save', async () => {
+    const fixture = buildCard()
+    const fetched = vi.fn()
+    const saved = vi.fn()
+    function OfficialForm(): ReactNode {
+      const [apiKey, setApiKey] = useState('')
+      return createElement('div', null,
+        createElement('input', { type: 'password', 'aria-label': 'API key', value: apiKey,
+          onChange: (event: { target: { value: string } }) => setApiKey(event.target.value) }),
+        createElement('button', { onClick: () => fetched(apiKey) }, 'Fetch models'),
+        createElement('button', { onClick: () => saved(apiKey) }, 'Save provider'))
+    }
+    officialMount = mountReact(fixture.keyField, createElement(OfficialForm), { sync: true })
+    enhanceCreateKeySeat(fixture.keyField, deps())
+    await flush()
+    await addKey(fixture, 'sk-first-draft-01', 'First')
+    buttonByText(fixture.keyField, 'Fetch models').click()
+    buttonByText(fixture.keyField, 'Save provider').click()
+    expect(fetched).toHaveBeenLastCalledWith('sk-first-draft-01')
+    expect(saved).toHaveBeenLastCalledWith('sk-first-draft-01')
+
+    await addKey(fixture, 'sk-second-draft-02', 'Second')
+    const first = Array.from(fixture.customPanel.querySelectorAll<HTMLElement>('.bre-keys-row'))
+      .find(row => row.textContent?.includes('First'))!
+    first.querySelector<HTMLButtonElement>('.bre-keys-toggle')!.click()
+    await flush()
+    buttonByText(fixture.keyField, 'Fetch models').click()
+    expect(fetched).toHaveBeenLastCalledWith('sk-second-draft-02')
+  })
 
   it('stages drafts under the id the field reads as they are added', async () => {
     const { fixture, staged } = await seated()

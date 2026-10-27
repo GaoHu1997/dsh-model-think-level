@@ -250,9 +250,8 @@ function syncEye(eye: HTMLButtonElement, input: HTMLInputElement): void {
  * value into its draft state — so a re-render keeps it instead of reverting to
  * the empty draft.
  *
- * The create card's key-list pane uses the same gesture to take a value the
- * user had already typed out of the official box when the draft list takes
- * the field over.
+ * The create card uses the same gesture to mirror its enabled draft key into
+ * the official form, so Fetch models and Save use the key shown in the list.
  */
 export function writeInputValue(input: HTMLInputElement, value: string): void {
   const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')

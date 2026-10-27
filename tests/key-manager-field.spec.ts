@@ -36,7 +36,7 @@ const t = (key: string, params?: Record<string, string | number>): string => {
   return Object.entries(params).reduce((carried, [name, value]) => carried.replace(`{${name}}`, String(value)), text)
 }
 
-const EMPTY: KeyState = { ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null, gemini: null } }
+const EMPTY: KeyState = { ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null } }
 
 /** A transport that answers instantly with an empty list. */
 function stubClient(): KeyManagerClient {
@@ -50,7 +50,6 @@ function stubClient(): KeyManagerClient {
     setEnabled: async () => EMPTY,
     setProtocol: async () => EMPTY,
     setEndpoints: async () => EMPTY,
-    applyMerged: async () => EMPTY,
     reveal: async () => undefined,
   }
 }

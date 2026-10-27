@@ -237,6 +237,27 @@ describe('the create-provider card', () => {
     expect(fixture.picker?.classList.contains(MODE_PICKER_CLASS)).toBe(true)
   })
 
+  it('disables scroll anchoring before the custom-mode click', () => {
+    const fixture = buildCard('unmounted')
+    const scrollHost = document.createElement('div')
+    scrollHost.style.overflowY = 'auto'
+    Object.defineProperty(scrollHost, 'scrollHeight', { value: 1200, configurable: true })
+    Object.defineProperty(scrollHost, 'clientHeight', { value: 400, configurable: true })
+    scrollHost.scrollTop = 220
+    scrollHost.appendChild(fixture.root)
+    document.body.appendChild(scrollHost)
+
+    let anchorDuringClick: string | null = null
+    fixture.customOption.addEventListener('click', () => {
+      anchorDuringClick = scrollHost.style.overflowAnchor
+    })
+    reconcileAddCards(fixture.root, deps(), state)
+
+    expect(anchorDuringClick).toBe('none')
+    expect(scrollHost.scrollTop).toBe(220)
+    expect(fixture.card.querySelector(`.${CREATE_HOST_CLASS}`)).toBeNull()
+  })
+
   it('dresses a custom form the user has come back to', () => {
     const fixture = buildCard('hidden')
     const clicks: number[] = []

@@ -135,7 +135,9 @@ function capacityField(container: HTMLElement, label: string): HTMLInputElement 
 
 /** The pill's group: the level ladder, the default pick, or the modality. */
 function pillGroup(container: HTMLElement, label: string): HTMLButtonElement[] {
-  const group = Array.from(container.querySelectorAll<HTMLElement>('.bre-effort-card .bre-pillrow'))
+  // Modality lives above the thinking card; level pills stay inside it. The
+  // aria-label is what tells the two groups apart.
+  const group = Array.from(container.querySelectorAll<HTMLElement>('.bre-effort-editor .bre-pillrow'))
     .find(candidate => candidate.getAttribute('aria-label') === label)
   if (group === undefined) throw new Error(`no pill group "${label}"`)
   return Array.from(group.querySelectorAll<HTMLButtonElement>('.bre-lvl'))
@@ -535,11 +537,49 @@ describe('EffortEditor modality', () => {
     expect(modalityPill(container, t('modalityImage')).classList.contains('is-on')).toBe(false)
   })
 
+  it('puts supported modalities above the thinking switch, even when thinking is off', async () => {
+    const api = baseApi()
+    const { container } = await renderEditor(baseProps({ api, efforts: false, input: ['text'] }))
+    const modality = container.querySelector('.bre-effort-modality')
+    const top = container.querySelector('.bre-effort-top')
+    expect(modality).not.toBeNull()
+    expect(top).not.toBeNull()
+    // Above the switch. The card below is the capacity-only one: turning
+    // thinking off drops the ladder, never the two token counts.
+    expect(modality!.compareDocumentPosition(top!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    const card = container.querySelector('.bre-effort-card')
+    expect(card).not.toBeNull()
+    expect(card!.classList.contains('bre-effort-card--capacity')).toBe(true)
+    expect(modalityPill(container, t('modalityText')).classList.contains('is-on')).toBe(true)
+    expect(container.textContent).toContain(t('inputModality'))
+  })
+
+  it('keeps the capacity fields in the card whatever the thinking switch says', async () => {
+    const on = await renderEditor(baseProps({ api: baseApi(), input: ['text'] }))
+    expect(on.container.querySelector('.bre-effort-card [aria-label="' + t('contextWindowLabel') + ' 1"]')).not.toBeNull()
+    expect(on.container.querySelector('.bre-effort-card [aria-label="' + t('maxTokensLabel') + ' 1"]')).not.toBeNull()
+    const off = await renderEditor(baseProps({ api: baseApi(), efforts: false, input: ['text'] }))
+    expect(off.container.querySelector('.bre-effort-card [aria-label="' + t('contextWindowLabel') + ' 1"]')).not.toBeNull()
+    expect(off.container.querySelector('.bre-effort-card [aria-label="' + t('maxTokensLabel') + ' 1"]')).not.toBeNull()
+    expect(off.container.querySelector('.bre-effort-card [aria-label^="' + t('level_high') + '"]')).toBeNull()
+    // No coverage flag left on the root: the injector hides both official
+    // surfaces for the whole mount, so there is no state to report.
+    expect(on.container.querySelector('.bre-effort-editor[data-bre-covers-capacity]')).toBeNull()
+    expect(off.container.querySelector('.bre-effort-editor[data-bre-covers-capacity]')).toBeNull()
+  })
+
+  it('does not render the modality section inside the thinking card', async () => {
+    const api = baseApi()
+    const { container } = await renderEditor(baseProps({ api, input: ['text'] }))
+    expect(container.querySelector('.bre-effort-card [aria-label="' + t('inputModality') + '"]')).toBeNull()
+    const modality = container.querySelector('.bre-effort-modality')!
+    const top = container.querySelector('.bre-effort-top')!
+    expect(modality.compareDocumentPosition(top) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+  })
+
   it('keeps the modality section visible when the official input-types editor is present', async () => {
-    // User item 1: the injector hides the official per-row Input-types control
-    // and this card always shows its own modality pills beside the default
-    // effort pick. Only the official control is hidden — the ladder and the
-    // modality stay one editor.
+    // The injector hides the official per-row Input-types control and this
+    // editor always shows its own modality pills above the thinking switch.
     const api = baseApi()
     const { container } = await renderEditor(baseProps({ api, input: ['text', 'image'], officialInputTypes: true }))
     expect(container.querySelector(`[aria-label^="${t('modalityImage')}"]`)).not.toBeNull()
@@ -750,9 +790,11 @@ describe('EffortEditor image-generation pill (生图)', () => {
       imageGen: true,
     })
     // The verdict also says "does not reason": the switch follows it and the
-    // card folds away, so the pills are not rendered to check — the write IS
-    // the report.
-    expect(container.querySelector('.bre-effort-card')).toBeNull()
+    // level ladder folds away. The card itself stays — capacity-only — so the
+    // assertion is on the ladder, not on the card.
+    expect(container.querySelector('.bre-effort-card')).not.toBeNull()
+    expect(container.querySelector('.bre-effort-card--capacity')).not.toBeNull()
+    expect(levelPills(container)).toHaveLength(0)
   })
 })
 
@@ -861,17 +903,22 @@ describe('EffortEditor default-effort pick', () => {
 })
 
 describe('EffortEditor thinking switch', () => {
-  it('sits outside the effort card and gates the whole card', async () => {
+  it('sits outside the effort card and gates the ladder, not the capacity fields', async () => {
     const { container } = await renderEditor(baseProps({ efforts: { off: null, high: 'high' } }))
     const toggle = thinkingSwitch(container)
     expect(toggle.checked).toBe(true)
     expect(container.querySelector('.bre-effort-card')).not.toBeNull()
     // The switch is NOT inside the card it hides — that is what lets the card
-    // disappear entirely while the control that brings it back stays.
+    // collapse to capacity-only while the control that brings it back stays.
     expect(container.querySelector('.bre-effort-card .bre-thinking-switch')).toBeNull()
     await act(async () => { toggle.click() })
     expect(thinkingSwitch(container).checked).toBe(false)
-    expect(container.querySelector('.bre-effort-card')).toBeNull()
+    // The card survives as the capacity-only slab: 上下文窗口 / 最大输出 are
+    // model facts, not a thinking-level decision.
+    const card = container.querySelector('.bre-effort-card')
+    expect(card).not.toBeNull()
+    expect(card!.classList.contains('bre-effort-card--capacity')).toBe(true)
+    expect(container.querySelector('.bre-effort-card [aria-label="' + t('contextWindowLabel') + ' 1"]')).not.toBeNull()
     expect(levelPills(container)).toHaveLength(0)
     expect(container.textContent).toContain(en.thinkingModeOff)
     expect(container.querySelector('.bre-thinking-switch')).not.toBeNull()
@@ -900,10 +947,13 @@ describe('EffortEditor thinking switch', () => {
     expect(write.defaultEffort).toBeNull()
   })
 
-  it('starts off, with no card, for a model already declared as not reasoning', async () => {
+  it('starts off, with only the capacity card, for a model already declared as not reasoning', async () => {
     const { container } = await renderEditor(baseProps({ efforts: false }))
     expect(thinkingSwitch(container).checked).toBe(false)
-    expect(container.querySelector('.bre-effort-card')).toBeNull()
+    expect(container.querySelector('.bre-effort-card')).not.toBeNull()
+    // Capacity-only: no ladder, no default pick, but the two token counts stay.
+    expect(container.querySelector('.bre-effort-card--capacity')).not.toBeNull()
+    expect(levelPills(container)).toHaveLength(0)
     expect(container.textContent).toContain(en.thinkingModeOff)
   })
 
@@ -913,6 +963,16 @@ describe('EffortEditor thinking switch', () => {
     await act(async () => { thinkingSwitch(container).click() })
     expect(thinkingSwitch(container).checked).toBe(true)
     expect(container.querySelector('.bre-effort-card')).not.toBeNull()
+    // The declaration note rides with the LADDER (above the divider), not with
+    // the capacity fields below it: it explains why arming a level here is a
+    // re-declaration, not what 上下文窗口 means.
+    const note = Array.from(container.querySelectorAll('.bre-effort-note'))
+      .find(node => node.textContent === t('reasoningDisabled'))
+    expect(note).toBeDefined()
+    const sep = container.querySelector('.bre-effort-card .bre-effort-sep')!
+    const capacity = container.querySelector('.bre-effort-card [aria-label="' + t('contextWindowLabel') + ' 1"]')! as HTMLElement
+    expect(note!.compareDocumentPosition(sep) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(note!.compareDocumentPosition(capacity) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
     // A stored `false` spells as "only off armed", so opening the card is not
     // by itself a re-declaration: the row keeps saying "does not reason" until
     // a level is armed.
@@ -996,7 +1056,10 @@ describe('EffortEditor auto-adapt requests', () => {
     const api = baseApi()
     api.suggest.mockResolvedValue(A_LADDER)
     const { container } = await renderEditor(baseProps({ route: 'auto-spec-d', efforts: false, api }))
-    expect(container.querySelector('.bre-effort-card')).toBeNull()
+    // Off means the ladder is gone (the capacity card stays), and with it the
+    // row's own Adapt link.
+    expect(container.querySelector('.bre-effort-card--capacity')).not.toBeNull()
+    expect(levelPills(container)).toHaveLength(0)
     expect(hasButton(container, t('autoAdapt'))).toBe(false)
 
     await act(async () => { requestAutoEffort('auto-spec-d') })

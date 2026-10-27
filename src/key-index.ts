@@ -259,8 +259,8 @@ export function withKeyEntry(
     const existing = list[index]
     // A relabel with no alias keeps the stored one; the model scope, the
     // pinned protocol and the switch state always ride along untouched —
-    // adding or renaming a key never re-probes it, nor silently re-pins its
-    // protocol, nor switches it back on.
+    // adding or renaming a key never touches its scope, nor silently re-pins
+    // its protocol, nor switches it back on.
     const keptLabel = label === undefined ? existing?.alias : label
     list[index] = makeEntry(ref, keptLabel, existing?.models, existing?.protocol, existing?.disabled)
   }
@@ -289,13 +289,8 @@ export function withKeyAlias(
 }
 
 /**
- * Set (or clear) one key's discovered model scope.
- *
- * This is the automatic-binding side of Scheme A: the host probes each key's
- * model listing and records what it reached here, so a later request for model
- * M can be routed to the first key that lists M. Passing `undefined` clears the
- * scope back to "unscoped catch-all"; an empty array records "probed, reached
- * no models". A no-op when the reference is not listed.
+ * Set (or clear) the user's model assignment. `undefined` means catch-all, and
+ * an empty array remains a concrete empty assignment.
  * @param document - the current document.
  * @param route - the provider route key.
  * @param ref - the credential reference.

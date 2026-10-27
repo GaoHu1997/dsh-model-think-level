@@ -584,65 +584,55 @@ describe('multi-key request signing and failover', () => {
     return source
   }
 
-  it('aggregates a GET model listing before ordinary key failover', async () => {
+  it.each([
+    ['authorization', 'Bearer sk-draft'],
+    ['x-api-key', 'sk-draft'],
+    ['x-goog-api-key', 'sk-draft'],
+  ])('preserves an explicit draft %s on a listing instead of testing saved keys', async (name, value) => {
     const source = routeWithKeys([
       { ref: 'A', value: 'sk-a' },
       { ref: 'B', value: 'sk-b' },
     ])
-    let resolved: readonly string[] = []
-    source.modelListing = async ({ keys }) => {
-      resolved = keys.map(key => key.ref)
-      return new Response(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    }
+    source.current = buildUserAgentIndex({ relay: {
+      api: 'openai-completions',
+      baseURL: 'https://relay.example.com/v1',
+      headers: { 'user-agent': 'relay/1.0', authorization: 'Bearer old-override' },
+    } })
     install(source)
+    statuses = [401]
 
-    const response = await globalThis.fetch('https://relay.example.com/v1/models')
+    const response = await globalThis.fetch('https://relay.example.com/v1/models', {
+      headers: { [name]: value, 'x-keep': '1' },
+    })
 
-    expect(resolved).toEqual(['A', 'B'])
-    expect(await response.json()).toEqual({ data: [{ id: 'model-a' }, { id: 'model-b' }] })
-    expect(sent).toHaveLength(0)
+    expect(response.status).toBe(401)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.headers.get(name)).toBe(value)
+    expect(sent[0]?.headers.get('user-agent')).toBe('relay/1.0')
+    expect(sent[0]?.headers.get('x-keep')).toBe('1')
+    if (name !== 'authorization') expect(sent[0]?.headers.has('authorization')).toBe(false)
   })
 
-  it('aggregates a single key\'s listing when it carries other families\' addresses', async () => {
-    // One key, one route, but the route holds an Anthropic-family address the
-    // key may dispatch on: the plain GET would report only the route's own
-    // protocol's models, so the merge runs for one key too.
-    const source: OverlaySource = {
-      current: buildUserAgentIndex({ relay: { api: 'openai-completions', baseURL: 'https://relay.example.com/v1' } }),
-      keys: async () => [{
-        ref: 'A',
-        value: 'sk-a',
-        endpoints: { anthropic: 'https://anth.example.com/v1' },
-      }],
-    }
-    let asked: readonly string[] | undefined
-    source.modelListing = async ({ keys }) => {
-      asked = keys.map(key => key.ref)
-      return new Response(JSON.stringify({ data: [{ id: 'glm-4' }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    }
-    install(source)
+  it('uses init headers when a draft listing replaces a Request signature', async () => {
+    install(routeWithKeys([{ ref: 'A', value: 'sk-a' }]))
+    const request = new Request('https://relay.example.com/v1/models', {
+      headers: { authorization: 'Bearer sk-a', 'x-replaced': 'old' },
+    })
 
-    const response = await globalThis.fetch('https://relay.example.com/v1/models')
+    await globalThis.fetch(request, { headers: { authorization: 'Bearer sk-draft' } })
 
-    expect(asked).toEqual(['A'])
-    expect(await response.json()).toEqual({ data: [{ id: 'glm-4' }] })
-    expect(sent).toHaveLength(0)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-draft')
+    expect(sent[0]?.headers.has('x-replaced')).toBe(false)
+    expect(request.headers.get('authorization')).toBe('Bearer sk-a')
   })
 
   it('keeps a lone key with no extra address on the plain listing path', async () => {
     const source = routeWithKeys([{ ref: 'A', value: 'sk-a' }])
-    source.modelListing = vi.fn(async () => new Response('{}', { status: 200 }))
     install(source)
 
     await globalThis.fetch('https://relay.example.com/v1/models')
 
-    expect(source.modelListing).not.toHaveBeenCalled()
     expect(sent).toHaveLength(1)
     expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-a')
   })
@@ -652,7 +642,6 @@ describe('multi-key request signing and failover', () => {
       { ref: 'A', value: 'sk-a' },
       { ref: 'B', value: 'sk-b' },
     ])
-    source.modelListing = vi.fn(async () => new Response('{}', { status: 200 }))
     install(source)
 
     await globalThis.fetch('https://relay.example.com/v1/chat/completions', {
@@ -660,7 +649,6 @@ describe('multi-key request signing and failover', () => {
       body: JSON.stringify({ model: 'glm-4' }),
     })
 
-    expect(source.modelListing).not.toHaveBeenCalled()
     expect(sent).toHaveLength(1)
     expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-a')
   })
@@ -836,5 +824,92 @@ describe('multi-key request signing and failover', () => {
       headers: { authorization: 'Bearer sk-b' },
     })
     expect(sent[1]?.headers.get('authorization')).toBe('Bearer sk-b')
+  })
+
+  /**
+   * A relay that fans one route out over several upstream accounts answers a
+   * model only SOME of them carry with a 404 naming the model. That is a fact
+   * about the key's group, not about the request, so it must fail over — while a
+   * bare 404 (a wrong path) must still be returned at once.
+   */
+  describe('a model the key\'s upstream group does not carry', () => {
+    /** The answer wangru-style relays send when an account's group lacks the model. */
+    const unserved = (model: string): string =>
+      `{"message":"Model \\"${model}\\" is not supported by any configured account in this group","type":"model_not_found"}`
+
+    function installGrouped(): void {
+      install({
+        current: buildUserAgentIndex({
+          grouped: { api: 'openai-completions', baseURL: 'https://grouped.example.com/v1' },
+        }),
+        keys: async () => [
+          { ref: 'G1', value: 'sk-g1' },
+          { ref: 'G2', value: 'sk-g2' },
+        ],
+      })
+    }
+
+    it('asks the next key instead of returning the 404', async () => {
+      installGrouped()
+      statuses = [404]
+      bodies = [unserved('gpt-6.1-sol')]
+      const response = await globalThis.fetch('https://grouped.example.com/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'gpt-6.1-sol' }),
+      })
+      expect(sent.map(call => call.headers.get('authorization'))).toEqual(['Bearer sk-g1', 'Bearer sk-g2'])
+      expect(response.status).toBe(200)
+    })
+
+    it('still returns a bare 404 without asking another key', async () => {
+      installGrouped()
+      statuses = [404]
+      bodies = ['404 page not found']
+      const response = await globalThis.fetch('https://grouped.example.com/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'gpt-6.1-sol' }),
+      })
+      expect(sent).toHaveLength(1)
+      expect(response.status).toBe(404)
+    })
+
+    it('benches the (key, model) pair and leaves the key free for its other models', async () => {
+      installGrouped()
+      statuses = [404]
+      bodies = [unserved('gpt-6.1-sol')]
+      await globalThis.fetch('https://grouped.example.com/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'gpt-6.1-sol' }),
+      })
+      expect(sent).toHaveLength(2)
+      // The same model now starts on the key that serves it.
+      await globalThis.fetch('https://grouped.example.com/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'gpt-6.1-sol' }),
+      })
+      expect(sent[2]?.headers.get('authorization')).toBe('Bearer sk-g2')
+      // A different model is not affected: G1 still leads.
+      await globalThis.fetch('https://grouped.example.com/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'glm-4' }),
+      })
+      expect(sent[3]?.headers.get('authorization')).toBe('Bearer sk-g1')
+    })
+
+    it('names the real cause when every key refuses the same model', async () => {
+      installGrouped()
+      statuses = [404, 404]
+      bodies = [unserved('gpt-6.1-sol'), unserved('gpt-6.1-sol')]
+      const response = await globalThis.fetch('https://grouped.example.com/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'gpt-6.1-sol' }),
+      })
+      expect(sent).toHaveLength(2)
+      expect(response.status).toBe(404)
+      const body = await response.json() as { message: string }
+      expect(body.message).toContain('not supported by any configured account in this group')
+      expect(body.message).toContain('all 2 keys of this provider refused model "gpt-6.1-sol"')
+      expect(body.message).toContain('Keys panel')
+    })
   })
 })

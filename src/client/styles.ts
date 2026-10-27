@@ -106,20 +106,38 @@ body[data-ds-dark-theme] {
 .bre-effort-card {
   display: flex;
   flex-direction: column;
-  gap: 13px;
-  padding: 13px 15px 12px;
+  gap: 11px;
+  padding: 12px 15px 12px;
   border: none;
   border-radius: var(--bre-r-md);
   background: var(--dsw-alias-settings-card-fill, #ffffff);
   box-sizing: border-box;
 }
+/* 支持模态, above the thinking switch. The same 15px inset as the card below
+   so its label lines up with the card's sections and with the switch. */
+.bre-effort-modality {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 0 15px;
+}
 /* The editor's one-line head: the master switch with its title, the declared
-   state, and the applied suggestion's provenance pill. */
+   state, and the applied suggestion's provenance pill. The card below pads
+   its content 15px in; without the same inset the switch sits on the card's
+   outer edge, left of every section under it. */
 .bre-effort-top {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 9px;
+  padding: 0 15px;
+}
+/* A caveat that qualifies the SWITCH (no reasoning-effort control declared, no
+   off level): it hangs directly under the switch row, so it keeps that row's
+   15px inset and tightens the gap instead of opening a paragraph block. */
+.bre-effort-note--top {
+  padding: 0 15px;
+  margin-top: -3px;
 }
 .bre-effort-state {
   font-size: 12px;
@@ -419,7 +437,7 @@ body[data-ds-dark-theme] {
 .bre-effort-sec {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 6px;
 }
 .bre-effort-labelrow {
   display: flex;
@@ -435,10 +453,13 @@ body[data-ds-dark-theme] {
 }
 /* User item 8: the explanation moved OUT of the label row. As an ellipsised
    fragment beside the label it was unreadable at the disclosure's width; on its
-   own line at 11/16 the whole sentence fits, which is what the board draws. */
+   own line at 11/16 the whole sentence fits, which is what the board draws.
+   It now follows the pills (the board's order: heading, control, note), so it
+   keeps no top margin of its own — the section's 6px gap is the whole spacing. */
 .bre-effort-hint {
   font-size: 11px;
   line-height: 16px;
+  margin: 0;
   color: var(--bre-ink-4);
 }
 .bre-effort-grow { flex: 1 1 auto; min-width: 0; }
@@ -521,6 +542,12 @@ body[data-ds-dark-theme] {
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 18px;
   align-items: start;
+}
+/* The card with the thinking switch off: the two token counts stand alone, so
+   the slab tightens to their own height and keeps the same 15px inset. */
+.bre-effort-card--capacity {
+  gap: 9px;
+  padding: 11px 15px 12px;
 }
 .bre-effort-wire {
   box-sizing: border-box;
@@ -1584,11 +1611,26 @@ body:not([data-ds-dark-theme]) .bre-tip {
 .bre-headers-actions .bre-secondary-button:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover, #2631480f);
 }
-/* The row that closes the pane. It gets room, not a rule: the last section
-   already carries the pane's divider on its title row, so a line here would
-   draw a second one with nothing between them to divide. */
+/* The row that closes the pane. In the fold it gets room, not a rule: the pane
+   already carries its divider on its title row, so a line here would draw a
+   second one with nothing between them to divide. */
 .bre-headers-actions {
   padding-top: 12px;
+}
+
+/* Under the tabs the row is the card's ONLY commit row — the takeover hides the
+   official footer's body on this pane — so it wears the footer dress the other
+   two panes inherit from the official row: one hairline above, the pair
+   right-aligned beneath it, matching that row's 6px margin / 12px padding / 1px
+   hairline (the padding is the base rule's, just above). The advanced pane's
+   保存 was the only commit button without that divider. The rule belongs to the
+   row that carries the pane's own save: the deferred variant (the
+   create-provider card) has none and commits with the card's kept footer row,
+   which already wears its own divider — a line here would stack a second one
+   directly above it. */
+.bre-headers[data-bre-region='advanced'] .bre-headers-actions:has(.bre-primary-button) {
+  margin-top: 6px;
+  border-top: 1px solid var(--dsw-alias-border-l2, #0000001a);
 }
 
 /* The row actions and the section's Edit affordance: the official 28px
@@ -2290,6 +2332,24 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] > button:has(+ .bre-auto-effort),
 .bre-tabbed[data-bre-tab='models'] [data-bre-editor-body] [class*='modelListHead'] > button:not(.bre-auto-effort):last-of-type {
   margin-left: auto;
+}
+
+/* The Fingerprint pane keeps the body under it too, and the "Customized" group
+   stands there as an empty shell wearing its separator: on this tab every child
+   of the group is a pane claim (the identity fields, the catalogue) or the
+   dismissed summary, so the .5px line sat over a bare 22px strip between the
+   pane above and the commit row below. The separator's job is to divide the
+   group from the key field above it — this tab shows neither — so it goes, with
+   the group's and its body's top padding, the same way the Models pane's did.
+   The commit row's own hairline stays: it is the footer divider every tab's
+   save row wears, and the shell's was the second line the pane had no use for. */
+.bre-tabbed[data-bre-tab='fingerprint'] [data-bre-editor-body] details[class*='customized'] {
+  border-top: none;
+  padding-top: 0;
+}
+
+.bre-tabbed[data-bre-tab='fingerprint'] [data-bre-editor-body] details[class*='customized'] > [class*='customizedBody'] {
+  padding-top: 0;
 }
 
 /* The click's answer, as a bubble at the top of the window that takes itself
@@ -3004,7 +3064,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 /* The provider card's address tag: the protocol family the base URL serves.
    A hairline pill, the redesign's quiet badge: centred text inside a 999
    capsule, never a control. The width is FIXED at the form's label column:
-   OpenAI, Anthropic and Gemini chips then share one 96px prefix column, so
+   OpenAI and Anthropic chips then share one 96px prefix column, so
    the field's input and every 更多端点 row's input start at the same x —
    a min-width column would drift with each family's name length. */
 .bre-endpoint-family {

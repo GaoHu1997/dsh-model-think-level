@@ -252,9 +252,9 @@ function supportsVision(model: ModelChoiceLike, configuredInput?: readonly strin
 
 /**
  * Whether the model is declared an IMAGE GENERATOR (生图). Only the stored
- * marker decides: the switcher hides exactly the rows the Models page marked,
- * never a name guess — a guess hiding a chat model would be unfixable from the
- * menu itself.
+ * marker decides, never a name guess: the switcher badges exactly the rows the
+ * Models page marked, and a guess would badge a chat model the user cannot
+ * un-badge from the menu itself.
  */
 function isImageGen(choice: ModelChoiceLike, facts: ModelFacts | undefined): boolean {
   if (facts?.imageGen === true) return true
@@ -311,6 +311,38 @@ function thinkingIcon(label: string): ReactNode {
   )
 }
 
+/**
+ * The image-generation badge: a picture frame with a sparkle (the same glyph
+ * the Models page's 生图 pill draws), so a generator row is told apart from a
+ * chat row at a glance. Generation models are offered like any other row —
+ * hiding them kept them out of reach from the composer entirely.
+ */
+function imageGenIcon(label: string): ReactNode {
+  return createElement(
+    'svg',
+    {
+      className: 'bre-tag-icon',
+      width: 13,
+      height: 13,
+      viewBox: '0 0 16 16',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 1.3,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      role: 'img',
+      'aria-label': label,
+    },
+    createElement('path', { d: 'M9.4 12.7H3.6a1.7 1.7 0 0 1-1.7-1.7V5.1a1.7 1.7 0 0 1 1.7-1.7h4.2' }),
+    createElement('path', { d: 'M2.6 10.6 5.3 8.5l1.8 1.5 1.6-1.3 2.3 2' }),
+    createElement('path', {
+      d: 'M12.4 2.2l.75 2.05L15.2 5l-2.05.75L12.4 7.8l-.75-2.05L9.6 5l2.05-.75Z',
+      fill: 'currentColor',
+      stroke: 'none',
+    }),
+  )
+}
+
 /** The gradient's anchor hues, cool to hot: the ladder's own intensity scale,
  *  so a stop's colour IS its position on this ramp (进度条渐变色，不同的等级
  *  不同的颜色). */
@@ -339,8 +371,17 @@ export function effortRampColor(t: number): string {
   return `rgb(${channel(from[0], to[0])}, ${channel(from[1], to[1])}, ${channel(from[2], to[2])})`
 }
 
-/** The capability badges of one model, or null when it declares neither. */
-function modelTags(model: ModelChoiceLike, t: Translator, configuredInput?: readonly string[]): ReactNode {
+/**
+ * The capability badges of one model, or null when it declares none: the eye
+ * for image input, the sparkle for a declared ladder, the frame-with-sparkle
+ * for a 生图 generator.
+ */
+function modelTags(
+  model: ModelChoiceLike,
+  t: Translator,
+  configuredInput?: readonly string[],
+  imageGen = false,
+): ReactNode {
   const badges: ReactNode[] = []
   if (supportsVision(model, configuredInput)) {
     badges.push(createElement(
@@ -354,6 +395,13 @@ function modelTags(model: ModelChoiceLike, t: Translator, configuredInput?: read
       'span',
       { key: 'thinking', className: 'bre-tag', title: t('tagThinking') },
       thinkingIcon(t('tagThinking')),
+    ))
+  }
+  if (imageGen) {
+    badges.push(createElement(
+      'span',
+      { key: 'imageGen', className: 'bre-tag', title: t('tagImageGen') },
+      imageGenIcon(t('tagImageGen')),
     ))
   }
   if (badges.length === 0) return null
@@ -496,20 +544,20 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
 
   // The saved per-model facts (input declaration, 生图 marker, context window),
   // keyed per provider: the host catalog omits all three, and the switcher's
-  // image-generation filter, badges and capacity tag all read them.
+  // badges and capacity tag read them.
   const factsFor = useCallback((provider: string, id: string): ModelFacts | undefined =>
     inputDeclarations.get(provider)?.get(id), [inputDeclarations])
 
-  // The models of one group the switcher may offer: the rows the document
-  // marked 生图 are image generators and cannot serve a chat turn, so they are
-  // absent from the columns, the search and the counts alike (user item 6).
-  const visibleModelsOf = useCallback((group: DirectoryGroupLike | undefined, provider: string): readonly ModelChoiceLike[] =>
-    modelsOf(group).filter(choice => !isImageGen(choice, factsFor(provider, choice.id))), [factsFor])
-
   // Providers that actually hold models; the one whose models the right column
   // shows follows the current model until the user picks another column entry.
+  //
+  // Every model of a group is offered, 生图 rows included: they used to be
+  // filtered out here because an image generator cannot serve a chat turn, but
+  // that also put them out of reach of the composer entirely. The row now wears
+  // the 生图 badge instead, so the choice stays the user's (生图模型需要出现在
+  // 会话框的切换模型列表中).
   const providerCatalog = state.groups
-    .filter(candidate => visibleModelsOf(candidate, candidate.id).length > 0 && !disabled.includes(candidate.id))
+    .filter(candidate => modelsOf(candidate).length > 0 && !disabled.includes(candidate.id))
     .map(candidate => candidate.id)
   const providerIds = mergeProviderOrder(baseProviderOrder(providerCatalog), preferredOrder)
   const shownProvider = openProvider !== null && providerIds.includes(openProvider)
@@ -527,10 +575,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const searching = needle !== ''
   const matches: Array<{ provider: string; choice: ModelChoiceLike }> = searching
     ? providerIds.flatMap(provider => orderModelEntries(
-        visibleModelsOf(
-          state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike | undefined,
-          provider,
-        ),
+        modelsOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike | undefined),
         modelOrderByProvider[provider] ?? [],
       )
         .filter(choice => (choice.name ?? choice.id).toLowerCase().includes(needle)
@@ -542,10 +587,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     : (shownProvider === null
       ? []
       : orderModelEntries(
-        visibleModelsOf(
-          state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike | undefined,
-          shownProvider,
-        ),
+        modelsOf(state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike | undefined),
         modelOrderByProvider[shownProvider] ?? [],
       ).map(choice => ({ provider: shownProvider as string, choice })))
   const activeKey = current === null ? '' : current.provider + '/' + current.model
@@ -892,7 +934,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
           },
           providerLabelOf(providerGroup),
         ),
-        createElement('span', { className: 'bre-provider-count' }, String(visibleModelsOf(providerGroup, provider).length)),
+        createElement('span', { className: 'bre-provider-count' }, String(modelsOf(providerGroup).length)),
       )
     }),
     ...(providerIds.length === 0
@@ -947,14 +989,19 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
               : null,
             label,
           ),
-          // No tick on a model row: it would sit right beside the capability
-          // badges and read as one of them. The accent colour (plus the row
-          // tint in CSS) is the whole selection signal.
-          modelTags(choice, t, factsFor(provider, choice.id)?.input),
           // The declared context window, spelled the way catalogues do
           // (`128K`, `1M`): the size a user picks a model by, read from the
           // same document the Models page writes (user item 4).
           modelCapacity(factsFor(provider, choice.id)?.contextWindow, t),
+          // No tick on a model row: it would sit right beside the capability
+          // badges and read as one of them. The accent colour (plus the row
+          // tint in CSS) is the whole selection signal.
+          modelTags(
+            choice,
+            t,
+            factsFor(provider, choice.id)?.input,
+            isImageGen(choice, factsFor(provider, choice.id)),
+          ),
         )
       })),
   )

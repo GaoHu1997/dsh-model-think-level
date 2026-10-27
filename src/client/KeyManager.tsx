@@ -31,8 +31,8 @@
  *     that API shape (Anthropic Messages, Chat Completions or Responses) instead
  *     of the provider's default, and uses the matching base URL. A key left on
  *     "auto" speaks each model's own wire: claude models against the Anthropic
- *     address, gemini models against the Gemini one, the rest the provider's
- *     protocol — wherever that address is configured. The protocol picker lives
+ *     address, the rest the provider's protocol — wherever that address is
+ *     configured. The protocol picker lives
  *     in the same hover-revealed action tray as the other actions.
  *   - **a value is shown masked, or not at all.** The host reads the stored
  *     secret and answers a head-and-tail preview; the middle never leaves it,
@@ -51,6 +51,7 @@ import {
   endpointFamilyOf,
   isLegalKeyValue,
   normalizeKeyAlias,
+  normalizeKeyProtocol,
   type RouteProtocol,
 } from '../key-refs.js'
 import { ENDPOINTS_CHANGED_EVENT, type EndpointsChangedDetail } from './events.js'
@@ -153,18 +154,15 @@ function scopeText(row: KeyRow, t: Translate): string {
 }
 
 /** The protocols a key may pin, in the picker's order (undefined = any). The
- *  order is the one the menus show: the two OpenAI wires first (they are the
- *  same provider's two APIs, and the common case), then Anthropic, then Gemini. */
-const PROTOCOL_CHOICES: readonly RouteProtocol[] = ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai']
+ *  two OpenAI wires come first, followed by Anthropic. */
+const PROTOCOL_CHOICES: readonly RouteProtocol[] = ['openai-completions', 'openai-responses', 'anthropic-messages']
 
 /** The addresses nothing is known about yet. */
-const NO_ENDPOINTS: KeyEndpoints = { openai: null, anthropic: null, gemini: null }
+const NO_ENDPOINTS: KeyEndpoints = { openai: null, anthropic: null }
 
 /**
- * How model ids read in every list this panel shows. `numeric` keeps a family
- * in version order (`glm-4.5` before `glm-4.6`), and one collator over the
- * whole list is what keeps a letter grouped: the route's own models and the
- * ones the keys discovered are merged into one alphabet, not two blocks.
+ * How the provider's added model ids read in the scope chips. `numeric` keeps
+ * a family in version order (`glm-4.5` before `glm-4.6`).
  */
 const MODEL_ORDER = new Intl.Collator('en', { numeric: true, sensitivity: 'base' })
 
@@ -191,7 +189,6 @@ function protocolLabel(protocol: RouteProtocol | undefined, t: Translate): strin
   if (protocol === 'anthropic-messages') return t('keysProtocolAnthropic')
   if (protocol === 'openai-responses') return t('keysProtocolResponses')
   if (protocol === 'openai-completions') return t('keysProtocolOpenAI')
-  if (protocol === 'google-generative-ai') return t('keysProtocolGemini')
   // Anything else (including none) is the AUTOMATIC wire: each request speaks
   // the protocol the model's own family names, where the provider addressed it.
   return t('keysProtocolDefault')
@@ -207,7 +204,6 @@ function protocolHint(protocol: RouteProtocol | undefined, t: Translate): string
   if (protocol === 'anthropic-messages') return t('keysProtocolAnthropicHint')
   if (protocol === 'openai-responses') return t('keysProtocolResponsesHint')
   if (protocol === 'openai-completions') return t('keysProtocolOpenAIHint')
-  if (protocol === 'google-generative-ai') return t('keysProtocolGeminiHint')
   return t('keysProtocolDefaultHint')
 }
 
@@ -240,8 +236,8 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   const { route, t, draft } = props
   const client = props.client ?? httpKeyManagerClient
 
-  const [rows, setRows] = useState<readonly KeyRow[] | undefined>(undefined)
-  const [routeModels, setRouteModels] = useState<readonly string[]>([])
+  const [rows, setRows] = useState<readonly KeyRow[] | undefined>(() => client.cached?.(route)?.entries)
+  const [routeModels, setRouteModels] = useState<readonly string[]>(() => client.cached?.(route)?.models ?? [])
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<Editing | undefined>(undefined)
@@ -269,13 +265,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   /** Which row's protocol menu is open, and the trigger it hangs off. */
   const [protocolMenu, setProtocolMenu] = useState<{ ref: string; anchor: HTMLElement } | undefined>(undefined)
   /** Which family addresses this route has, so the picker only offers those. */
-  const [endpoints, setEndpoints] = useState<KeyEndpoints>(NO_ENDPOINTS)
-  /**
-   * The models the keys advertise that the provider itself does not declare yet.
-   * Shown as an offer, never applied: writing a provider's model list is the
-   * user's click, not a side effect of opening this list.
-   */
-  const [unmerged, setUnmerged] = useState<readonly string[]>([])
+  const [endpoints, setEndpoints] = useState<KeyEndpoints>(() => client.cached?.(route)?.endpoints ?? NO_ENDPOINTS)
 
   /**
    * Adopt whatever the host just answered. A refusal keeps the list that is
@@ -290,8 +280,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
       }
       setRows(answer.entries)
       setRouteModels(answer.models ?? [])
-      // Sorted here too, so the offer line reads in the same order the chips do.
-      setUnmerged((answer.unmergedModels ?? []).slice().sort(MODEL_ORDER.compare))
       setEndpoints(answer.endpoints)
       setNotice(okText === undefined ? undefined : { kind: 'status', text: okText })
     },
@@ -372,8 +360,8 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     setEditing({ kind, ref: row.ref })
     setNameDraft(kind === 'alias' ? row.alias ?? '' : '')
     setValueDraft('')
-    // The scope chips are seeded with the model list the row currently holds.
-    setScopeDraft(row.models ?? [])
+    // A previously discovered catalogue is not a manual assignment.
+    setScopeDraft((row.models ?? []).filter(model => routeModels.includes(model)))
     // Only a create carries a protocol pin; once the key exists its own picker
     // owns the protocol, so an edit form must not silently re-pin it.
     setProtocolDraft(undefined)
@@ -408,17 +396,18 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
             adopt(answer, t('keysAdded'))
             return
           }
-          // A protocol chosen in the form rides the create: a key's wire is part
-          // of what is being chosen here, and pinning it in the same gesture
-          // spares the user a second trip through the row's picker.
-          const created = pinnedProtocol === undefined
-            ? undefined
-            : answer.entries.find(entry => !before.has(entry.ref))
-          const pinned = created === undefined
-            ? answer
+          // The add has committed even if pinning its protocol later fails.
+          // Keep that row and clear the secret; protocol retries belong to the
+          // row's picker rather than resubmitting the successful add.
+          adopt(answer, t('keysAdded'))
+          closeForm()
+          if (pinnedProtocol === undefined) return
+          const created = answer.entries.find(entry => entry.ref === answer.addedRef)
+            ?? answer.entries.find(entry => !before.has(entry.ref))
+          const pinned: KeyAnswer = created === undefined
+            ? { ok: false }
             : await client.setProtocol(route, created.ref, pinnedProtocol)
           adopt(pinned, t('keysAdded'))
-          if (pinned.ok) closeForm()
           return
         }
         if (ref === undefined) return
@@ -450,20 +439,21 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
    * the model chips (图1) rather than a free-text field: the user picks from the
    * models the provider actually offers, so no one has to recall a model id.
    */
-  /**
-   * The models a scope may be chosen from: the provider's own list plus whatever
-   * the keys advertise — a key serving a model the provider has not declared yet
-   * is exactly the case scopes exist for. One sorted list, so the picker reads
-   * as a single alphabet instead of "declared block, then discovered block"
-   * (where the same letter would sit at both ends).
-   */
-  const chipModels = [...routeModels, ...unmerged].sort(MODEL_ORDER.compare)
+  /** Model assignments are chosen only from models added to this provider. */
+  const chipModels = [...new Set(routeModels)].sort(MODEL_ORDER.compare)
 
   const form = (): ReactNode => {
     if (editing === undefined) return null
     const kind = editing.kind
     const wantsValue = kind === 'add' || kind === 'value'
     const wantsScope = kind === 'scope'
+    // What this key's own listing said (host-observed, not user-assigned): a
+    // one-click way to make "this key's group only carries part of the
+    // catalogue" explicit, instead of discovering it as a 404 at request time.
+    const observed = kind === 'scope' && editing?.ref !== undefined
+      ? rows?.find(row => row.ref === editing.ref)?.observed ?? []
+      : []
+    const observedChips = chipModels.filter(model => observed.includes(model))
     const illegal = wantsValue && valueDraft.length > 0 && !isLegalKeyValue(valueDraft)
     return (
       <div className="bre-keys-form">
@@ -543,12 +533,25 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
         ) : null}
         {kind === 'add' ? <p className="bre-keys-hint">{t('keysProtocolCreateHint')}</p> : null}
         {wantsScope ? <p className="bre-keys-hint">{t('keysScopeHint')}</p> : null}
+        {observedChips.length > 0 && observedChips.length < chipModels.length ? (
+          <p className="bre-keys-hint">{t('keysScopeObservedHint', { count: observedChips.length, total: chipModels.length })}</p>
+        ) : null}
         {illegal ? (
           <p className="bre-effort-message bre-error" role="alert">
             {t('keysAddIllegal')}
           </p>
         ) : null}
         <div className="bre-keys-form-actions">
+          {wantsScope && observedChips.length > 0 ? (
+            <button
+              type="button"
+              className="bre-link-button bre-keys-allmodels"
+              disabled={busy}
+              onClick={() => setScopeDraft(observedChips)}
+            >
+              {t('keysScopeObserved', { count: observedChips.length })}
+            </button>
+          ) : null}
           {wantsScope ? (
             <button
               type="button"
@@ -617,9 +620,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     protocolMenu === undefined ? undefined : rows?.find(row => row.ref === protocolMenu.ref)
 
   if (rows === undefined) {
-    // Still reading: NOTHING, until the answer lands. A read that FAILED says so
-    // instead of appearing to load forever, and still offers the add entry.
-    if (notice === undefined) return <div className="bre-keys" />
+    if (notice === undefined) return <div className="bre-keys" aria-busy="true"><p role="status">{t('keysLoading')}</p></div>
     return (
       <div className="bre-keys">
         <p className={'bre-effort-message bre-' + notice.kind} role={notice.kind === 'error' ? 'alert' : 'status'}>
@@ -735,17 +736,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                         type="button"
                         className="bre-link-button"
                         disabled={busy}
-                        onClick={() => {
-                          setConfirming(row.ref)
-                          setEditing(undefined)
-                        }}
-                      >
-                        {t('keysRemove')}
-                      </button>
-                      <button
-                        type="button"
-                        className="bre-link-button"
-                        disabled={busy}
                         onClick={() => openForm('alias', row)}
                       >
                         {t('keysAlias')}
@@ -772,6 +762,17 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                       >
                         {t('keysEdit')}
                       </button>
+                      <button
+                        type="button"
+                        className="bre-link-button"
+                        disabled={busy}
+                        onClick={() => {
+                          setConfirming(row.ref)
+                          setEditing(undefined)
+                        }}
+                      >
+                        {t('keysRemove')}
+                      </button>
                     </>
                   )}
                 </span>
@@ -791,20 +792,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
           official form would have kept. */}
       {draft === true ? <p className="bre-keys-note">{t('keysDraftHint')}</p> : null}
 
-      {unmerged.length === 0 ? null : (
-        <p className="bre-keys-note">
-          {t('keysMergedOffer', { count: unmerged.length, models: unmerged.join(', ') })}
-          {' '}
-          <button
-            type="button"
-            className="bre-link-button"
-            disabled={busy}
-            onClick={() => void run(() => client.applyMerged(route), t('keysMergedApplied'))}
-          >
-            {t('keysMergedApply')}
-          </button>
-        </p>
-      )}
       {notice === undefined ? null : (
         <p className={'bre-effort-message bre-' + notice.kind} role={notice.kind === 'error' ? 'alert' : 'status'}>
           {notice.text}

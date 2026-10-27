@@ -234,7 +234,7 @@ describe('CreateCardPane', () => {
       // what it is not yet (see the create-card case in editor-tabs.spec.ts).
       expect(Array.from(card.host.querySelectorAll(`[${EDITOR_TAB_ID_ATTR}]`)).map(
         tab => tab.getAttribute(EDITOR_TAB_ID_ATTR),
-      )).toEqual(['provider', 'models', 'fingerprint', 'advanced'])
+      )).toEqual(['provider', 'models', 'advanced', 'fingerprint'])
     } finally {
       await pane.unmount()
     }

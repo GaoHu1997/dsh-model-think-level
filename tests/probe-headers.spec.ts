@@ -77,29 +77,12 @@ describe('composeProbeHeaders (Anthropic Messages)', () => {
   })
 })
 
-describe('composeProbeHeaders (Google Generative AI)', () => {
-  it('answers through x-goog-api-key, never a Bearer', () => {
-    expect(composeProbeHeaders(undefined, 'AIza-test', 'google-generative-ai')).toEqual({
+describe('composeProbeHeaders (legacy profile credential headers)', () => {
+  it('retains a profile x-goog-api-key without treating it as a native protocol credential', () => {
+    expect(composeProbeHeaders({ 'x-goog-api-key': 'AIza-profile' }, 'sk-test', 'openai-completions')).toEqual({
       accept: 'application/json',
-      'x-goog-api-key': 'AIza-test',
-    })
-    expect(composeProbeHeaders(undefined, 'AIza-test', 'google-generative-ai')['authorization']).toBeUndefined()
-  })
-
-  it('overwrites a profile x-goog-api-key with the resolved credential', () => {
-    expect(composeProbeHeaders({ 'x-goog-api-key': 'AIza-profile' }, 'AIza-test', 'google-generative-ai')).toEqual({
-      accept: 'application/json',
-      'x-goog-api-key': 'AIza-test',
-    })
-  })
-
-  it('keeps a profile authorization untouched, exactly as the anthropic arm does', () => {
-    expect(composeProbeHeaders({ authorization: 'Bearer from-profile' }, 'AIza-test', 'google-generative-ai')['authorization']).toBe('Bearer from-profile')
-  })
-
-  it('sends only accept when no credential resolved', () => {
-    expect(composeProbeHeaders(undefined, undefined, 'google-generative-ai')).toEqual({
-      accept: 'application/json',
+      'x-goog-api-key': 'AIza-profile',
+      authorization: 'Bearer sk-test',
     })
   })
 })

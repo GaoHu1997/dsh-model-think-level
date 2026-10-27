@@ -122,9 +122,12 @@ export interface SettingsJoin {
    * authoritative. A caller about to fence a write on this revision must know
    * which one it is holding -- and it must not go to the wire just to find out,
    * because the host's `describe()` emits `settings/document-updated`.
+   * `'scope-stale'` is a mirrored read taken while the mirror was reloading:
+   * the last snapshot it had accepted. It is good enough to RENDER from and
+   * must never fence a write (its revision may already be superseded).
    * Undefined for a join a mock built by hand, which is never stale.
    */
-  source?: 'scope' | 'wire';
+  source?: 'scope' | 'wire' | 'scope-stale';
 }
 /**
  * The client shell's context face, declared locally instead of imported: the

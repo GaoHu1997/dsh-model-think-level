@@ -129,10 +129,10 @@ const TAB_PROVIDER = 'provider'
 const TAB_MODELS = 'models'
 const TAB_FINGERPRINT = 'fingerprint'
 const TAB_ADVANCED = 'advanced'
-const TAB_IDS = [TAB_PROVIDER, TAB_MODELS, TAB_FINGERPRINT, TAB_ADVANCED] as const
+const TAB_IDS = [TAB_PROVIDER, TAB_MODELS, TAB_ADVANCED, TAB_FINGERPRINT] as const
 
 /**
- * A region id that is NEVER a tab. The pane rules only ever reveal the three
+ * A region id that is NEVER a tab. The pane rules only ever reveal the tab
  * ids above, so a region tagged with this one stays hidden on every tab — which
  * is exactly what a part of the editor that the card already shows elsewhere
  * needs. Today that is the editor's own header (its title repeats the card

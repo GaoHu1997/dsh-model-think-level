@@ -159,6 +159,30 @@ describe('parseKeyIndex', () => {
     expect(parsed.endpoints?.['ofox']).toEqual({ openai: 'https://ok.example/v1' })
   })
 
+  it('drops legacy Gemini pins and endpoints from stored metadata and subsequent writes', () => {
+    const legacy: unknown = {
+      version: 1,
+      providers: { ofox: [{ ref: 'A', alias: 'legacy', protocol: 'google-generative-ai' }] },
+      endpoints: {
+        ofox: { openai: 'https://ok.example/v1', gemini: 'https://gemini.example/v1beta' },
+        google: { gemini: 'https://gemini.example/v1beta' },
+      },
+    }
+    writeKeyIndex(emptyKeyIndex(), fileOf())
+    writeFileSync(fileOf(), JSON.stringify(legacy), 'utf8')
+    const parsed = readKeyIndex(fileOf())
+    expect(keyEntriesOf(parsed, 'ofox')).toEqual([{ ref: 'A', alias: 'legacy' }])
+    expect(parsed.endpoints).toEqual({ ofox: { openai: 'https://ok.example/v1' } })
+    // A writer still carrying a legacy Gemini field goes in through the same
+    // normalizing door: the extra property is dropped before anything lands.
+    const legacyWrite = { anthropic: 'https://anthropic.example', gemini: 'https://gemini-new.example/v1beta' }
+    const updated = withRouteEndpoints(parsed, 'ofox', legacyWrite)
+    writeKeyIndex(updated, fileOf())
+    expect(readKeyIndex(fileOf()).endpoints).toEqual({ ofox: { anthropic: 'https://anthropic.example' } })
+    expect(readFileSync(fileOf(), 'utf8')).not.toContain('gemini')
+    expect(readFileSync(fileOf(), 'utf8')).not.toContain('google-generative-ai')
+  })
+
   it('preserves a protocol and the endpoints through every writer', () => {
     let document = withRouteEndpoints(
       withKeyProtocol(withKeyEntry(emptyKeyIndex(), 'ofox', 'A'), 'ofox', 'A', 'openai-responses'),

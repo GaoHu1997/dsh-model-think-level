@@ -10,12 +10,20 @@
  *  - A model only one key can serve sticks to that key.
  *  - When a request errors, the next capable key is tried.
  *
- * "Can serve" is read from each key's discovered `models` scope:
- *  - a scope that lists the model  -> can serve it (an exact claim);
- *  - an UNSCOPED key (no `models`)  -> treated as a catch-all, so it can serve
- *    anything (this is the state before a key has been probed, and the way a
- *    user deliberately says "this key takes whatever is left");
- *  - a scope that does NOT list the model -> cannot serve it (an exact denial).
+ * "Can serve" is read from TWO different kinds of knowledge, which are never
+ * mixed up:
+ *  - an ASSIGNMENT ({@link KeyCandidate.models}): the user's own scope. A scope
+ *    that lists the model can serve it; a scope that does not is an exact
+ *    denial; an UNSCOPED key is a catch-all that serves whatever is left
+ *    (the state before a key has been scoped, and the way a user says "this
+ *    key takes whatever is left");
+ *  - an OBSERVATION ({@link ServingKnowledge}): what each key's `/models`
+ *    listing advertised the last time it answered. Keys on one route can sit
+ *    in different upstream groups, so "key B lists this model, key A does not"
+ *    is a real fact about the pair — but only when a sibling DOES list it: a
+ *    failed listing is not an empty one, and a key nobody probed stays a
+ *    candidate. This is the case a per-key scope cannot express, because the
+ *    user never assigned anything and the first key is a catch-all.
  *
  * Eligible keys keep their list order, so the "both can serve -> first key"
  * and "only one can -> that key" rules both fall out of a single filter. If NO
@@ -41,7 +49,10 @@
  *    cannot re-dispatch, so it trails the keys that can (it is never dropped: a
  *    lone key must still sign the request);
  *  - COOLDOWN: a key that just failed with a retryable status rests for a while
- *    instead of being charged the same failure again on the next request.
+ *    instead of being charged the same failure again on the next request. A
+ *    failure that names THIS model ({@link classifyFailure}'s `unserved`) rests
+ *    only the (key, model) pair, so a key that carries one group's models and
+ *    not another's keeps serving the ones it does carry.
  *
  * The wire seam alone ranks by wire, because only it can act on a pin; the fetch
  * seam only consults the cooldown memory, since it can neither switch a protocol
@@ -59,16 +70,16 @@ export interface KeyCandidate {
   /** The secret to put on the wire. */
   readonly value: string
   /**
-   * Model ids this key is known to serve. `undefined` means "unscoped": not
-   * probed yet, or deliberately left as a catch-all. An array (possibly empty)
-   * is a concrete scope.
+   * Model ids this key is known to serve. `undefined` means "unscoped":
+   * deliberately left as a catch-all. An array (possibly empty) is a concrete
+   * scope.
    */
   readonly models?: readonly string[]
   /**
    * The wire protocol this key must speak, when it is pinned to one.
    * `undefined` means AUTOMATIC: the request speaks whichever wire the model's
    * own family names — an Anthropic-family endpoint for claude models, the
-   * Gemini one for gemini models, the route's default for everything else —
+   * route's default for everything else —
    * as far as the key carries that family's address in {@link endpoints}.
    * A concrete value makes the wire seam re-dispatch the request through that
    * protocol's API implementation (a true protocol switch), using {@link endpoint}.
@@ -89,68 +100,113 @@ export interface KeyCandidate {
   readonly endpoints?: Readonly<Partial<Record<EndpointFamily, string>>>
 }
 
-/** Whether `key` can serve `model`, per the scope rules above. */
-export function canServe(key: KeyCandidate, model: string | undefined): boolean {
+/**
+ * What the plugin has OBSERVED about one route's keys, as opposed to what the
+ * user ASSIGNED in each key's `models`.
+ *
+ * A listing says what an account's upstream group actually carries; an
+ * assignment says what the user ordered. They answer different questions, so
+ * they travel separately: an assignment always wins, and an observation only
+ * decides between keys the user left unscoped.
+ */
+export interface ServingKnowledge {
+  /**
+   * Each reference's last successful listing: the model ids that key's
+   * `/models` answer advertised. A reference with NO entry never answered and
+   * is therefore unknown — never "serves nothing", because a failed listing must
+   * not be read as an empty one.
+   */
+  readonly listed: ReadonlyMap<string, readonly string[]>
+}
+
+/**
+ * Whether `key` can serve `model`, per the assignment and observation rules.
+ * @param key - the candidate, with its manual scope (if any).
+ * @param model - the model id the request names, or undefined when unknown.
+ * @param knowledge - what the route's keys were last observed serving.
+ */
+export function canServe(key: KeyCandidate, model: string | undefined, knowledge?: ServingKnowledge): boolean {
   // An unknown model (the body was unreadable) cannot be used to exclude any
   // key, so every key stays eligible and list order alone decides.
   if (model === undefined) return true
   const models = key.models
-  // Unscoped is a catch-all: it has no claim that excludes this model.
-  if (models === undefined) return true
-  return models.includes(model)
+  // The user's assignment is the authority: it excludes a model exactly the way
+  // it includes one.
+  if (models !== undefined) return models.includes(model)
+  // An unscoped key is a catch-all until something observes otherwise.
+  if (knowledge === undefined) return true
+  const listed = knowledge.listed.get(key.ref)
+  // Never probed: unknown, so it keeps the benefit of the doubt.
+  if (listed === undefined) return true
+  if (listed.includes(model)) return true
+  // This key's listing does not name the model. That is only evidence of a
+  // refusal when a SIBLING key's listing does name it: several keys of one route
+  // can sit in different upstream groups, and "key B carries it, key A does not"
+  // is exactly the pair this rule exists for. When nobody lists it, no
+  // observation is decisive and the key stays a candidate.
+  for (const [ref, other] of knowledge.listed) {
+    if (ref !== key.ref && other.includes(model)) return false
+  }
+  return true
 }
 
 /**
  * Order the keys that may sign a request for `model`, most-preferred first.
  *
- * The result is the eligible keys in their original list order. When the
- * filter leaves nothing, all keys are returned unchanged (last resort) — the
+ * The result is the eligible keys in their original list order, grouped into
+ * four tiers: a key the user assigned this model to, then a key whose own
+ * listing advertises it, then a key nothing is known about, then — last, when no
+ * sibling lists it either — a key that was probed and does not carry it. When
+ * the filter leaves nothing, all keys are returned unchanged (last resort) — the
  * caller's failover loop still bounds the attempts, so an over-eager scope is
  * corrected on the wire rather than failing the request outright.
  * @param keys - the route's keys in preference order (may be empty).
  * @param model - the model id the request names, or undefined when unknown.
+ * @param knowledge - what the route's keys were last observed serving.
  * @returns the ordered candidates to try.
  */
 export function keysForModel(
   keys: readonly KeyCandidate[],
   model: string | undefined,
+  knowledge?: ServingKnowledge,
 ): KeyCandidate[] {
   if (model === undefined) return [...keys]
-  const eligible = keys.filter(key => canServe(key, model))
+  const eligible = keys.filter(key => canServe(key, model, knowledge))
   if (eligible.length === 0) return [...keys]
-  // A key that names this model is an explicit assignment and outranks a
-  // catch-all key that merely *may* serve anything: honouring the assignment
-  // first is what makes "this model belongs to that key" true on the wire.
-  const named = eligible.filter(key => key.models !== undefined)
-  const catchAll = eligible.filter(key => key.models === undefined)
-  return [...named, ...catchAll]
+  const rankOf = (key: KeyCandidate): number => {
+    // An explicit assignment outranks an observation: honouring "this model
+    // belongs to that key" is what makes the user's rule true on the wire.
+    if (key.models !== undefined) return 0
+    const listed = knowledge?.listed.get(key.ref)
+    if (listed === undefined) return 2
+    return listed.includes(model) ? 1 : 3
+  }
+  // A stable sort keeps the "both can serve -> first key" rule inside a tier.
+  return [...eligible].sort((a, b) => rankOf(a) - rankOf(b))
 }
 
 /** The wire families: one body format and one endpoint shape each. */
-export type WireFamily = 'anthropic' | 'openai' | 'gemini'
+export type WireFamily = 'anthropic' | 'openai'
 
 /** The family a protocol draws its body format and endpoint from. */
 export function wireFamilyOf(protocol: RouteProtocol): WireFamily {
   if (protocol === 'anthropic-messages') return 'anthropic'
-  if (protocol === 'google-generative-ai') return 'gemini'
   return 'openai'
 }
 
 /**
  * A model id that names its own family. Vendor-prefixed ids (`anthropic/claude-…`)
- * and bare names (`claude-sonnet-5`, `gpt-6.1`, `o3-mini`, `codex-1`, `gemini-2.5-flash`)
+ * and bare names (`claude-sonnet-5`, `gpt-6.1`, `o3-mini`, `codex-1`)
  * both count; an id that names no family (a relay's `tierflow_pro`) is left unknown
  * so the route's own protocol stays the reference.
  */
 const ANTHROPIC_MODEL_ID = /(?:^|[/:._-])(?:claude|anthropic)(?:$|[/:._-])/i
 const OPENAI_MODEL_ID = /(?:^|[/:._-])(?:gpt|chatgpt|codex)(?:$|[/:._-])|(?:^|[/:._-])o[1-9](?:$|[/:._-])/i
-const GEMINI_MODEL_ID = /(?:^|[/:._-])(?:gemini|gemma)(?:$|[/:._-])/i
 
 /** The family a model id announces, or undefined when it announces none. */
 export function modelWireFamily(modelId: string | undefined): WireFamily | undefined {
   if (modelId === undefined) return undefined
   if (ANTHROPIC_MODEL_ID.test(modelId)) return 'anthropic'
-  if (GEMINI_MODEL_ID.test(modelId)) return 'gemini'
   if (OPENAI_MODEL_ID.test(modelId)) return 'openai'
   return undefined
 }
@@ -160,8 +216,8 @@ export function modelWireFamily(modelId: string | undefined): WireFamily | undef
  *
  * The OpenAI family has two wires (Chat Completions and Responses), so no id can
  * single one of them out — the route's own protocol stays the tie-breaker there.
- * The Anthropic and Gemini families have exactly one each, so a key pinned to
- * one of them needs no translation for a model of that family and deserves the
+ * The Anthropic family has exactly one wire, so a key pinned to it needs no
+ * translation for a model of that family and deserves the
  * first attempt.
  * @param modelId - the model id the request names, or undefined.
  * @returns the concrete protocol, or undefined when the id does not settle one.
@@ -169,7 +225,6 @@ export function modelWireFamily(modelId: string | undefined): WireFamily | undef
 export function modelWireHint(modelId: string | undefined): RouteProtocol | undefined {
   const family = modelWireFamily(modelId)
   if (family === 'anthropic') return 'anthropic-messages'
-  if (family === 'gemini') return 'google-generative-ai'
   return undefined
 }
 
@@ -177,8 +232,8 @@ export function modelWireHint(modelId: string | undefined): RouteProtocol | unde
  * The wire an AUTOMATIC key (no pin) dispatches for `model`.
  *
  * The model's own family decides: a claude id speaks the Anthropic wire against
- * the Anthropic address, a gemini id speaks the Gemini wire against the Gemini
- * address — but only when the key actually carries that family's address; any
+ * the Anthropic address — but only when the key actually carries that family's
+ * address; any
  * other model (or a family the route itself serves) keeps the route's default
  * wire, which is the one dispatch that always works. A wire that just failed
  * this model before any content (`avoid`) is skipped as the automatic choice —
@@ -205,7 +260,6 @@ export function autoWireOf(
   if (candidate.endpoints?.[family] === undefined) return api
   const hinted: RouteProtocol =
     family === 'anthropic' ? 'anthropic-messages'
-    : family === 'gemini' ? 'google-generative-ai'
     : 'openai-completions'
   return hinted === avoid ? api : hinted
 }
@@ -423,21 +477,29 @@ export function planKeys(candidates: readonly KeyCandidate[], options: PlanOptio
 /**
  * Whether an HTTP status is worth retrying on the next key. Authentication and
  * authorization failures (the wrong key for this endpoint), rate limits, timeouts
- * and server faults are all "this key did not work, try the next"; a 400/404/422
- * is a request-shape problem that every key would answer identically, so it is
- * returned to the caller unchanged rather than multiplied across keys.
+ * and server faults are all "this key did not work, try the next"; a bare
+ * 400/404/422 is a request-shape problem that every key would answer identically,
+ * so it is returned to the caller unchanged rather than multiplied across keys.
+ *
+ * The one exception is a 400/404/422 whose BODY names the model as unsupported:
+ * that is not a request-shape problem at all but a fact about this key's upstream
+ * group (a multi-account relay answers exactly this way for a model another
+ * account carries), so it fails over like any other key-level refusal.
  * @param status - the response status code.
+ * @param bodyText - the (bounded) response body, when the caller has read it.
  */
-export function shouldFailover(status: number): boolean {
+export function shouldFailover(status: number, bodyText = ''): boolean {
+  if (classifyFailure(status, bodyText) === 'unserved') return true
   return status === 401 || status === 403 || status === 408 || status === 429 || status >= 500
 }
 
 /**
  * Why a key failed, as far as the next request is concerned. The distinction is
  * only between "this key is the problem" and "every key would repeat it", which
- * is why a 400 has no kind at all.
+ * is why a bare 400 has no kind at all — and between "this key" and "this key
+ * for THIS model", which is why `unserved` exists.
  */
-export type FailureKind = 'auth' | 'rate' | 'quota' | 'server' | 'timeout' | 'refused'
+export type FailureKind = 'auth' | 'rate' | 'quota' | 'server' | 'timeout' | 'refused' | 'unserved'
 
 /**
  * Bodies that say "the account is out of budget" rather than "you are going too
@@ -447,6 +509,35 @@ export type FailureKind = 'auth' | 'rate' | 'quota' | 'server' | 'timeout' | 're
 const QUOTA_FAILURE = /quota|insufficient|exhausted|balance|billing|credit|payment required|额度|余额|欠费|用尽|配额|充值/i
 
 /**
+ * Bodies that say "this account does not carry this model" rather than "your
+ * request is malformed".
+ *
+ * A relay that fans one route out over several upstream accounts answers a model
+ * only SOME accounts carry with a 404 whose text names the model ("Model
+ * \"x\" is not supported by any configured account in this group") or a 400 with
+ * `model_not_found`. Every key repeating that error is the bug this pattern
+ * fixes: the model exists, the key's group just does not carry it, so the next
+ * key must be tried. Deliberately anchored on model words — a bare 404 ("404 page
+ * not found") is still a request-shape failure.
+ */
+const UNSERVED_FAILURE = new RegExp([
+  'model_not_found',
+  'model[_\\s-](?:not[_\\s-](?:found|supported|available|exist(?:s)?)|does\\s+not\\s+exist|is\\s+not\\s+(?:found|supported))',
+  // The same sentence with the model id between the noun and the verdict:
+  // `Model "gpt-6.1-sol" is not supported`, `model kimi-k2 not found`.
+  'model[\\s\\S]{0,80}?(?:not\\s+(?:supported|found|available|allowed)|does\\s+not\\s+exist)',
+  '(?:invalid|unknown|unsupported|unrecognized|unrecognised|no\\s+such|invalid_request)[_\\s-]*model',
+  'not\\s+supported\\s+by\\s+(?:any|this)',
+  'no\\s+(?:available\\s+)?(?:channel|account)s?\\s+(?:for|to\\s+serve)',
+  '模型[^,，"」]{0,24}?(?:不存在|不存在或不支持|不支持|未找到|无权限|不可用|无效)',
+  '不支持[^,，"」]{0,12}?模型',
+  '无可用(?:渠道|账号|账户)|分组(?:中|内)?[^,，"」]{0,12}?(?:不支持|无此|没有)',
+].join('|'), 'i')
+
+/** Bodies that announce an authentication problem rather than a model one. */
+const AUTH_FAILURE = /invalid[_\s-]*(?:api[_\s-]*)?(?:key|token|secret)|unauthorized|authentication|api[_\s-]*key[_\s-]*(?:is[_\s-]*)?(?:invalid|expired|revoked)|密钥|认证失败/i
+
+/**
  * What a failed attempt says about the key, or undefined when it says nothing —
  * a request-shape failure (400/404/422) that every key would answer identically.
  * @param status - the response status, or undefined when the stream failed without one.
@@ -454,8 +545,21 @@ const QUOTA_FAILURE = /quota|insufficient|exhausted|balance|billing|credit|payme
  * @returns the failure kind, or undefined for a failure the key did not cause.
  */
 export function classifyFailure(status: number | undefined, bodyText = ''): FailureKind | undefined {
-  if (status === undefined) return QUOTA_FAILURE.test(bodyText) ? 'quota' : 'refused'
-  if (status === 401 || status === 403) return 'auth'
+  if (status === undefined) {
+    if (QUOTA_FAILURE.test(bodyText)) return 'quota'
+    // A stream that died with the provider's own "no such model" text is the
+    // same pair-level refusal a 404 would have carried.
+    return UNSERVED_FAILURE.test(bodyText) ? 'unserved' : 'refused'
+  }
+  if (status === 400 || status === 404 || status === 422) {
+    return UNSERVED_FAILURE.test(bodyText) ? 'unserved' : undefined
+  }
+  if (status === 401 || status === 403) {
+    // A relay can refuse a model it does not carry with a 403 as well; the
+    // authentication wording, when present, still wins.
+    if (UNSERVED_FAILURE.test(bodyText) && !AUTH_FAILURE.test(bodyText)) return 'unserved'
+    return 'auth'
+  }
   if (status === 402) return 'quota'
   if (status === 408) return 'timeout'
   if (status === 429) return QUOTA_FAILURE.test(bodyText) ? 'quota' : 'rate'
@@ -471,6 +575,10 @@ const COOLDOWN_MS: Record<FailureKind, number> = {
   server: 30_000,
   timeout: 30_000,
   refused: 60_000,
+  // A group membership changes when the provider re-plans its accounts, not when
+  // a request goes wrong: bench the pair for long enough to stop asking every
+  // turn, short enough to pick the model back up after a server-side reshuffle.
+  unserved: 10 * 60_000,
 }
 
 /** Longest a key is ever benched, whatever keeps failing. */
@@ -590,16 +698,54 @@ export function createRestStore(limit = REST_STORE_LIMIT): RestStore {
 }
 
 /**
- * The key a cooldown belongs to: the route and the credential reference.
+ * The key a cooldown belongs to: the route and the credential reference, plus
+ * the model when the failure was about ONE model rather than the credential.
  *
- * Deliberately not per model: a 401 or a 429 describes the credential and its
- * account, and charging the same key a known failure on every model of the route
- * is what a cooldown exists to prevent.
+ * A 401 or a 429 describes the credential and its account, so charging the same
+ * key a known failure on every model of the route is exactly what a cooldown
+ * exists to prevent. An `unserved` refusal is narrower: the account's group
+ * carries some models and not others, so benching the whole key would throw away
+ * the models it does carry. Those pass a `model` and get a pair-scoped entry.
  * @param route - the provider route key.
  * @param ref - the credential reference.
+ * @param model - the model the refusal named, when the cooldown is pair-scoped.
  */
-export function restKeyOf(route: string, ref: string): string {
-  return `${route}\u0000${ref}`
+export function restKeyOf(route: string, ref: string, model?: string | undefined): string {
+  const pair = `${route}\u0000${ref}`
+  return model === undefined || model.length === 0 ? pair : `${pair}\u0000${model}`
+}
+
+/**
+ * Whether a key should be deferred for this request: it may be benched as a
+ * whole, or benched for this model alone.
+ * @param store - the cooldown memory.
+ * @param route - the provider route key.
+ * @param ref - the credential reference.
+ * @param model - the model this request names.
+ * @param now - the clock.
+ */
+export function isRestingFor(
+  store: RestStore,
+  route: string,
+  ref: string,
+  model: string | undefined,
+  now: number,
+): boolean {
+  if (store.isResting(restKeyOf(route, ref), now)) return true
+  return model !== undefined && store.isResting(restKeyOf(route, ref, model), now)
+}
+
+/**
+ * Retire every cooldown a successful attempt disproves: the key works, and for
+ * this model it works too.
+ * @param store - the cooldown memory.
+ * @param route - the provider route key.
+ * @param ref - the credential reference.
+ * @param model - the model that just answered.
+ */
+export function clearRest(store: RestStore, route: string, ref: string, model?: string | undefined): void {
+  store.clear(restKeyOf(route, ref))
+  if (model !== undefined) store.clear(restKeyOf(route, ref, model))
 }
 
 /** The cooldown memory both seams share for this process. */
@@ -701,11 +847,10 @@ export function applyKeyToHeaders(headers: Headers, value: string): void {
 }
 
 /**
- * The header names that carry a credential, for the three wire styles the
- * harness and its pinned keys speak: Anthropic Messages uses `x-api-key`,
- * Google Generative AI uses `x-goog-api-key`, everything else a Bearer
- * `authorization`. Used to (a) overwrite whichever one the SDK already set, and
- * (b) know the name to remove when a request is re-signed with a different key.
+ * Known credential header names, including legacy/profile-owned headers.
+ * Recognizing `x-goog-api-key` here prevents stale credentials from leaking;
+ * it does not enable a Google protocol. Used to overwrite the credential the
+ * transport already set and remove it when re-signing with a different key.
  */
 const AUTH_HEADERS = ['authorization', 'x-api-key', 'x-goog-api-key'] as const
 

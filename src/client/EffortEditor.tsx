@@ -142,13 +142,6 @@ export interface EffortEditorProps {
    * split and is no longer read.
    */
   officialInputTypes?: boolean
-  /**
-   * Report whether this card currently covers the official capacity and
-   * input-type chrome. The card exists only while the thinking switch is on;
-   * when it is off the row's own official controls have to come back, or a
-   * model that declares no reasoning would lose every way to edit its window.
-   */
-  onCoverageChange?: (covered: boolean) => void
   /** The write seam (settings.mutate plus the suggestion engine). */
   api: EffortEditorApi
   /** Read-only (settings document not writable). */
@@ -268,7 +261,7 @@ export function pendingWriteOf(parts: PendingWriteParts): PendingWrite {
  * checkboxes, the modality toggle, the auto-adapt action, and the
  * apply/reset actions that own both sections.
  */
-export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName, efforts: initialEfforts, effortsUnset = false, input: initialInput, imageGen: initialImageGen, compat: initialCompat, defaultEffort: initialDefaultEffort, index, staged = false, officialInputTypes = false, onCoverageChange, api, readOnly, t }: EffortEditorProps): ReactNode {
+export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName, efforts: initialEfforts, effortsUnset = false, input: initialInput, imageGen: initialImageGen, compat: initialCompat, defaultEffort: initialDefaultEffort, index, staged = false, officialInputTypes = false, api, readOnly, t }: EffortEditorProps): ReactNode {
   const [draft, setDraft] = useState<DraftLevels>(() => draftFrom(initialEfforts))
   const [modality, setModality] = useState<DraftModality>(() => modalityFrom(initialInput, initialImageGen))
   // The master thinking switch. OFF reports the ladder as `false` — the row's
@@ -277,16 +270,11 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   // starts ON unless the stored row already says `false`, so a row nobody
   // touches never gains a declaration it did not have.
   const [thinking, setThinking] = useState<boolean>(() => initialEfforts !== false)
-  // The host owns the official capacity/input-type fields; this card stands in
-  // for them only while the thinking switch is on. Report the switch so the
-  // injector can hand them back the moment the card steps aside, and take them
-  // over again when it returns. A ref keeps the effect keyed on the switch
-  // alone: the injector rebuilds its callbacks on every scan.
-  const coverageRef = useRef(onCoverageChange)
-  coverageRef.current = onCoverageChange
-  useEffect(() => {
-    coverageRef.current?.(thinking)
-  }, [thinking])
+  // This card owns the row's 上下文窗口 / 最大输出 for as long as it is mounted:
+  // the injector stands the official copies down on every scan, switch on or
+  // off. Turning the switch off only takes away the ladder — the window still
+  // needs an editor, and handing the official fields back mid-card put two
+  // surfaces for the same two numbers on one row (the reported bug).
   // The per-model default-effort pick (issue #4), as the level id or '' for
   // "follow the memory chain". The pick lives in the same Apply as the ladder
   // so one mutate carries both.
@@ -731,8 +719,125 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   const capacityWarn = capacityContextValue !== undefined
     && capacityMaxValue !== undefined
     && capacityMaxValue > capacityContextValue
+  // The two token counts, rendered in BOTH switch states: this card is the
+  // row's only capacity surface (the injector keeps the official fields down
+  // for the whole mount). The warning rides above them like every other note.
+  const capacitySection = (
+    <>
+      {capacityWarn
+        ? (
+          <p className="bre-effort-note bre-warn">
+            <Glyph paths={WARN_PATHS} />
+            {t('capacityRule')}
+          </p>
+        )
+        : null}
+      <div className="bre-effort-cols">
+        <div className="bre-effort-sec">
+          <span className="bre-effort-label">{t('contextWindowLabel')}</span>
+          <span className="bre-cap-box">
+            <input
+              type="text"
+              inputMode="text"
+              className="bre-cap-input"
+              value={capacityFocus === 'context' ? capacityContext : capacityText(capacityContextValue)}
+              disabled={disabled}
+              placeholder={t('capacityBlank')}
+              aria-label={t('contextWindowLabel') + ' ' + String(index + 1)}
+              onFocus={() => { setCapacityFocus('context') }}
+              onBlur={() => { normalizeCapacity('context') }}
+              onChange={(event) => { patchCapacity('context', event.target.value) }}
+            />
+            <span className="bre-cap-unit">{t('tokensUnit')}</span>
+          </span>
+          <p className="bre-effort-note">{t('capacityInherit')}</p>
+        </div>
+        <div className="bre-effort-sec">
+          <span className="bre-effort-label">{t('maxTokensLabel')}</span>
+          <span className="bre-cap-box">
+            <input
+              type="text"
+              inputMode="text"
+              className="bre-cap-input"
+              value={capacityFocus === 'output' ? capacityMax : capacityText(capacityMaxValue)}
+              disabled={disabled}
+              placeholder={t('capacityBlank')}
+              aria-label={t('maxTokensLabel') + ' ' + String(index + 1)}
+              onFocus={() => { setCapacityFocus('output') }}
+              onBlur={() => { normalizeCapacity('output') }}
+              onChange={(event) => { patchCapacity('output', event.target.value) }}
+            />
+            <span className="bre-cap-unit">{t('tokensUnit')}</span>
+          </span>
+          <p className="bre-effort-note">{t('capacityUnitsHint')}</p>
+        </div>
+      </div>
+    </>
+  )
   return (
-    <div className="bre-effort-editor" data-plugin={PLUGIN_ID}>
+    <div
+      className="bre-effort-editor"
+      data-plugin={PLUGIN_ID}
+    >
+      {/* 支持模态 sits above the thinking switch and stays when the switch is
+          off: it is not a thinking-level decision. The injector hides the
+          official 输入类型 fieldset for the whole mount, so this is the only
+          modality surface. It writes both the legacy document declaration and
+          the official checkbox state. */}
+      <div className="bre-effort-modality">
+        <span className="bre-effort-label">{t('inputModality')}</span>
+        <div className="bre-pillrow" role="group" aria-label={t('inputModality')}>
+          {/* Text is the declaration's floor: a declared row always
+              carries it, so the pill toggles DECLARED — clicking it
+              when undeclared declares text-only, clicking it when
+              declared clears the declaration entirely. */}
+          <button
+            type="button"
+            className={modality.declared ? 'bre-lvl bre-lvl--opt is-on' : 'bre-lvl bre-lvl--opt'}
+            disabled={disabled}
+            aria-pressed={modality.declared}
+            aria-label={t('modalityText') + ' ' + String(index + 1)}
+            title={t('modalityText')}
+            onClick={() => { if (modality.declared) clearModality(); else patchImage(false) }}
+          >
+            <Glyph paths={TEXT_PATHS} />
+            {t('modalityText')}
+          </button>
+          <button
+            type="button"
+            className={modality.declared && modality.image ? 'bre-lvl bre-lvl--opt is-on' : 'bre-lvl bre-lvl--opt'}
+            disabled={disabled}
+            aria-pressed={modality.declared && modality.image}
+            aria-label={t('modalityImage') + ' ' + String(index + 1)}
+            title={t('modalityImage')}
+            onClick={() => { patchImage(!(modality.declared && modality.image)) }}
+          >
+            <Glyph paths={IMAGE_PATHS} />
+            {t('modalityImage')}
+          </button>
+          {/* 生图 stands outside the chat-input pair: an image generator
+              is a different kind of model (the composer's switcher hides
+              it), so the three pills are mutually exclusive and
+              selecting this one clears the 文本/图片 declaration. */}
+          <button
+            type="button"
+            className={modality.imageGen ? 'bre-lvl bre-lvl--opt is-on' : 'bre-lvl bre-lvl--opt'}
+            disabled={disabled}
+            aria-pressed={modality.imageGen}
+            aria-label={t('modalityImageGen') + ' ' + String(index + 1)}
+            title={t('modalityImageGen')}
+            onClick={() => { patchImageGen(!modality.imageGen) }}
+          >
+            <Glyph paths={IMAGE_GEN_PATHS} />
+            {t('modalityImageGen')}
+          </button>
+        </div>
+        <p className="bre-effort-note">
+          {modality.imageGen
+            ? t('modalityImageGenHint')
+            : modality.declared ? t('modalityDeclared') : t('modalityInherit')}
+        </p>
+      </div>
       {/* The one-line head: the master switch, the state it implies, and the
           applied suggestion's provenance pill. With the switch off there is no
           ladder to configure, so the card below is not rendered at all — one
@@ -753,6 +858,24 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
         </label>
         <span className="bre-effort-state">{stateText}</span>
       </div>
+      {/* The declaration caveats sit FIRST below the switch, not at the card's
+          foot: they qualify the switch itself ("this model declares no
+          reasoning-effort control — do not arm levels", "no off level, the
+          provider rejects thinking: disabled"). Below the card's divider they
+          read as annotations of the capacity fields instead. They only appear
+          while the switch is ON: with it off the state line already says the
+          model is declared as not reasoning, and no levels are armed to warn
+          about. */}
+      {!thinking ? null : (
+        <>
+          {initialEfforts === false
+            ? <p className="bre-effort-note bre-effort-note--top">{t('reasoningDisabled')}</p>
+            : null}
+          {wireRisk === undefined
+            ? null
+            : <p className="bre-effort-note bre-effort-note--top">{t(wireRisk === 'thinking-disabled' ? 'defaultRiskDisabled' : 'defaultRiskQwen')}</p>}
+        </>
+      )}
       {thinking ? (
         <div className="bre-effort-card">
           <div className="bre-effort-sec">
@@ -769,9 +892,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                 {t('autoAdapt')}
               </button>
             </div>
-            {/* The explanation owns its line. Wedged into the label row as an
-                ellipsised fragment it was unreadable at the disclosure's width. */}
-            <p className="bre-effort-hint">{t('levelsHint')}</p>
             <div className="bre-pillrow" role="group" aria-label={t('levelsLabel')}>
               {LEVEL_ORDER.map(level => {
                 const cell = draft[level]
@@ -791,6 +911,9 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                 )
               })}
             </div>
+            {/* The explanation follows the CHOICE, not the heading: the board
+                labels a section, then shows its control, then explains it. */}
+            <p className="bre-effort-hint">{t('levelsHint')}</p>
             {/* Every armed level takes a wire input, off included: a non-null
                 off spelling is what some formats send to close thinking (the
                 OpenAI none spelling, or the deepseek/zai explicit disabled
@@ -832,8 +955,8 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
               </div>
             )}
           </div>
-          <div className="bre-effort-cols">
-            {armedLevels.length === 0 ? null : (
+          {armedLevels.length === 0 ? null : (
+            <div className="bre-effort-cols">
               <div className="bre-effort-sec">
                 {/* Label above the pick, as the board draws a section's control:
                     the label row is the section's heading, and the pick is its
@@ -855,79 +978,12 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                 </select>
                 <p className="bre-effort-note">{t('defaultEffortHint')}</p>
               </div>
-            )}
-            {/* The injector hides the official ModelInputTypes control and
-                keeps exactly one modality surface: this one. It writes both the
-                legacy document declaration and the official checkbox state. */}
-            <div className="bre-effort-sec">
-                <span className="bre-effort-label">{t('inputModality')}</span>
-                <div className="bre-pillrow" role="group" aria-label={t('inputModality')}>
-                  {/* Text is the declaration's floor: a declared row always
-                      carries it, so the pill toggles DECLARED — clicking it
-                      when undeclared declares text-only, clicking it when
-                      declared clears the declaration entirely. */}
-                  <button
-                    type="button"
-                    className={modality.declared ? 'bre-lvl bre-lvl--opt is-on' : 'bre-lvl bre-lvl--opt'}
-                    disabled={disabled}
-                    aria-pressed={modality.declared}
-                    aria-label={t('modalityText') + ' ' + String(index + 1)}
-                    title={t('modalityText')}
-                    onClick={() => { if (modality.declared) clearModality(); else patchImage(false) }}
-                  >
-                    <Glyph paths={TEXT_PATHS} />
-                    {t('modalityText')}
-                  </button>
-                  <button
-                    type="button"
-                    className={modality.declared && modality.image ? 'bre-lvl bre-lvl--opt is-on' : 'bre-lvl bre-lvl--opt'}
-                    disabled={disabled}
-                    aria-pressed={modality.declared && modality.image}
-                    aria-label={t('modalityImage') + ' ' + String(index + 1)}
-                    title={t('modalityImage')}
-                    onClick={() => { patchImage(!(modality.declared && modality.image)) }}
-                  >
-                    <Glyph paths={IMAGE_PATHS} />
-                    {t('modalityImage')}
-                  </button>
-                  {/* 生图 stands outside the chat-input pair: an image generator
-                      is a different kind of model (the composer's switcher hides
-                      it), so the three pills are mutually exclusive and
-                      selecting this one clears the 文本/图片 declaration. */}
-                  <button
-                    type="button"
-                    className={modality.imageGen ? 'bre-lvl bre-lvl--opt is-on' : 'bre-lvl bre-lvl--opt'}
-                    disabled={disabled}
-                    aria-pressed={modality.imageGen}
-                    aria-label={t('modalityImageGen') + ' ' + String(index + 1)}
-                    title={t('modalityImageGen')}
-                    onClick={() => { patchImageGen(!modality.imageGen) }}
-                  >
-                    <Glyph paths={IMAGE_GEN_PATHS} />
-                    {t('modalityImageGen')}
-                  </button>
-                </div>
-                <p className="bre-effort-note">
-                  {modality.imageGen
-                    ? t('modalityImageGenHint')
-                    : modality.declared ? t('modalityDeclared') : t('modalityInherit')}
-                </p>
-              </div>
-          </div>
-          <span className="bre-effort-sep" />
+            </div>
+          )}
+          {/* Save-semantics notes stay with the ladder they describe; the
+              declaration caveats (reasoningDisabled / wire risk) moved up
+              under the switch, where they qualify the switch itself. */}
           {staged ? <p className="bre-effort-note">{t('stagedHint')}</p> : null}
-          {capacityWarn
-            ? (
-              <p className="bre-effort-note bre-warn">
-                <Glyph paths={WARN_PATHS} />
-                {t('capacityRule')}
-              </p>
-            )
-            : null}
-          {initialEfforts === false ? <p className="bre-effort-note">{t('reasoningDisabled')}</p> : null}
-          {wireRisk === undefined
-            ? null
-            : <p className="bre-effort-note">{t(wireRisk === 'thinking-disabled' ? 'defaultRiskDisabled' : 'defaultRiskQwen')}</p>}
           {/* Unsetting says what it does: the save path below turns an
               all-off draft over a stored declaration into the durable unset
               marker, i.e. bare provider-default requests (the relay-compat
@@ -935,46 +991,11 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
               stays hidden there exactly as the write does. */}
           {buildIntent(draft) === undefined && initialEfforts !== undefined
             ? <p className="bre-effort-note">{t('bareHint')}</p> : null}
-          <div className="bre-effort-cols">
-            <div className="bre-effort-sec">
-              <span className="bre-effort-label">{t('contextWindowLabel')}</span>
-              <span className="bre-cap-box">
-                <input
-                  type="text"
-                  inputMode="text"
-                  className="bre-cap-input"
-                  value={capacityFocus === 'context' ? capacityContext : capacityText(capacityContextValue)}
-                  disabled={disabled}
-                  placeholder={t('capacityBlank')}
-                  aria-label={t('contextWindowLabel') + ' ' + String(index + 1)}
-                  onFocus={() => { setCapacityFocus('context') }}
-                  onBlur={() => { normalizeCapacity('context') }}
-                  onChange={(event) => { patchCapacity('context', event.target.value) }}
-                />
-                <span className="bre-cap-unit">{t('tokensUnit')}</span>
-              </span>
-              <p className="bre-effort-note">{t('capacityInherit')}</p>
-            </div>
-            <div className="bre-effort-sec">
-              <span className="bre-effort-label">{t('maxTokensLabel')}</span>
-              <span className="bre-cap-box">
-                <input
-                  type="text"
-                  inputMode="text"
-                  className="bre-cap-input"
-                  value={capacityFocus === 'output' ? capacityMax : capacityText(capacityMaxValue)}
-                  disabled={disabled}
-                  placeholder={t('capacityBlank')}
-                  aria-label={t('maxTokensLabel') + ' ' + String(index + 1)}
-                  onFocus={() => { setCapacityFocus('output') }}
-                  onBlur={() => { normalizeCapacity('output') }}
-                  onChange={(event) => { patchCapacity('output', event.target.value) }}
-                />
-                <span className="bre-cap-unit">{t('tokensUnit')}</span>
-              </span>
-              <p className="bre-effort-note">{t('capacityUnitsHint')}</p>
-            </div>
-          </div>
+          {/* The divider separates the thinking decision from the model's own
+              capacity figures: everything above answers "how hard does it
+              think", everything below is a property of the model. */}
+          <span className="bre-effort-sep" />
+          {capacitySection}
           {message === undefined ? null : (
             <p className={'bre-effort-message bre-' + message.kind} role={message.kind === 'error' ? 'alert' : 'status'}>
               {message.text}
@@ -1000,7 +1021,20 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
             </button>
           </div>
         </div>
-      ) : null}
+      ) : (
+        // Switch off: the ladder is gone but the two token counts stay — they
+        // are the row's model facts, not a thinking-level decision. Same card
+        // fill, so the collapsed row reads as one block instead of the official
+        // disclosure's grey gap.
+        <div className="bre-effort-card bre-effort-card--capacity">
+          {capacitySection}
+          {message === undefined ? null : (
+            <p className={'bre-effort-message bre-' + message.kind} role={message.kind === 'error' ? 'alert' : 'status'}>
+              {message.text}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   )
 }

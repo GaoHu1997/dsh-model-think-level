@@ -2,7 +2,7 @@
  * Shared facts of per-key model probing.
  *
  * A key is not tied to one protocol: a route can answer on an OpenAI-family
- * address, an Anthropic-family one and a Gemini-family one, and each key may
+ * address and an Anthropic-family one, and each key may
  * pin a protocol of its own. Asking every key against the route's default wire
  * would therefore ask half of them a question their credential cannot answer —
  * an Anthropic-pinned key returns `401` from an OpenAI gateway. The probe
@@ -34,7 +34,6 @@ export type { EndpointFamily }
 export const FAMILY_PROTOCOL: Readonly<Record<EndpointFamily, RouteProtocol>> = {
   openai: 'openai-completions',
   anthropic: 'anthropic-messages',
-  gemini: 'google-generative-ai',
 }
 
 /** What one key's probe learned, as the catalogue merge reads it. */

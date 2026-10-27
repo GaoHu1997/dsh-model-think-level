@@ -60,8 +60,6 @@ const COPY: Record<string, string> = {
   keysProtocolOpenAIHint: 'OpenAI API · GPT models, most agents',
   keysProtocolResponses: 'Responses',
   keysProtocolResponsesHint: 'OpenAI API · Codex',
-  keysProtocolGemini: 'Gemini',
-  keysProtocolGeminiHint: 'Google Gemini API · gemini / gemma models',
   keysProtocolSaved: 'Protocol saved.',
   keysOpenAIUrl: 'OpenAI base URL',
   keysAnthropicUrl: 'Anthropic base URL',
@@ -69,9 +67,6 @@ const COPY: Record<string, string> = {
   keysEndpointsSaved: 'Base URLs saved.',
   keysUnreachable: 'The plugin’s key route did not answer.',
   keysPanelFailed: 'Key manager failed to render',
-  keysMergedOffer: '{count} more models are served by your keys but not added to this provider: {models}.',
-  keysMergedApply: 'Add them',
-  keysMergedApplied: 'Models added to the provider.',
   keysDraftHint: 'Held by this page and stored when the provider is created.',
 }
 
@@ -82,7 +77,7 @@ const t = (key: string, params?: Record<string, string | number>): string => {
 }
 
 function state(over: Partial<KeyState> = {}): KeyState {
-  return { ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null, gemini: null }, ...over }
+  return { ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null }, ...over }
 }
 
 function row(over: Partial<KeyRow> & { ref: string }): KeyRow {
@@ -105,11 +100,11 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
     setEnabled: async () => state(),
     setProtocol: async () => state(),
     setEndpoints: async () => state(),
-    applyMerged: async () => state(),
     reveal: async () => undefined,
     ...script,
   }
   const client: KeyManagerClient = {
+    cached: route => base.cached?.(route),
     list: (route) => {
       calls.push({ op: 'list', args: [route] })
       return base.list(route)
@@ -142,13 +137,9 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
       calls.push({ op: 'setProtocol', args: [route, ref, protocol] })
       return base.setProtocol(route, ref, protocol)
     },
-    setEndpoints: (route, openai, anthropic, gemini) => {
-      calls.push({ op: 'setEndpoints', args: [route, openai, anthropic, gemini] })
-      return base.setEndpoints(route, openai, anthropic, gemini)
-    },
-    applyMerged: (route) => {
-      calls.push({ op: 'applyMerged', args: [route] })
-      return base.applyMerged(route)
+    setEndpoints: (route, openai, anthropic) => {
+      calls.push({ op: 'setEndpoints', args: [route, openai, anthropic] })
+      return base.setEndpoints(route, openai, anthropic)
     },
     reveal: (route, ref) => {
       calls.push({ op: 'reveal', args: [route, ref] })
@@ -259,14 +250,28 @@ afterEach(() => {
 })
 
 describe('the list', () => {
-  it('opens on an empty panel and then shows what the host answered', async () => {
+  it('paints cached keys immediately and refreshes them when the read completes', async () => {
+    let finish!: (answer: KeyAnswer) => void
+    const { client, calls } = recorder({
+      cached: () => state({ entries: [row({ ref: 'A', alias: 'Cached' })] }),
+      list: () => new Promise(resolve => { finish = resolve }),
+    })
+    const panel = mount({ client })
+    expect(rowOf(panel.root, 'Cached')).toBeDefined()
+    expect(panel.root.querySelector('[aria-busy="true"]')).toBeNull()
+    await flush()
+    expect(calls.filter(call => call.op === 'list')).toHaveLength(1)
+    finish(state({ entries: [row({ ref: 'B', alias: 'Fresh' })] }))
+    await flush()
+    expect(rowOf(panel.root, 'Fresh')).toBeDefined()
+    expect(panel.root.textContent).not.toContain('Cached')
+  })
+
+  it('shows a loading status on first open and then shows the host list', async () => {
     const { client } = recorder({ list: async () => state({ entries: [row({ ref: 'A' })] }) })
     const panel = mount({ client })
-    // The first paint is deliberately empty, and NOT a "Loading keys…" line: the
-    // mount happens in the same frame the card opens, so a placeholder would put
-    // a one-line panel on screen for a frame and then visibly swap it for the
-    // list — the reported flicker. An empty panel reads as the card still opening.
-    expect(panel.root.querySelector('.bre-keys')?.textContent).toBe('')
+    expect(panel.root.querySelector('[role="status"]')?.textContent).toBe('Loading keys…')
+    expect(panel.root.querySelector('.bre-keys')?.getAttribute('aria-busy')).toBe('true')
     expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(0)
     expect(panel.root.querySelector('.bre-keys-add-row')).toBeNull()
 
@@ -383,68 +388,13 @@ describe('the row status', () => {
   })
 })
 
-describe('the merged catalogue', () => {
-  it('offers the models the keys serve that the provider does not declare, and adds them on click', async () => {
-    let merged = true
-    const { client, calls } = recorder({
-      list: async () =>
-        state({
-          entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
-          models: ['qwen-max'],
-          ...merged ? { mergedModels: ['qwen-max', 'glm-4'], unmergedModels: ['glm-4'] } : {},
-        }),
-      applyMerged: async () => {
-        merged = false
-        return state({
-          entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
-          models: ['qwen-max', 'glm-4'],
-        })
-      },
-    })
-    const panel = mount({ client })
-    await flush()
-
-    const note = panel.root.querySelector('.bre-keys-note')
-    expect(note?.textContent).toContain('1 more models')
-    expect(note?.textContent).toContain('glm-4')
-    // Reading the list never writes: only the click does.
-    expect(calls.filter(call => call.op === 'applyMerged')).toHaveLength(0)
-
-    buttonByText(note as HTMLElement, 'Add them').click()
-    await flush()
-
-    expect(calls.filter(call => call.op === 'applyMerged')).toHaveLength(1)
-    expect(panel.root.querySelector('.bre-keys-note')).toBeNull()
-    expect(panel.root.querySelector('.bre-effort-message')?.textContent).toBe('Models added to the provider.')
-  })
-
-  it('offers nothing when every advertised model is already declared', async () => {
-    const { client } = recorder({
-      list: async () =>
-        state({
-          entries: [row({ ref: 'A' })],
-          models: ['qwen-max'],
-          mergedModels: ['qwen-max'],
-        }),
-    })
-    const panel = mount({ client })
-    await flush()
-
-    expect(panel.root.querySelector('.bre-keys-note')).toBeNull()
-  })
-
-  it('lets a scope be chosen from the merged models too', async () => {
-    // A key serving a model the provider has not declared yet is exactly the case
-    // scopes exist for, so the chips must offer it rather than hide it — and as
-    // one alphabet with the declared models, not a trailing block (the discovered
-    // model here sorts between two declared ones).
+describe('the scope chips', () => {
+  it('offers only the models the provider has added', async () => {
     const { client } = recorder({
       list: async () =>
         state({
           entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
           models: ['qwen-max', 'glm-4-air'],
-          mergedModels: ['qwen-max', 'glm-4-air', 'glm-4'],
-          unmergedModels: ['glm-4'],
         }),
     })
     const panel = mount({ client })
@@ -454,7 +404,7 @@ describe('the merged catalogue', () => {
     await flush()
 
     const chips = Array.from(panel.root.querySelectorAll('.bre-keys-chip')).map(chip => chip.textContent?.trim())
-    expect(chips).toEqual(['glm-4', 'glm-4-air', 'qwen-max'])
+    expect(chips).toEqual(['glm-4-air', 'qwen-max'])
   })
 })
 
@@ -593,12 +543,12 @@ describe('the enable check and model scope', () => {
 })
 
 describe('the actions on a row', () => {
-  it('offers exactly delete, label, models and edit — and nothing else', async () => {
+  it('places delete last after label, models and edit', async () => {
     const { client } = recorder({ list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }) })
     const panel = mount({ client })
     await flush()
 
-    expect(actionsOf(rowOf(panel.root, 'key2'))).toEqual(['Delete', 'Label', 'All models', 'Edit'])
+    expect(actionsOf(rowOf(panel.root, 'key2'))).toEqual(['Label', 'All models', 'Edit', 'Delete'])
   })
 
   it('keeps the protocol picker inside the hover action tray, defaulting to the route', async () => {
@@ -606,7 +556,7 @@ describe('the actions on a row', () => {
       list: async () =>
         state({
           entries: [row({ ref: 'key-2', alias: 'key2' })],
-          endpoints: { openai: null, anthropic: 'https://anthropic.example', gemini: null },
+          endpoints: { openai: null, anthropic: 'https://anthropic.example' },
         }),
     })
     const panel = mount({ client })
@@ -706,7 +656,7 @@ describe('the actions on a row', () => {
       list: async () =>
         state({
           entries: [row({ ref: 'key-2', alias: 'key2', protocol: 'anthropic-messages' }), row({ ref: 'key-3', alias: 'key3' })],
-          endpoints: { openai: 'https://openai.example/v1', anthropic: null, gemini: null },
+          endpoints: { openai: 'https://openai.example/v1', anthropic: null },
         }),
     })
     const panel = mount({ client })
@@ -730,44 +680,10 @@ describe('the actions on a row', () => {
     expect(await values('key2')).toEqual(['', 'openai-completions', 'openai-responses', 'anthropic-messages'])
   })
 
-  it('offers Gemini once the gemini address is configured, and pins it', async () => {
-    const { client, calls } = recorder({
-      list: async () =>
-        state({
-          entries: [row({ ref: 'key-2', alias: 'key2' })],
-          endpoints: { openai: 'https://openai.example/v1', anthropic: null, gemini: 'https://gemini.example/v1beta' },
-        }),
-    })
-    const panel = mount({ client })
-    await flush()
-
-    const picker = rowOf(panel.root, 'key2').querySelector<HTMLButtonElement>('.bre-keys-protocol')
-    if (picker === null) throw new Error('no protocol picker')
-    picker.click()
-    await flush()
-    const options = Array.from(document.querySelectorAll<HTMLButtonElement>('.bre-protocol-option'))
-    expect(options.map(option => option.getAttribute('data-protocol-value'))).toEqual([
-      '',
-      'openai-completions',
-      'openai-responses',
-      'google-generative-ai',
-    ])
-    // The Gemini option explains itself like every other option does.
-    const gemini = options[3]
-    expect(gemini.querySelector('.bre-protocol-option-title')?.textContent).toBe('Gemini')
-    expect(gemini.querySelector('.bre-protocol-option-hint')?.textContent).toBe('Google Gemini API · gemini / gemma models')
-
-    gemini.click()
-    await flush()
-    // The pin travels as the pi-ai protocol id, and the menu closes behind it.
-    expect(calls).toContainEqual({ op: 'setProtocol', args: ['ofox', 'key-2', 'google-generative-ai'] })
-    expect(document.querySelector('.bre-protocol-menu')).toBeNull()
-  })
-
   it('re-reads the addresses when the provider card reports a change', async () => {
     // The card above owns the two base URLs and this list decides its offers from
     // them, so a change there has to reach this list without a reload.
-    let endpoints: KeyState['endpoints'] = { openai: null, anthropic: null, gemini: null }
+    let endpoints: KeyState['endpoints'] = { openai: null, anthropic: null }
     const { client } = recorder({
       list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })], endpoints }),
     })
@@ -786,7 +702,7 @@ describe('the actions on a row', () => {
     }
     expect(await values()).toEqual([''])
 
-    endpoints = { openai: 'https://openai.example/v1', anthropic: null, gemini: null }
+    endpoints = { openai: 'https://openai.example/v1', anthropic: null }
     document.dispatchEvent(new CustomEvent('bre:endpoints-changed', { detail: { route: 'ofox', openai: 'https://openai.example/v1', anthropic: '' } }))
     await flush()
 
@@ -805,7 +721,7 @@ describe('the actions on a row', () => {
 
     buttonByText(line, 'Cancel').click()
     await flush()
-    expect(actionsOf(line)).toEqual(['Delete', 'Label', 'All models', 'Edit'])
+    expect(actionsOf(line)).toEqual(['Label', 'All models', 'Edit', 'Delete'])
     expect(calls.some((call) => call.op === 'remove')).toBe(false)
 
     buttonByText(line, 'Delete').click()
@@ -974,12 +890,11 @@ describe('adding a key', () => {
       list: async () =>
         state({
           entries: [],
-          // All three families have an address, so all four wires are on offer:
+          // Both families have an address, so all three wires are on offer:
           // the pin chips follow the addresses the provider actually holds.
           endpoints: {
             openai: 'https://openai.example/v1',
             anthropic: 'https://anthropic.example/v1',
-            gemini: 'https://gemini.example/v1',
           },
         }),
       add: async () => state({ entries: [row({ ref: 'key-2' })] }),
@@ -996,11 +911,9 @@ describe('adding a key', () => {
       'Chat Completions',
       'Responses',
       'Anthropic',
-      'Gemini',
     ])
     expect(chipsOf(panel.root).map((chip) => chip.getAttribute('aria-pressed'))).toEqual([
       'true',
-      'false',
       'false',
       'false',
       'false',
@@ -1012,7 +925,6 @@ describe('adding a key', () => {
       'false',
       'false',
       'true',
-      'false',
       'false',
     ])
     // A tint says which chip is chosen; no tick is drawn, so no chip changes
@@ -1032,6 +944,74 @@ describe('adding a key', () => {
     expect(calls.filter((call) => call.op === 'setProtocol')).toEqual([
       { op: 'setProtocol', args: ['ofox', 'key-2', 'openai-responses'] },
     ])
+  })
+
+  it('pins the exact reused key even when every returned reference was already listed', async () => {
+    const entries = [row({ ref: 'SPARE', alias: 'Spare' }), row({ ref: 'ACTIVE', alias: 'Active' })]
+    const endpoints = { openai: 'https://openai.example/v1', anthropic: null }
+    const { client, calls } = recorder({
+      list: async () => state({ entries, endpoints }),
+      add: async () => state({ entries, endpoints, addedRef: 'ACTIVE' }),
+      setProtocol: async () => state({ entries, endpoints }),
+    })
+    const panel = mount({ client })
+    await flush()
+    buttonByText(panel.root, 'Add another key').click()
+    await flush()
+    chipsOf(panel.root)[2]?.click()
+    const secret = inputsOf(panel.root)[1]
+    if (secret === undefined) throw new Error('no secret field')
+    type(secret, 'sk-active')
+    await flush()
+    buttonByText(formRowOf(panel.root) as HTMLElement, 'Add').click()
+    await flush()
+
+    expect(calls.filter(call => call.op === 'setProtocol')).toEqual([
+      { op: 'setProtocol', args: ['ofox', 'ACTIVE', 'openai-responses'] },
+    ])
+    expect(formRowOf(panel.root)).toBeNull()
+  })
+
+  it('keeps a successful add when pinning fails and retries through the row without adding again', async () => {
+    const added = row({ ref: 'NEW', alias: 'New key', masked: 'sk-n...ew' })
+    const endpoints = { openai: 'https://openai.example/v1', anthropic: null }
+    let failPin = true
+    const { client, calls } = recorder({
+      list: async () => state({ entries: [], endpoints }),
+      add: async () => state({ entries: [added], endpoints, addedRef: 'NEW' }),
+      setProtocol: async () => failPin
+        ? { ok: false, error: 'protocol write refused' }
+        : state({ entries: [{ ...added, protocol: 'openai-responses' }], endpoints }),
+    })
+    const panel = mount({ client })
+    await flush()
+    buttonByText(panel.root, 'Add another key').click()
+    await flush()
+    chipsOf(panel.root)[2]?.click()
+    const secret = inputsOf(panel.root)[1]
+    if (secret === undefined) throw new Error('no secret field')
+    type(secret, 'sk-new')
+    await flush()
+    buttonByText(formRowOf(panel.root) as HTMLElement, 'Add').click()
+    await flush()
+
+    expect(rowOf(panel.root, 'New key')).not.toBeNull()
+    expect(formRowOf(panel.root)).toBeNull()
+    expect(panel.root.querySelector('input[type="password"]')).toBeNull()
+    expect(panel.root.querySelector('.bre-error')?.textContent).toBe('protocol write refused')
+    failPin = false
+    const picker = rowOf(panel.root, 'New key').querySelector<HTMLButtonElement>('.bre-keys-protocol')
+    if (picker === null) throw new Error('no protocol picker')
+    picker.click()
+    await flush()
+    const option = document.querySelector<HTMLButtonElement>('[data-protocol-value="openai-responses"]')
+    if (option === null) throw new Error('no Responses option')
+    option.click()
+    await flush()
+    expect(calls.filter(call => call.op === 'add')).toHaveLength(1)
+    expect(calls.filter(call => call.op === 'setProtocol')).toHaveLength(2)
+    expect(panel.root.querySelector('.bre-error')).toBeNull()
+    expect(rowOf(panel.root, 'New key').querySelector('.bre-keys-protocol-label')?.textContent).toBe('Responses')
   })
 
   it('creates the key without a pin when the automatic chip stays chosen', async () => {
@@ -1164,7 +1144,7 @@ describe('the read-only list', () => {
     // Nothing that writes is offered until the list answers: no rows, and no
     // "add" entry either — a control whose write would race the read the host is
     // still running would be the only thing on screen while the panel is empty.
-    expect(panel.root.querySelector('.bre-keys')?.textContent).toBe('')
+    expect(panel.root.querySelector('.bre-keys')?.textContent).toBe('Loading keys…')
     expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(0)
     expect(panel.root.querySelector('.bre-keys-add-row')).toBeNull()
 
@@ -1222,15 +1202,13 @@ describe('the draft list (the create card)', () => {
     rowOf(panel.root, 'sk-a...z9').querySelector<HTMLButtonElement>('.bre-keys-protocol')?.click()
     await flush()
 
-    // Auto plus all four pins, even though no endpoint family is configured,
-    // in the order the picker reads: the two OpenAI wires, then Anthropic, then
-    // Gemini.
+    // Auto plus all three pins, even though no endpoint family is configured,
+    // in the order the picker reads: the two OpenAI wires, then Anthropic.
     expect(menuValues()).toEqual([
       '',
       'openai-completions',
       'openai-responses',
       'anthropic-messages',
-      'google-generative-ai',
     ])
   })
 

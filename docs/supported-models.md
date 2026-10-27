@@ -307,7 +307,7 @@
 
 **条目备注**
 
-- **`openai-gpt-image`**：OpenAI 生图系（gpt-image-1 / DALL·E 3）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+- **`openai-gpt-image`**：OpenAI 生图系（gpt-image-1 / DALL·E 3）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。
 
 ## Google Gemini
 
@@ -317,7 +317,7 @@
 
 **条目备注**
 
-- **`google-imagen`**：Google 生图系（Imagen / Gemini-Image "nano banana"）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+- **`google-imagen`**：Google 生图系（Imagen / Gemini-Image "nano banana"）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。
 
 ## Other
 
@@ -331,11 +331,11 @@
 
 **条目备注**
 
-- **`black-forest-flux`**：FLUX 系（FLUX.1 schnell/dev/pro 等）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
-- **`stability-sd`**：Stability 生图系（Stable Diffusion / SDXL / SD3）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
-- **`zhipu-cogview`**：智谱 CogView 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
-- **`aliyun-wanx`**：阿里万相 Wanx 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
-- **`bytedance-seedream`**：字节 Seedream / SeedEdit 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+- **`black-forest-flux`**：FLUX 系（FLUX.1 schnell/dev/pro 等）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。
+- **`stability-sd`**：Stability 生图系（Stable Diffusion / SDXL / SD3）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。
+- **`zhipu-cogview`**：智谱 CogView 生图系：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。
+- **`aliyun-wanx`**：阿里万相 Wanx 生图系：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。
+- **`bytedance-seedream`**：字节 Seedream / SeedEdit 生图系：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。
 
 ## Qwen（通义千问）
 
@@ -345,7 +345,7 @@
 
 **条目备注**
 
-- **`qwen-image`**：通义千问 Qwen-Image 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+- **`qwen-image`**：通义千问 Qwen-Image 生图系：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。
 
 ## Other
 
@@ -355,5 +355,5 @@
 
 **条目备注**
 
-- **`midjourney`**：Midjourney / Niji 生图系（中转常见）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+- **`midjourney`**：Midjourney / Niji 生图系（中转常见）：图像生成模型，不能作为对话模型使用——在输入框模型切换列表中带「生图」标记展示。请勿勾思考档。
 
