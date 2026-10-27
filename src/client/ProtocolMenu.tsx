@@ -184,7 +184,6 @@ export function ProtocolMenu(props: ProtocolMenuProps): ReactNode {
                 type="button"
                 role="option"
                 aria-selected={active}
-                aria-checked={active}
                 data-protocol-value={option.value}
                 className="bre-protocol-option"
                 tabIndex={-1}

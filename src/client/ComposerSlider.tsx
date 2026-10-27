@@ -34,7 +34,8 @@ import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import { inferModalitiesFromName, matchKnowledgeBase } from '../knowledge.js'
 import { selectRefusalMessage } from './effort-memory.js'
-import { EMPTY_CONFIGURED_INPUTS, type ConfiguredInputs } from './configured-inputs.js'
+import { capacityShort } from './capacity.js'
+import { EMPTY_CONFIGURED_INPUTS, type ConfiguredInputs, type ModelFacts } from './configured-inputs.js'
 import {
   disabledProviders,
   subscribeDisabledProviders,
@@ -125,9 +126,11 @@ interface ModelChoiceLike {
   input?: readonly string[]
 }
 
-/** The models of one provider group (the SDK type leaves the element open). */
-function modelsOf(group: DirectoryGroupLike): readonly ModelChoiceLike[] {
-  return (group.models ?? []) as unknown as readonly ModelChoiceLike[]
+/** The models of one provider group (the SDK type leaves the element open).
+ * An absent group contributes nothing, so the lookup callers can skip their
+ * own `as`-casts. */
+function modelsOf(group: DirectoryGroupLike | undefined): readonly ModelChoiceLike[] {
+  return ((group?.models ?? []) as unknown as readonly ModelChoiceLike[])
 }
 
 /** Provider label: the SDK face names it differently across kernel lines. */
@@ -247,6 +250,18 @@ function supportsVision(model: ModelChoiceLike, configuredInput?: readonly strin
   return verdict
 }
 
+/**
+ * Whether the model is declared an IMAGE GENERATOR (生图). Only the stored
+ * marker decides: the switcher hides exactly the rows the Models page marked,
+ * never a name guess — a guess hiding a chat model would be unfixable from the
+ * menu itself.
+ */
+function isImageGen(choice: ModelChoiceLike, facts: ModelFacts | undefined): boolean {
+  if (facts?.imageGen === true) return true
+  const declared = (choice as unknown as { inputImageGen?: unknown }).inputImageGen
+  return declared === true
+}
+
 /** Whether the model reasons at all (any declared effort level). */
 function supportsThinking(model: ModelChoiceLike): boolean {
   const efforts = model.reasoning?.efforts
@@ -343,6 +358,17 @@ function modelTags(model: ModelChoiceLike, t: Translator, configuredInput?: read
   }
   if (badges.length === 0) return null
   return createElement('span', { className: 'bre-option-tags' }, ...badges)
+}
+
+/** The context-window tag of one model (`128K`, `1M`), or null when undeclared. */
+function modelCapacity(contextWindow: number | undefined, t: Translator): ReactNode {
+  const text = capacityShort(contextWindow)
+  if (text === '') return null
+  return createElement(
+    'span',
+    { className: 'bre-option-cap', title: t('contextWindowLabel') },
+    text,
+  )
 }
 
 /** The official directory selection input this body speaks. */
@@ -468,10 +494,22 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   // same reason as the provider order — a drag has to reach an open composer.
   const modelOrderByProvider = useSyncExternalStore(subscribeModelOrders, modelOrders)
 
+  // The saved per-model facts (input declaration, 生图 marker, context window),
+  // keyed per provider: the host catalog omits all three, and the switcher's
+  // image-generation filter, badges and capacity tag all read them.
+  const factsFor = useCallback((provider: string, id: string): ModelFacts | undefined =>
+    inputDeclarations.get(provider)?.get(id), [inputDeclarations])
+
+  // The models of one group the switcher may offer: the rows the document
+  // marked 生图 are image generators and cannot serve a chat turn, so they are
+  // absent from the columns, the search and the counts alike (user item 6).
+  const visibleModelsOf = useCallback((group: DirectoryGroupLike | undefined, provider: string): readonly ModelChoiceLike[] =>
+    modelsOf(group).filter(choice => !isImageGen(choice, factsFor(provider, choice.id))), [factsFor])
+
   // Providers that actually hold models; the one whose models the right column
   // shows follows the current model until the user picks another column entry.
   const providerCatalog = state.groups
-    .filter(candidate => modelsOf(candidate).length > 0 && !disabled.includes(candidate.id))
+    .filter(candidate => visibleModelsOf(candidate, candidate.id).length > 0 && !disabled.includes(candidate.id))
     .map(candidate => candidate.id)
   const providerIds = mergeProviderOrder(baseProviderOrder(providerCatalog), preferredOrder)
   const shownProvider = openProvider !== null && providerIds.includes(openProvider)
@@ -489,7 +527,10 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const searching = needle !== ''
   const matches: Array<{ provider: string; choice: ModelChoiceLike }> = searching
     ? providerIds.flatMap(provider => orderModelEntries(
-        modelsOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike),
+        visibleModelsOf(
+          state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike | undefined,
+          provider,
+        ),
         modelOrderByProvider[provider] ?? [],
       )
         .filter(choice => (choice.name ?? choice.id).toLowerCase().includes(needle)
@@ -501,7 +542,10 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     : (shownProvider === null
       ? []
       : orderModelEntries(
-        modelsOf(state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike),
+        visibleModelsOf(
+          state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike | undefined,
+          shownProvider,
+        ),
         modelOrderByProvider[shownProvider] ?? [],
       ).map(choice => ({ provider: shownProvider as string, choice })))
   const activeKey = current === null ? '' : current.provider + '/' + current.model
@@ -787,6 +831,15 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
         onChange: (event: { currentTarget: HTMLInputElement }) => {
           setQuery(event.currentTarget.value)
         },
+        // Escape clears, the way the official pane's search answers it — and
+        // like there, the keystroke is consumed: the shell's own Escape-to-close
+        // listens above this surface and would fold the whole menu.
+        onKeyDown: (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+          if (event.key !== 'Escape' || query === '') return
+          event.preventDefault()
+          event.stopPropagation()
+          setQuery('')
+        },
       }),
       query === ''
         ? null
@@ -839,7 +892,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
           },
           providerLabelOf(providerGroup),
         ),
-        createElement('span', { className: 'bre-provider-count' }, String(modelsOf(providerGroup).length)),
+        createElement('span', { className: 'bre-provider-count' }, String(visibleModelsOf(providerGroup, provider).length)),
       )
     }),
     ...(providerIds.length === 0
@@ -897,7 +950,11 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
           // No tick on a model row: it would sit right beside the capability
           // badges and read as one of them. The accent colour (plus the row
           // tint in CSS) is the whole selection signal.
-          modelTags(choice, t, inputDeclarations.get(provider)?.get(choice.id)),
+          modelTags(choice, t, factsFor(provider, choice.id)?.input),
+          // The declared context window, spelled the way catalogues do
+          // (`128K`, `1M`): the size a user picks a model by, read from the
+          // same document the Models page writes (user item 4).
+          modelCapacity(factsFor(provider, choice.id)?.contextWindow, t),
         )
       })),
   )

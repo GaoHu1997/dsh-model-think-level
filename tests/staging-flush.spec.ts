@@ -354,6 +354,30 @@ describe('effectiveStagedIntents provenance', () => {
     expect(out?.input).toEqual(['text', 'image'])
   })
 
+  it('carries the image-generation intent when it changes the row, and omits a matching one', () => {
+    // The marker is plugin-owned, so there is no autofill footprint to
+    // arbitrate: a staged 生图 that the document does not hold passes through,
+    // one that matches the stored marker is a no-op.
+    const out = effectiveStagedIntents(
+      { efforts: 'keep', imageGen: true },
+      { id: MODEL },
+    )
+    expect(out?.imageGen).toBe(true)
+    expect(out?.efforts).toBe('keep')
+    const matching = effectiveStagedIntents(
+      { efforts: 'keep', imageGen: true },
+      { id: MODEL, inputImageGen: true },
+    )
+    expect(matching?.imageGen).toBeUndefined()
+    expect(matching).toBeNull()
+    // Clearing the marker on a marked row is a change too.
+    const clearing = effectiveStagedIntents(
+      { efforts: 'keep', imageGen: false },
+      { id: MODEL, inputImageGen: true },
+    )
+    expect(clearing?.imageGen).toBe(false)
+  })
+
   it('lets the document win on the ladder when no marker stands and the bytes differ', () => {
     // A hand-declared (or official-page-written) ladder: no provenance marker,
     // bytes unlike the suggestion. The staging may still carry its own modality

@@ -22,7 +22,6 @@ function result(ref: string, models?: readonly string[]): KeyProbeResult {
   return {
     ref,
     models: models === undefined ? undefined : [...models],
-    targets: [],
   }
 }
 

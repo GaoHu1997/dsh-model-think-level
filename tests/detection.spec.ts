@@ -228,3 +228,25 @@ describe('Anthropic capabilities disclosures (kernel discovery shape)', () => {
     }).source).toBe('capabilities.thinking.supported')
   })
 })
+
+describe('output-modality disclosure (image-generation kind)', () => {
+  it('reads the OpenRouter output_modalities spellings', () => {
+    const { signal } = detectModelSignal(
+      [{ id: 'dall-e-3', architecture: { output_modalities: ['image'] } }],
+      'dall-e-3',
+    )
+    expect(signal.output).toEqual(['image'])
+  })
+
+  it('reads the flattened and models.dev spellings', () => {
+    expect(detectModelSignal([{ id: 'x', output_modalities: ['text', 'image'] }], 'x').signal.output)
+      .toEqual(['text', 'image'])
+    expect(detectModelSignal([{ id: 'x', modalities: { output: ['image'] } }], 'x').signal.output)
+      .toEqual(['image'])
+  })
+
+  it('stays silent when the listing names no output field', () => {
+    expect(detectModelSignal([{ id: 'x', input_modalities: ['text'] }], 'x').signal.output)
+      .toBeUndefined()
+  })
+})

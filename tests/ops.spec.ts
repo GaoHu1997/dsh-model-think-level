@@ -278,11 +278,11 @@ describe('createEditorApi', () => {
     const sink = vi.fn()
     const staging = createEditorApi(api, undefined, sink)
     staging.stageEfforts('acme', 'deepseek-v4-flash-free', { high: 'high' })
-    expect(sink).toHaveBeenCalledWith('acme', 'deepseek-v4-flash-free', { high: 'high' }, undefined, undefined, undefined)
+    expect(sink).toHaveBeenCalledWith('acme', 'deepseek-v4-flash-free', { high: 'high' }, undefined, undefined, undefined, undefined)
     // The suggestion's compat rides the same seam.
     const compat = { thinkingFormat: 'deepseek' as const, supportsReasoningEffort: true }
     staging.stageEfforts('acme', 'deepseek-v4-flash-free', { high: 'high' }, compat)
-    expect(sink).toHaveBeenLastCalledWith('acme', 'deepseek-v4-flash-free', { high: 'high' }, compat, undefined, undefined)
+    expect(sink).toHaveBeenLastCalledWith('acme', 'deepseek-v4-flash-free', { high: 'high' }, compat, undefined, undefined, undefined)
     // An edit-card seam (no sink) is a no-op, not a crash.
     createEditorApi(api).stageEfforts('acme', 'deepseek-v4-flash-free', { high: 'high' })
   })
@@ -809,6 +809,63 @@ describe('createEditorApi', () => {
       expect(models[0].reasoningEfforts).toBeUndefined()
       expect(models[0].reasoningEffortsUnset).toBeUndefined()
       expect(models[0].input).toEqual(['text'])
+    })
+
+    it('the image-generation marker rides the same mutate and clears the chat-input answer', async () => {
+      const seeded = {
+        providers: {
+          aliyun: {
+            displayName: 'Aliyun',
+            api: 'openai-completions',
+            models: [{ id: 'qwen-max', input: ['text', 'image'] }],
+          },
+        },
+      }
+      const { api, mutates } = fakeApi(seeded)
+      const editor = createEditorApi(api)
+      await editor.writeEfforts('aliyun', 'qwen-max', 'keep', undefined, null, undefined, true)
+      const models = mutates[0].ops[0].value as Array<Record<string, unknown>>
+      expect(models[0].inputImageGen).toBe(true)
+      // 生图 is the whole modality answer: the chat-input declaration and its
+      // unset marker both go, or a reader ignoring the marker would read the
+      // row back as a vision chat model.
+      expect(models[0].input).toBeUndefined()
+      expect(models[0].inputUnset).toBeUndefined()
+    })
+
+    it('clearing the image-generation marker leaves the row a normal chat model', async () => {
+      const seeded = {
+        providers: {
+          aliyun: {
+            displayName: 'Aliyun',
+            api: 'openai-completions',
+            models: [{ id: 'qwen-max', inputImageGen: true }],
+          },
+        },
+      }
+      const { api, mutates } = fakeApi(seeded)
+      const editor = createEditorApi(api)
+      await editor.writeEfforts('aliyun', 'qwen-max', 'keep', undefined, undefined, undefined, false)
+      const models = mutates[0].ops[0].value as Array<Record<string, unknown>>
+      expect(models[0].inputImageGen).toBeUndefined()
+    })
+
+    it('an omitted image-generation intent leaves the marker untouched', async () => {
+      const seeded = {
+        providers: {
+          aliyun: {
+            displayName: 'Aliyun',
+            api: 'openai-completions',
+            models: [{ id: 'qwen-max', inputImageGen: true }],
+          },
+        },
+      }
+      const { api, mutates } = fakeApi(seeded)
+      const editor = createEditorApi(api)
+      await editor.writeEfforts('aliyun', 'qwen-max', { high: 'high' })
+      const models = mutates[0].ops[0].value as Array<Record<string, unknown>>
+      expect(models[0].inputImageGen).toBe(true)
+      expect(models[0].reasoningEfforts).toEqual({ high: 'high' })
     })
 
     it("'keep' with no modality intent is a pure no-op on both parts", async () => {

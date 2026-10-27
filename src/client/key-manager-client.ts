@@ -68,7 +68,8 @@ export interface KeyRow {
    * The key's cooldown, when it is resting after a failure: how long until it
    * is a normal candidate again, and how many consecutive failures produced
    * the period. Absent means the key is a normal candidate right now — the
-   * state the row's status dot paints as healthy.
+   * state the routing pool sees as healthy. (No row paints it any more; the
+   * field carries what the pool sees.)
    */
   readonly rest?: {
     /** Milliseconds until the key is a normal candidate again (>= 0). */

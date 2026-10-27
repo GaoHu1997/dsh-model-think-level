@@ -78,7 +78,7 @@ import {
   type ListedModel,
 } from './listing.js'
 import { probeListing } from './discovery-merge.js'
-import { FAMILY_PROTOCOL, probeKeyModels, type KeyProbeResult } from './key-probe.js'
+import { FAMILY_PROTOCOL } from './key-probe.js'
 import type { EndpointFamily } from './key-refs.js'
 import { collectKeyListings, mergeKeyListings, type MergedListing } from './multi-key-listing.js'
 import { buildHeaderIndex, emptyIndex, type UserAgentIndex } from './headers-core.js'
@@ -96,7 +96,7 @@ import { bankBuiltAt, loadBankSync, summarizeBank } from './fingerprint/bank.js'
 import { generateChallenges } from './fingerprint/challenges.js'
 import { analyzeGlobalOutputs, NO_USABLE_OUTPUT, type AttributionResult } from './fingerprint/core.js'
 import { isEligibleModel } from './fingerprint/eligibility.js'
-import { runProbe, type ProbeRunResult } from './fingerprint/run.js'
+import { runProbe, type ProbeOutcome, type ProbeRunResult } from './fingerprint/run.js'
 import {
   fingerprintFilePath,
   providerRecords,
@@ -105,8 +105,9 @@ import {
   withRecord,
   withoutRecord,
   type FingerprintRecord,
+  type FingerprintTiming,
 } from './fingerprint/store.js'
-import { statusOf, topEntriesOf } from './fingerprint/verdict.js'
+import { statusOf, topEntriesOf, EARLY_IDENTIFIED_PROBABILITY } from './fingerprint/verdict.js'
 
 /** Re-exported so the package entry keeps naming the patch builder. */
 export { buildAutofillPatch }
@@ -142,6 +143,38 @@ const PROBE_TIMEOUT_MS = 15_000
  * reason to widen the listing probe.
  */
 const FINGERPRINT_CHALLENGE_TIMEOUT_MS = 120_000
+
+/**
+ * Fold the accepted challenges' timings into one picture for the result card:
+ * the wall clock and first-token wait of the SLOWEST accepted challenge (that
+ * is what the user actually waited for), plus the characters-per-second the
+ * provider pushed once text started flowing. Throughput counts only the
+ * generation window (total minus the first-token wait) so a long thinking
+ * preamble shows up as a first-token wait, not as slow streaming. Pure
+ * statistics only — the answer text itself is never stored (design §4.2).
+ */
+function fingerprintTimingOf(outcomes: readonly ProbeOutcome[]): FingerprintTiming | undefined {
+  const accepted = outcomes.filter(outcome => outcome.ok && typeof outcome.durationMs === 'number')
+  if (accepted.length === 0) return undefined
+  const durationMs = Math.max(...accepted.map(outcome => outcome.durationMs ?? 0))
+  const firstTokenMs = Math.max(...accepted.map(outcome => outcome.firstTokenMs ?? outcome.durationMs ?? 0))
+  let characters = 0
+  let generatingMs = 0
+  for (const outcome of accepted) {
+    const total = outcome.durationMs ?? 0
+    const first = Math.min(outcome.firstTokenMs ?? total, total)
+    const generating = total - first
+    if (generating > 0) {
+      characters += outcome.text.length
+      generatingMs += generating
+    }
+  }
+  return {
+    durationMs,
+    ...(firstTokenMs > 0 ? { firstTokenMs } : {}),
+    ...(generatingMs > 0 ? { charsPerSecond: characters / (generatingMs / 1000) } : {}),
+  }
+}
 
 /**
  * How long ONE per-key listing probe may take while the host's own `/models`
@@ -1045,7 +1078,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             records.push(model)
           }
         }
-        if (records.length === 0) return { ref: key.ref, models: undefined, targets: [] }
+        if (records.length === 0) return { ref: key.ref, models: undefined }
         recordsByRef.set(key.ref, records)
         const ids = records.map(model => model.id)
         // Remember what this key serves, so a later failed probe retains it.
@@ -1054,7 +1087,6 @@ export function apply(ctx: Context, config: Config = {}): void {
         return {
           ref: key.ref,
           models: ids,
-          targets: [],
         }
       },
     })
@@ -1514,9 +1546,9 @@ export function apply(ctx: Context, config: Config = {}): void {
                   if (stored?.alias !== undefined) view.alias = stored.alias
                   if (stored?.models !== undefined) (view as { models?: readonly string[] }).models = stored.models
                   if (stored?.protocol !== undefined) (view as { protocol?: RouteProtocol }).protocol = stored.protocol
-                  // The cooldown memory is the one source of the 冷却 state the
-                  // row paints: a resting key reads "cooling for Ns" instead of
-                  // healthy, so the panel says why a key is not signing.
+                  // The cooldown memory rides the view even though no row paints
+                  // a badge from it any more: the routing pool is the state's
+                  // source of truth, and the field carries what it sees.
                   const rest = keyRest.stateOf(restKeyOf(route, ref), now)
                   if (rest !== undefined) {
                     ;(view as { rest?: KeyEntryView['rest'] }).rest = {
@@ -1576,9 +1608,6 @@ export function apply(ctx: Context, config: Config = {}): void {
               // Validate each operation before its first write and compensate
               // later failures across the independent settings and key stores.
               const refuse = (error: string): void => sendJson(res, 400, { ok: false, error })
-              // The per-key outcome of a `discover` op, echoed beside the payload
-              // so the panel can say which protocol each key was asked on.
-              let probeReport: KeyProbeResult[] | undefined
 
               if (op === 'add') {
                 if (!isLegalKeyValue(value)) {
@@ -1740,101 +1769,6 @@ export function apply(ctx: Context, config: Config = {}): void {
                   })
                   : undefined
                 updateKeyIndex(document => withRouteEndpoints(document, route, endpoints), indexFile)
-              } else if (op === 'discover') {
-                // Probe EACH listed key for the models it actually serves. A key
-                // is only asked on the protocols and addresses it would be used
-                // with (see key-probe.ts): its own pin when it has one, and both
-                // families when the provider configured both. A key whose
-                // listing cannot be read keeps its previous scope rather than
-                // being wiped.
-                const document = readKeyIndex(indexFile)
-                const profile = providerProfileOf(entryOf()?.value, route)
-                const baseURL = typeof profile?.['baseURL'] === 'string' ? profile['baseURL'] : ''
-                const api = typeof profile?.['api'] === 'string' ? profile['api'] : ''
-                if (baseURL.length === 0) {
-                  refuse('this provider has no address to interrogate; set each key\'s models by hand')
-                  return
-                }
-                const seat = enabledNow()
-                const listedEntries = keyEntriesOf(document, route)
-                const listedRefs = listedEntries.map(candidate => candidate.ref)
-                if (seat !== undefined && !listedRefs.includes(seat)) listedRefs.push(seat)
-                if (listedRefs.length === 0) {
-                  refuse('add a key before detecting its models')
-                  return
-                }
-                const endpoints = document.endpoints?.[route]
-                // Resolve every credential BEFORE probing: a key whose value
-                // cannot be read is not asked at all, and the pass still runs
-                // for the rest instead of stopping at the first unreadable one.
-                const asks: { ref: string; apiKey: string; pinned?: RouteProtocol }[] = []
-                for (const listed of listedRefs) {
-                  let apiKey: string | undefined
-                  try {
-                    apiKey = await resolveCredential(credentials, listed)
-                  } catch {
-                    continue
-                  }
-                  if (apiKey === undefined) continue
-                  const pinned = listedEntries.find(candidate => candidate.ref === listed)?.protocol
-                  asks.push({
-                    ref: listed,
-                    apiKey,
-                    ...pinned === undefined ? {} : { pinned },
-                  })
-                }
-                // The scopes the keys were last seen serving. A key whose listing
-                // cannot be read this pass keeps these models: a provider-wide
-                // catalogue must not shrink because one key was rate-limited
-                // (the rule magpie's per-key fetch applies too).
-                const lastKnown = new Map<string, readonly string[]>(
-                  listedEntries
-                    .filter(candidate => candidate.models !== undefined)
-                    .map(candidate => [candidate.ref, candidate.models as readonly string[]]),
-                )
-                // Bounded concurrency: asking every key at once can trip a
-                // provider's per-account rate limit with its own catalogue read.
-                const { results } = await collectKeyListings({
-                  keys: asks,
-                  lastKnown,
-                  refOf: ask => ask.ref,
-                  probe: async ask => probeKeyModels({
-                    ref: ask.ref,
-                    intent: {
-                      api,
-                      baseURL,
-                      ...ask.pinned === undefined ? {} : { pinned: ask.pinned },
-                      ...endpoints === undefined ? {} : { endpoints },
-                    },
-                    apiKey: ask.apiKey,
-                    profileHeaders: profile?.['headers'],
-                    timeoutMs: resolved.probeTimeoutMs,
-                    // Each key probes its OWN credential, so bypass the key-routing
-                    // wrapper (which would otherwise sign every probe with the first key).
-                    send: headerOverlayBypass(),
-                    headersFor: composeProbeHeaders,
-                    read: readBounded,
-                    entries: listingEntries,
-                  }),
-                })
-                for (const result of results) {
-                  if (result.models === undefined) continue
-                  updateKeyIndex(
-                    document2 =>
-                      hasKeyEntry(document2, route, result.ref)
-                        ? withKeyModels(document2, route, result.ref, result.models as readonly string[])
-                        : withKeyEntry(document2, route, result.ref, undefined),
-                    indexFile,
-                  )
-                }
-                if (results.every(result => result.targets.length === 0)) {
-                  refuse(
-                    results.find(result => result.skipped !== undefined)?.skipped ??
-                      'this provider cannot be interrogated; set each key\'s models by hand',
-                  )
-                  return
-                }
-                probeReport = results
               } else if (op === 'rename') {
                 // The key the provider is RUNNING on takes a label too: that
                 // reference is usually the one the official card wrote, which
@@ -2008,13 +1942,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               // unrelated settings change happened to refresh it.
               refreshKeyScopes()
               const answer = await payload()
-              // `payload()` is `unknown` by contract (the browser narrows it), so
-              // the probe report is attached without spreading that type.
-              sendJson(
-                res,
-                200,
-                probeReport === undefined || !isRecord(answer) ? answer : { ...answer, probe: probeReport },
-              )
+              sendJson(res, 200, answer)
             } catch (error) {
               sendJson(res, error instanceof HostReadError ? 502 : 500, {
                 ok: false, error: error instanceof Error ? error.message : String(error),
@@ -2112,6 +2040,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     // page falls back to an indeterminate badge, and the final line is still
     // the truth. Raw answer text never leaves this process; only statistics
     // are stored (design §4.2).
+    //
+    // Early exit rides on `runProbe.shouldStop` below: two confident answers
+    // close the run before the slowest challenge lands, and the verdict is
+    // graded on the bank's own 2-query calibration (verdict.ts).
     ctx.effect(
       () =>
         webServerCtx.webServer.register({
@@ -2254,6 +2186,30 @@ export function apply(ctx: Context, config: Config = {}): void {
                       ...(outcome.error === undefined ? {} : { error: outcome.error }),
                     })
                   },
+                  // Early exit (design §5.3): the bank's 2-query calibration
+                  // carries 99.7% cross-validated accuracy, so two confident
+                  // answers may close the run before the slowest challenge
+                  // lands. The gate is deliberately double: the POOLED pair
+                  // must clear the 2-query probability bar, AND each answer
+                  // on its own must name the same winner — two answers biting
+                  // different candidates must not fuse into a lucky spike.
+                  shouldStop: settled => {
+                    const accepted = settled.filter(outcome => outcome.ok)
+                    if (accepted.length < 2) return false
+                    try {
+                      const outputs = accepted.map(outcome => ({
+                        text: outcome.text,
+                        expected_count: outcome.expectedCount,
+                      }))
+                      const pooled = analyzeGlobalOutputs(outputs, bank)
+                      if (pooled.probability < EARLY_IDENTIFIED_PROBABILITY) return false
+                      const first = analyzeGlobalOutputs(outputs.slice(0, 1), bank)
+                      const second = analyzeGlobalOutputs(outputs.slice(1), bank)
+                      return first.prediction === second.prediction
+                    } catch {
+                      return false
+                    }
+                  },
                 })
               } catch (error) {
                 emit({
@@ -2299,6 +2255,8 @@ export function apply(ctx: Context, config: Config = {}): void {
                   queries: attribution.calibration.queries,
                   cvAccuracy: attribution.calibration.cv_accuracy,
                 }
+                const timing = fingerprintTimingOf(run.outcomes)
+                if (timing !== undefined) record.timing = timing
               }
 
               updateFingerprintStore(

@@ -245,6 +245,61 @@ describe('FingerprintPane', () => {
     expect(rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-bars')).toBeNull()
   })
 
+  it('folds each result card away on its own toggle, and unfolds it again (user item 2)', async () => {
+    stubFetch([identified('gpt-5.5'), identified('claude-sonnet-5')])
+    const pane = mount()
+    await flush()
+
+    // Default is EXPANDED: the fold is a new affordance, not a new curtain.
+    const first = rowOf(pane.root, 'gpt-5.5')
+    expect(first.querySelector('.bre-fp-body')).not.toBeNull()
+    // The fold control carries the state and the model it names.
+    const fold = first.querySelector<HTMLButtonElement>('.bre-fp-fold')
+    expect(fold).not.toBeNull()
+    expect(fold?.getAttribute('aria-expanded')).toBe('true')
+
+    fold?.click()
+    await flush()
+    const folded = rowOf(pane.root, 'gpt-5.5')
+    expect(folded.querySelector('.bre-fp-body')).toBeNull()
+    expect(folded.getAttribute('data-bre-fp-open')).toBeNull()
+    expect(folded.querySelector('.bre-fp-fold')?.getAttribute('aria-expanded')).toBe('false')
+    // Only the toggled row folds: its sibling keeps its result card.
+    expect(rowOf(pane.root, 'claude-sonnet-5').querySelector('.bre-fp-body')).not.toBeNull()
+
+    rowOf(pane.root, 'gpt-5.5').querySelector<HTMLButtonElement>('.bre-fp-fold')?.click()
+    await flush()
+    expect(rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-body')).not.toBeNull()
+  })
+
+  it('keeps the badge, evidence and action on the head while the result is folded', async () => {
+    stubFetch([identified('gpt-5.5')])
+    const pane = mount()
+    await flush()
+    rowOf(pane.root, 'gpt-5.5').querySelector<HTMLButtonElement>('.bre-fp-fold')?.click()
+    await flush()
+    const head = rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-row-head')
+    expect(head?.textContent).toContain('GPT-5.5 · 82%')
+    expect(head?.querySelector('.bre-fp-action')).not.toBeNull()
+  })
+
+  it('folds a failed row the same way: the error body goes, the retry stays', async () => {
+    stubFetch([identified('gpt-5.5', { status: 'failed', error: 'the relay answered 401 for every prompt' })])
+    const pane = mount()
+    await flush()
+    const row = rowOf(pane.root, 'gpt-5.5')
+    expect(row.querySelector('.bre-fp-error')?.textContent).toContain('401')
+    row.querySelector<HTMLButtonElement>('.bre-fp-fold')?.click()
+    await flush()
+    const folded = rowOf(pane.root, 'gpt-5.5')
+    // The error paragraph is the result body of a failed row: folded with it.
+    expect(folded.querySelector('.bre-fp-error')).toBeNull()
+    expect(folded.querySelector('.bre-fp-fold')?.getAttribute('aria-expanded')).toBe('false')
+    // The head keeps its verdict badge and the Retry action.
+    expect(folded.querySelector('.bre-fp-row-head')?.textContent).toContain(t('fpStateFailed'))
+    expect(folded.querySelector('.bre-fp-action')).not.toBeNull()
+  })
+
   it('offers one action per row, and only one', async () => {
     stubFetch([identified('claude-sonnet-5')])
     const pane = mount()
@@ -350,5 +405,28 @@ describe('FingerprintPane', () => {
     // Only the winner is coloured: the bars are a measurement, not a podium.
     expect(body?.querySelectorAll('.bre-fp-bar-fill.is-top')).toHaveLength(1)
     expect(body?.textContent).toContain('Closed-set')
+  })
+
+  it('folds the timing picture into the result card when the verdict carries one', async () => {
+    stubFetch([identified('gpt-5.5', {
+      timing: { firstTokenMs: 1200, durationMs: 41_000, charsPerSecond: 437.4 },
+    })])
+    const pane = mount()
+    await flush()
+
+    const timing = rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-timing')
+    expect(timing?.textContent).toContain('first token 1.2s')
+    expect(timing?.textContent).toContain('total 41.0s')
+    expect(timing?.textContent).toContain('~437 chars/s')
+  })
+
+  it('omits the timing line when the verdict carries no timing picture', async () => {
+    // Older records predate the field; a verdict that never measured itself
+    // must not render an empty "Timing: —" row.
+    stubFetch([identified('gpt-5.5')])
+    const pane = mount()
+    await flush()
+
+    expect(rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-timing')).toBeNull()
   })
 })

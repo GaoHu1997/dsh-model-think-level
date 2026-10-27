@@ -189,3 +189,44 @@ describe('buildAutofillPatch', () => {
     expect(routes.good).toBeDefined()
   })
 })
+
+describe('buildAutofillPatch image generation (生图)', () => {
+  it('marks a generator family and writes no chat-input declaration beside it', () => {
+    const patch = buildAutofillPatch({
+      relay: {
+        api: 'openai-completions',
+        models: [{ id: 'gpt-image-1' }, { id: 'flux-dev' }],
+      },
+    })
+    expect(patch).toBeDefined()
+    const models = (patch!.providers as Record<string, { models: Record<string, unknown>[] }>).relay.models
+    // The curated family carries the marker, not an input array.
+    expect(models[0].inputImageGen).toBe(true)
+    expect(models[0].input).toBeUndefined()
+    expect(models[0].reasoningEfforts).toBe(false)
+    // The name heuristic answers for the relay's own spelling too.
+    expect(models[1].inputImageGen).toBe(true)
+    expect(models[1].input).toBeUndefined()
+  })
+
+  it('never reads a marked row as a modality gap', () => {
+    // A second pass must not refill text/image under a model the marker
+    // already answers for.
+    const patch = buildAutofillPatch({
+      relay: {
+        api: 'openai-completions',
+        models: [{ id: 'gpt-image-1', inputImageGen: true }],
+      },
+    })
+    expect(patch).toBeDefined()
+    const models = (patch!.providers as Record<string, { models: Record<string, unknown>[] }>).relay.models
+    // The marker IS the modality answer: no input array and no unset marker
+    // land beside it, however many passes run.
+    expect(models[0].input).toBeUndefined()
+    expect(models[0].inputUnset).toBeUndefined()
+    expect(models[0].inputImageGen).toBe(true)
+    // The ladder half is still a gap the fill answers (false: generators take
+    // no reasoning_effort), which is what makes the patch non-empty at all.
+    expect(models[0].reasoningEfforts).toBe(false)
+  })
+})

@@ -704,3 +704,51 @@ describe('modality + capacity fusion', () => {
     expect(inferModalitiesFromName('qwen2.5-vl-72b')).toEqual(['text', 'image'])
   })
 })
+
+describe('image-generation detection (生图)', () => {
+  it('keys the curated image-generation families to the marker', () => {
+    for (const id of ['gpt-image-1', 'dall-e-3', 'imagen-3.0-generate-002', 'flux.1-schnell', 'stable-diffusion-3.5', 'cogview-4', 'wanx-v1', 'seedream-4.0', 'qwen-image', 'midjourney']) {
+      const s = suggestEfforts(id, {})
+      expect(s.imageGen, id).toBe(true)
+      // A generator carries no chat-input declaration and no effort ladder.
+      expect(s.input, id).toBeUndefined()
+      expect(s.efforts, id).toBe(false)
+    }
+  })
+
+  it('keys the Gemini image-output generations without claiming the vision chat line', () => {
+    expect(suggestEfforts('gemini-2.5-flash-image', {}).imageGen).toBe(true)
+    expect(suggestEfforts('gemini-2.5-flash', {}).imageGen).toBeUndefined()
+    expect(suggestEfforts('gemini-2.5-flash', {}).input).toEqual(['text', 'image'])
+  })
+
+  it('the name heuristic catches generator ids the knowledge base never named', () => {
+    const s = suggestEfforts('my-relay-flux-dev', {})
+    expect(s.imageGen).toBe(true)
+    expect(s.input).toBeUndefined()
+    // The verdict rides even when the endpoint named input modalities.
+    const probed = suggestEfforts('my-relay-flux-dev', {}, { reasoning: 'unknown', source: null, input: ['text'] })
+    expect(probed.imageGen).toBe(true)
+    expect(probed.input).toBeUndefined()
+  })
+
+  it('the endpoint output disclosure outranks everything', () => {
+    // Output images and not text: a generator, whatever the id looks like.
+    const gen = suggestEfforts('totally-normal-chat', {}, { reasoning: 'unknown', source: null, output: ['image'] })
+    expect(gen.imageGen).toBe(true)
+    expect(gen.input).toBeUndefined()
+    // Output text: a chat model even when the id looks like a generator —
+    // a relay renamed onto a text model keeps serving chat.
+    const chat = suggestEfforts('flux-dev', {}, { reasoning: 'unknown', source: null, output: ['text'] })
+    expect(chat.imageGen).toBe(false)
+    // Both: a multimodal-output model (gemini), not a generator.
+    const both = suggestEfforts('omni-model', {}, { reasoning: 'unknown', source: null, output: ['text', 'image'] })
+    expect(both.imageGen).toBe(false)
+  })
+
+  it('a vision input disclosure alone never marks 生图', () => {
+    const s = suggestEfforts('qwen3-vl', {})
+    expect(s.imageGen).toBeUndefined()
+    expect(s.input).toEqual(['text', 'image'])
+  })
+})

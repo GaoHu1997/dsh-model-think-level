@@ -274,6 +274,24 @@ describe('mutations', () => {
     await httpKeyManagerClient.applyMerged('ofox')
     expect(bodyOf()).toEqual({ op: 'applyMerged' })
   })
+
+  it('POSTs the endpoint trio with unset addresses folded to empty strings', async () => {
+    // The host reads the three family addresses as a record of STRINGS and
+    // treats an empty one as "clear this side", so a missing address must ride
+    // the wire as '' — not as a missing key the host would default itself.
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
+    await httpKeyManagerClient.setEndpoints('ofox', 'https://openai.example/v1', undefined, 'https://gemini.example/v1beta')
+    expect(bodyOf()).toEqual({
+      op: 'endpoints',
+      openai: 'https://openai.example/v1',
+      anthropic: '',
+      gemini: 'https://gemini.example/v1beta',
+    })
+
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
+    await httpKeyManagerClient.setEndpoints('ofox', undefined, undefined, undefined)
+    expect(bodyOf()).toEqual({ op: 'endpoints', openai: '', anthropic: '', gemini: '' })
+  })
 })
 
 describe('replace', () => {

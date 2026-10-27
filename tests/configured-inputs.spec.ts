@@ -28,13 +28,38 @@ describe('saved model input declarations', () => {
     expect(inputs.getSnapshot()).toBe(EMPTY_CONFIGURED_INPUTS)
     await inputs.load()
     const snapshot = inputs.getSnapshot()
-    expect(snapshot.get('free')?.get(modelId)).toEqual(['text', 'image'])
-    expect(snapshot.get('textOnly')?.get(modelId)).toEqual(['text'])
+    expect(snapshot.get('free')?.get(modelId)).toEqual({ input: ['text', 'image'] })
+    expect(snapshot.get('textOnly')?.get(modelId)).toEqual({ input: ['text'] })
     expect([...snapshot.get('free')!.keys()]).toEqual([modelId])
     await inputs.load()
     expect(inputs.getSnapshot()).toBe(snapshot)
     expect(api.describeSpy).toHaveBeenCalledTimes(1)
     expect(api.settings.mutate).not.toHaveBeenCalled()
+  })
+
+  it('carries the image-generation marker and a positive context window per model', async () => {
+    const api = fakeApi(async () => makeJoin({
+      free: { models: [
+        { id: 'gen', inputImageGen: true },
+        { id: 'windowed', contextWindow: 131072 },
+        { id: 'both', inputImageGen: true, contextWindow: 1_048_576 },
+        // A non-positive window is "nothing declared", as is a falsy marker.
+        { id: 'zero', contextWindow: 0 },
+        { id: 'negative', contextWindow: -5 },
+        { id: 'false-marker', inputImageGen: false },
+        { id: 'plain' },
+      ] },
+    }))
+    const inputs = createConfiguredInputs(api)
+    await inputs.load()
+    const free = inputs.getSnapshot().get('free')!
+    expect(free.get('gen')).toEqual({ imageGen: true })
+    expect(free.get('windowed')).toEqual({ contextWindow: 131072 })
+    expect(free.get('both')).toEqual({ imageGen: true, contextWindow: 1_048_576 })
+    expect(free.has('zero')).toBe(false)
+    expect(free.has('negative')).toBe(false)
+    expect(free.has('false-marker')).toBe(false)
+    expect(free.has('plain')).toBe(false)
   })
 
   it('refreshes subscribed menus and ignores reads that finish after an invalidation', async () => {
@@ -60,7 +85,7 @@ describe('saved model input declarations', () => {
       await newRead
       stale.resolve(inputsJoin(['text', 'image']))
       await oldRead
-      expect(inputs.getSnapshot().get('free')?.get(modelId)).toEqual(['text'])
+      expect(inputs.getSnapshot().get('free')?.get(modelId)).toEqual({ input: ['text'] })
       expect(notify).toHaveBeenCalledTimes(2)
       // Removing the declaration discards the old value too.
       inputs.invalidate()
@@ -85,6 +110,6 @@ describe('saved model input declarations', () => {
     await inputs.load()
     expect(inputs.getSnapshot()).toBe(EMPTY_CONFIGURED_INPUTS)
     await inputs.load()
-    expect(inputs.getSnapshot().get('free')?.get(modelId)).toEqual(['text', 'image'])
+    expect(inputs.getSnapshot().get('free')?.get(modelId)).toEqual({ input: ['text', 'image'] })
   })
 })

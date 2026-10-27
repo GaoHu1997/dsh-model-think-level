@@ -5,8 +5,8 @@
  * everything arrives through a plain props face, so it stays testable in
  * isolation. The draft/intent rules live in the client/effort module.
  *
- * The shape is the design board's: one head line (the switch, the "declared N ·
- * default X" state, and the applied suggestion's provenance pill) over a sunk
+ * The shape is the design board's: one head line (the switch and the
+ * "declared N · default X" state) over a sunk
  * panel with no outline of its own. Inside it, each decision is a section — a
  * label row with its trailing action, the hint on its own line, and the control
  * group under both: the level ladder as 28px chips, the armed levels' wire
@@ -46,6 +46,12 @@ const IMAGE_PATHS: readonly string[] = [
   'M4.4 3.4h7.2a1.9 1.9 0 0 1 1.9 1.9v5.4a1.9 1.9 0 0 1-1.9 1.9H4.4a1.9 1.9 0 0 1-1.9-1.9V5.3a1.9 1.9 0 0 1 1.9-1.9Z',
   'M6.2 7.2a.9.9 0 1 0 0-1.8.9.9 0 0 0 0 1.8Z',
   'M2.9 11.2 6.1 8.4l2.1 1.9 1.8-1.5 2.7 2.4',
+]
+/** 生图: a picture frame with a sparkle — generation, not reception. */
+const IMAGE_GEN_PATHS: readonly string[] = [
+  'M9.4 12.7H3.6a1.7 1.7 0 0 1-1.7-1.7V5.1a1.7 1.7 0 0 1 1.7-1.7h4.2',
+  'M2.6 10.6 5.3 8.5l1.8 1.5 1.6-1.3 2.3 2',
+  'M12.4 2.2l.75 2.05L15.2 5l-2.05.75L12.4 7.8l-.75-2.05L9.6 5l2.05-.75Z',
 ]
 const WARN_PATHS: readonly string[] = ['M8 3.2 13.6 12.8H2.4L8 3.2Z', 'M8 6.9v2.5', 'M8 11.3h.01']
 /** The sparkle on 自动适配, and the chevrons on the wire block's disclosure. */
@@ -114,6 +120,8 @@ export interface EffortEditorProps {
   effortsUnset?: boolean
   /** The model's current input-modality declaration. */
   input?: InputModalities
+  /** Whether the model is declared an image generator (生图). */
+  imageGen?: boolean
   /** The model's stored compat block (passthrough; suggestions merge over it). */
   compat?: CompatSuggestion
   /** The model's stored per-model default-effort pick, when one is set. */
@@ -149,28 +157,52 @@ export interface EffortEditorProps {
   t: (key: string, params?: Record<string, string | number>) => string
 }
 
-/** Draft state of the modality part: declared or inheriting, image or not. */
+/**
+ * Draft state of the modality part. The three pills are mutually exclusive
+ * by construction: 生图 (`imageGen`) stands alone — an image generator is a
+ * different kind of model, not a request-modality answer — while the 文本/图片
+ * pair is the ordinary chat-input declaration (`declared`).
+ */
 export interface DraftModality {
+  /** The 文本/图片 declaration is made (text always, image when `image`). */
   declared: boolean
+  /** The declared pair takes images. Meaningful only while `declared`. */
   image: boolean
+  /** The row is an image generator; text/image carry no answer beside it. */
+  imageGen: boolean
 }
 
 /** Read the stored declaration into a draft. Empty mirrors undefined: the
  * resolved settings layer materializes absent arrays as [], and core reads
  * that as "no answer here" -- never as a phantom text-only declaration. */
-export function modalityFrom(input: InputModalities | undefined): DraftModality {
-  if (input === undefined || input.length === 0) return { declared: false, image: false }
-  return { declared: true, image: input.includes('image') }
+export function modalityFrom(input: InputModalities | undefined, imageGen?: boolean): DraftModality {
+  if (imageGen === true) return { declared: false, image: false, imageGen: true }
+  if (input === undefined || input.length === 0) return { declared: false, image: false, imageGen: false }
+  return { declared: true, image: input.includes('image'), imageGen: false }
 }
 
-/** Resolve a modality draft to the write intent (null = durably unset). */
-export function buildModalityIntent(draft: DraftModality): InputModalities | null {
-  if (!draft.declared) return null
-  return draft.image ? ['text', 'image'] : ['text']
+/**
+ * The modality part of a write, from a draft. The parts are exact: a declared
+ * pair also clears the image-generation marker, and marking the row an image
+ * generator also unsets the chat-input declaration (its `null` — the durable
+ * unset — which is what keeps host auto-fill from refilling text/image under a
+ * model that cannot serve a chat turn). `undefined` members mean "touch
+ * nothing", which {@link sameModality} is what decides.
+ */
+export function buildModalityWrite(draft: DraftModality): { input?: InputModalities | null; imageGen?: boolean } {
+  if (draft.imageGen) return { input: null, imageGen: true }
+  if (draft.declared) return { input: draft.image ? ['text', 'image'] : ['text'], imageGen: false }
+  return { input: null, imageGen: false }
 }
 
-/** Semantic equality between a modality draft and a stored declaration. */
-export function sameModality(draft: DraftModality, stored: InputModalities | undefined): boolean {
+/**
+ * Semantic equality between a modality draft and the row's stored state: the
+ * declaration AND the image-generation marker must both agree, or the draft is
+ * an edit.
+ */
+export function sameModality(draft: DraftModality, stored: InputModalities | undefined, storedImageGen?: boolean): boolean {
+  if (draft.imageGen !== (storedImageGen === true)) return false
+  if (draft.imageGen) return true
   if (!draft.declared) return stored === undefined
   if (stored === undefined) return false
   return draft.image ? stored.includes('image') : !stored.includes('image')
@@ -226,6 +258,7 @@ export function pendingWriteOf(parts: PendingWriteParts): PendingWrite {
     efforts: parts.efforts,
     ...(writeCompat === undefined ? {} : { compat: writeCompat }),
     ...(parts.input === undefined ? {} : { input: parts.input }),
+    ...(parts.imageGen === undefined ? {} : { imageGen: parts.imageGen }),
     ...(parts.defaultEffort === undefined ? {} : { defaultEffort: parts.defaultEffort }),
   }
 }
@@ -235,9 +268,9 @@ export function pendingWriteOf(parts: PendingWriteParts): PendingWrite {
  * checkboxes, the modality toggle, the auto-adapt action, and the
  * apply/reset actions that own both sections.
  */
-export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName, efforts: initialEfforts, effortsUnset = false, input: initialInput, compat: initialCompat, defaultEffort: initialDefaultEffort, index, staged = false, officialInputTypes = false, onCoverageChange, api, readOnly, t }: EffortEditorProps): ReactNode {
+export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName, efforts: initialEfforts, effortsUnset = false, input: initialInput, imageGen: initialImageGen, compat: initialCompat, defaultEffort: initialDefaultEffort, index, staged = false, officialInputTypes = false, onCoverageChange, api, readOnly, t }: EffortEditorProps): ReactNode {
   const [draft, setDraft] = useState<DraftLevels>(() => draftFrom(initialEfforts))
-  const [modality, setModality] = useState<DraftModality>(() => modalityFrom(initialInput))
+  const [modality, setModality] = useState<DraftModality>(() => modalityFrom(initialInput, initialImageGen))
   // The master thinking switch. OFF reports the ladder as `false` — the row's
   // own "declares no reasoning-effort control" — which is what makes the level
   // grid below unnecessary; ON keeps every edit byte-for-byte as before. It
@@ -260,9 +293,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   const [defaultEffort, setDefaultEffort] = useState<string>(() => initialDefaultEffort ?? '')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ kind: 'success' | 'error' | 'info'; text: string } | undefined>(undefined)
-  const [suggested, setSuggested] = useState<ReasoningEfforts | false | undefined>(undefined)
-  const [suggestedSource, setSuggestedSource] = useState('')
-  const [suggestedConfidence, setSuggestedConfidence] = useState<'high' | 'medium' | 'low'>('low')
   // The wire-spelling row starts FOLDED when every armed level carries its
   // conventional spelling (the id itself, '' for off): prefilled spellings
   // under the decision pills are noise (模型思考等级也混乱了). Any spelling
@@ -277,8 +307,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   // the host autofill writes. Only a fresh Auto-adapt replaces it; Reset
   // discards it along with everything else.
   const appliedCompatRef = useRef<CompatSuggestion | undefined>(undefined)
-  // Modality part of the applied suggestion.
-  const [suggestedInputSource, setSuggestedInputSource] = useState<InputSource | undefined>(undefined)
   // The official capacity inputs' draft, mirrored here so the two numbers can be
   // edited from THIS card (user request: they must be configurable, not a
   // read-only footnote). The official form stays the single writer -- the mirror
@@ -299,6 +327,7 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   const dirtyRef = useRef(false)
   const previousEfforts = useRef<false | ReasoningEfforts | undefined>(initialEfforts)
   const previousInput = useRef<InputModalities | undefined>(initialInput)
+  const previousImageGen = useRef<boolean | undefined>(initialImageGen)
   const previousDefaultEffort = useRef<string | undefined>(initialDefaultEffort)
   // The auto-adapt closure of the LATEST render, for the listener below: that
   // closure reads this render's props and state, but the subscription has to
@@ -334,17 +363,18 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
         setThinking(initialEfforts !== false)
       }
     }
-    if (previousInput.current !== initialInput) {
+    if (previousInput.current !== initialInput || previousImageGen.current !== initialImageGen) {
       previousInput.current = initialInput
+      previousImageGen.current = initialImageGen
       // A push that lands while the user is mid-edit must not clobber the
       // draft -- same contract as the level grid above.
-      if (!dirtyRef.current) setModality(modalityFrom(initialInput))
+      if (!dirtyRef.current) setModality(modalityFrom(initialInput, initialImageGen))
     }
     if (previousDefaultEffort.current !== initialDefaultEffort) {
       previousDefaultEffort.current = initialDefaultEffort
       if (!dirtyRef.current) setDefaultEffort(initialDefaultEffort ?? '')
     }
-  }, [initialEfforts, initialInput, initialDefaultEffort])
+  }, [initialEfforts, initialInput, initialImageGen, initialDefaultEffort])
 
   // The declared levels of this draft: the pick's value domain.
   const armedLevels = LEVEL_ORDER.filter(level => draft[level].on)
@@ -356,7 +386,7 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
   // declaration, so it participates in the dirty comparison like any other part.
   const effectiveEfforts: false | ReasoningEfforts | undefined = thinking ? buildIntent(draft) : false
   const changed = !sameEfforts(effectiveEfforts, initialEfforts)
-    || !sameModality(modality, initialInput)
+    || !sameModality(modality, initialInput, initialImageGen)
     || defaultEffortIntent !== undefined
 
   /**
@@ -374,10 +404,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
 
   const markDirty = (): void => {
     dirtyRef.current = true
-    setSuggested(undefined)
-    setSuggestedSource('')
-    setSuggestedConfidence('low')
-    setSuggestedInputSource(undefined)
     // appliedCompatRef deliberately SURVIVES this (see its declaration) --
     // the commit still has to write the applied suggestion's compat bytes.
     // Reference capacities SURVIVE tweaks too: they are read-only context about
@@ -411,7 +437,8 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     // The modality part travels ONLY when this edit actually changed it: an
     // untouched row must omit the intent entirely -- a null would stamp the
     // durable inputUnset marker onto modalities the user never decided about.
-    const nextInput = sameModality(nextModality, initialInput) ? undefined : buildModalityIntent(nextModality)
+    const modalityChanged = !sameModality(nextModality, initialInput, initialImageGen)
+    const modalityWrite = modalityChanged ? buildModalityWrite(nextModality) : undefined
     const defaultEffortOut = nextDefaultEffort === (initialDefaultEffort ?? '')
       ? undefined
       : nextDefaultEffort === '' ? null : nextDefaultEffort
@@ -420,7 +447,8 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     // adapt: a suggestion must write the same bytes whichever path applied it.
     const write = pendingWriteOf({
       efforts: effortsIntent,
-      input: nextInput,
+      input: modalityWrite?.input,
+      imageGen: modalityWrite?.imageGen,
       defaultEffort: defaultEffortOut,
       appliedCompat: appliedCompatRef.current,
       routeApi,
@@ -483,17 +511,32 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     setMessage(undefined)
   }
 
+  /** Declare the chat-input pair: text always, image per `on`. Replaces 生图 —
+   * the three pills are mutually exclusive by construction. */
   const patchImage = (on: boolean): void => {
     markDirty()
-    const nextModality = { declared: true, image: on }
+    const nextModality: DraftModality = { declared: true, image: on, imageGen: false }
     setModality(nextModality)
     commitPending(draft, nextModality, defaultEffort)
     setMessage(undefined)
   }
 
+  /** Clear the whole declaration (the 文本 pill's click while declared). */
   const clearModality = (): void => {
     markDirty()
-    const nextModality = { declared: false, image: false }
+    const nextModality: DraftModality = { declared: false, image: false, imageGen: false }
+    setModality(nextModality)
+    commitPending(draft, nextModality, defaultEffort)
+    setMessage(undefined)
+  }
+
+  /** Toggle the image-generator state. Replaces any 文本/图片 declaration —
+   * an image generator carries no chat-input answer beside it. */
+  const patchImageGen = (on: boolean): void => {
+    markDirty()
+    const nextModality: DraftModality = on
+      ? { declared: false, image: false, imageGen: true }
+      : { declared: false, image: false, imageGen: false }
     setModality(nextModality)
     commitPending(draft, nextModality, defaultEffort)
     setMessage(undefined)
@@ -540,6 +583,7 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
       compat?: CompatSuggestion
       input?: InputModalities
       inputSource?: InputSource
+      imageGen?: boolean
       contextWindow?: number
       maxTokens?: number
       defaultEffort?: string
@@ -554,19 +598,18 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     const nextDraft = draftFrom(parts.efforts)
     setDraft(nextDraft)
     // The suggestion's own modality, when it carries one; else the draft's.
-    const nextModality = parts.input === undefined ? modality : modalityFrom(parts.input)
-    if (parts.input !== undefined) setModality(nextModality)
+    // An image-generation verdict stands alone: it replaces the pair.
+    const nextModality = parts.imageGen === true
+      ? modalityFrom(undefined, true)
+      : parts.input === undefined ? modality : modalityFrom(parts.input)
+    if (nextModality !== modality) setModality(nextModality)
     // A blank pick takes the vendor default. A pick the user already chose
     // stays: auto-adapt must not overwrite a level they set by hand.
     const nextDefault = defaultEffort === '' && parts.defaultEffort !== undefined
       ? parts.defaultEffort
       : defaultEffort
     if (nextDefault !== defaultEffort) setDefaultEffort(nextDefault)
-    setSuggested(parts.efforts)
-    setSuggestedSource(parts.source)
-    setSuggestedConfidence(parts.confidence)
     appliedCompatRef.current = parts.compat
-    setSuggestedInputSource(parts.inputSource)
     // The capacities also reach the row's own official inputs (fill-only, so a
     // number the user typed keeps its place): the official form's draft holds
     // them and its own Save persists them — the same single-writer rule the
@@ -580,10 +623,10 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
       setCapacityContext(capacityText(echoed?.contextWindow))
       setCapacityMax(capacityText(echoed?.maxTokens))
     }
-    setMessage({
-      kind: 'info',
-      text: t('appliedHint', { source: parts.source, confidence: t('confidence_' + parts.confidence) }),
-    })
+    // A successful adapt says nothing on its own: the draft IS the report, and
+    // the only messages this card shows are failures (user request: the
+    // provenance/confidence copy is noise).
+    setMessage(undefined)
     // One commit for the whole suggestion, so the ledger never holds the
     // ladder without the compat block that makes its wire spellings work.
     commitPending(nextDraft, nextModality, nextDefault, nextThinking)
@@ -630,13 +673,9 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
     api.withdraw(route, modelId)
     setDraft(draftFrom(initialEfforts))
     setThinking(initialEfforts !== false)
-    setModality(modalityFrom(initialInput))
+    setModality(modalityFrom(initialInput, initialImageGen))
     setDefaultEffort(initialDefaultEffort ?? '')
-    setSuggested(undefined)
-    setSuggestedSource('')
-    setSuggestedConfidence('low')
     appliedCompatRef.current = undefined
-    setSuggestedInputSource(undefined)
     // The capacities are the official form's draft, which this card edits
     // directly: discarding hands the row the values it mounted with, cleared
     // fields included (a clear is how a field goes back to inheriting).
@@ -713,11 +752,6 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
           <span className="bre-effort-title">{t('thinkingMode')}</span>
         </label>
         <span className="bre-effort-state">{stateText}</span>
-        {suggested === undefined ? null : (
-          <span className="bre-effort-suggest" role="status">
-            {t('appliedHint', { source: suggestedSource, confidence: t('confidence_' + suggestedConfidence) })}
-          </span>
-        )}
       </div>
       {thinking ? (
         <div className="bre-effort-card">
@@ -856,8 +890,28 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
                     <Glyph paths={IMAGE_PATHS} />
                     {t('modalityImage')}
                   </button>
+                  {/* 生图 stands outside the chat-input pair: an image generator
+                      is a different kind of model (the composer's switcher hides
+                      it), so the three pills are mutually exclusive and
+                      selecting this one clears the 文本/图片 declaration. */}
+                  <button
+                    type="button"
+                    className={modality.imageGen ? 'bre-lvl bre-lvl--opt is-on' : 'bre-lvl bre-lvl--opt'}
+                    disabled={disabled}
+                    aria-pressed={modality.imageGen}
+                    aria-label={t('modalityImageGen') + ' ' + String(index + 1)}
+                    title={t('modalityImageGen')}
+                    onClick={() => { patchImageGen(!modality.imageGen) }}
+                  >
+                    <Glyph paths={IMAGE_GEN_PATHS} />
+                    {t('modalityImageGen')}
+                  </button>
                 </div>
-                <p className="bre-effort-note">{modality.declared ? t('modalityDeclared') : t('modalityInherit')}</p>
+                <p className="bre-effort-note">
+                  {modality.imageGen
+                    ? t('modalityImageGenHint')
+                    : modality.declared ? t('modalityDeclared') : t('modalityInherit')}
+                </p>
               </div>
           </div>
           <span className="bre-effort-sep" />
@@ -921,34 +975,16 @@ export function EffortEditor({ route, routeApi, routeBaseURL, modelId, modelName
               <p className="bre-effort-note">{t('capacityUnitsHint')}</p>
             </div>
           </div>
-          {suggested === undefined ? null : (
-            <div className="bre-suggestion">
-              {suggestedInputSource === undefined
-                ? null
-                : (
-                  <p className="bre-effort-note">
-                    {suggestedInputSource === 'endpoint'
-                      ? t('inputHintEndpoint')
-                      : suggestedInputSource === 'knowledge'
-                        ? t('inputHintKnowledge')
-                        : t('inputHintHeuristic')}
-                  </p>
-                )}
-            </div>
-          )}
           {message === undefined ? null : (
             <p className={'bre-effort-message bre-' + message.kind} role={message.kind === 'error' ? 'alert' : 'status'}>
               {message.text}
             </p>
           )}
-          {!changed
-            ? null
-            : (
-              <p className="bre-effort-message bre-info" role="status">
-                {t('pendingSave')}
-              </p>
-            )}
-          {!changed ? null : <p className="bre-effort-note">{t('pendingHint')}</p>}
+          {/* No "modified — saves with the card" copy: the Reset button is the
+              only affordance whose enabled state reports it, and the provenance
+              copy (applied suggestion / modality source / pending-save note)
+              was noise the user asked removed (user item 3). The draft is the
+              report; the official Save is the commit. */}
           {/* No commit button since C2: the row's edits land with the official
               card's own Save (issue #7), so the only action left is discarding
               them. A card-level commit would ride the frozen revision baseline

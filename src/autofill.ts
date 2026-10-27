@@ -11,7 +11,7 @@
  * @module dsh-model-think-level/autofill
  */
 
-import { AUTOFILL_MARKER, INPUT_UNSET_MARKER, UNSET_MARKER } from './constants.js'
+import { AUTOFILL_MARKER, INPUT_IMAGE_GEN_MARKER, INPUT_UNSET_MARKER, UNSET_MARKER } from './constants.js'
 import { isSelfHostedRelay, NEW_COMPAT_KEYS, suggestEfforts } from './knowledge.js'
 import { isRecord, routeFactsOf } from './shared.js'
 
@@ -19,13 +19,16 @@ import { isRecord, routeFactsOf } from './shared.js'
 type JsonObject = Record<string, unknown>
 
 /**
- * Whether a model row carries an input-modality declaration the document
- * already answers with. An absent key and an empty array both read as "no
+ * Whether a model row carries an input-modality answer the document already
+ * holds: the chat-input declaration, its deliberate-unset marker, or the
+ * image-generation marker (生图) — all three record a decision the fill must
+ * never read back as a gap. An absent key and an empty array both read as "no
  * answer here" -- mirroring how llm-pi-ai's own resolution treats them.
  */
 function declaresInput(model: JsonObject): boolean {
   const input = model['input']
-  return Array.isArray(input) && input.length > 0
+  if (Array.isArray(input) && input.length > 0) return true
+  return model[INPUT_UNSET_MARKER] === true || model[INPUT_IMAGE_GEN_MARKER] === true
 }
 
 /**
@@ -67,7 +70,8 @@ export function buildAutofillPatch(
       // decisions, so auto-fill never reads them back as gaps (the bug this
       // guards: a refill one event after every user "unset").
       const effortsDeclared = model['reasoningEfforts'] !== undefined || model[UNSET_MARKER] === true
-      const inputDeclared = declaresInput(model) || model[INPUT_UNSET_MARKER] === true
+      // declaresInput already reads the deliberate-unset and 生图 markers as answers.
+      const inputDeclared = declaresInput(model)
       if ((effortsDeclared || !fillEfforts) && (inputDeclared || !fillModalities)) {
         // Versioned exception to never-touch-declared (issue #2): a declared
         // ladder whose compat lacks the role pin on a self-hosted relay gets
@@ -114,9 +118,17 @@ export function buildAutofillPatch(
           fill['compat'] = { ...stored, ...(suggestion.compat as JsonObject) }
         }
       }
-      if (!inputDeclared && fillModalities && suggestion.input !== undefined) {
-        touched = true
-        fill['input'] = [...suggestion.input]
+      if (!inputDeclared && fillModalities) {
+        // An image-generation verdict replaces the chat-input declaration: the
+        // marker is the whole answer, and an `input` array beside it would
+        // read the row back as a vision chat model.
+        if (suggestion.imageGen === true) {
+          touched = true
+          fill[INPUT_IMAGE_GEN_MARKER] = true
+        } else if (suggestion.input !== undefined) {
+          touched = true
+          fill['input'] = [...suggestion.input]
+        }
       }
       if (!touched) {
         nextModels.push(model)

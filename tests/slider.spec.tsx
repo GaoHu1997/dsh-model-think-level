@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ComposerSlider, effectiveEffortIndex, sliderLevels } from '../src/client/ComposerSlider.js'
+import { setModelOrder, syncModelOrders } from '../src/client/model-order.js'
 
 import type { ModelDirectoryLike, ModelDirectoryStateLike } from '../src/client/types.js'
 
@@ -93,7 +94,20 @@ function fixture(state?: Partial<ModelDirectoryStateLike>): {
   }
 }
 
-async function mount(directory: ModelDirectoryLike): Promise<{ root: ReturnType<typeof createRoot>; container: HTMLElement; menu: HTMLElement }> {
+import type { ConfiguredInputs, ModelFacts } from '../src/client/configured-inputs.js'
+
+/** A hand-built saved-facts face, shaped like createConfiguredInputs' snapshot. */
+function fakeFacts(facts: Record<string, Record<string, ModelFacts>>): ConfiguredInputs {
+  const snapshot = new Map(Object.entries(facts).map(([provider, models]) => [provider, new Map(Object.entries(models))]))
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: () => () => {},
+    load: async () => {},
+    invalidate: () => {},
+  }
+}
+
+async function mount(directory: ModelDirectoryLike, configuredInputs?: ConfiguredInputs): Promise<{ root: ReturnType<typeof createRoot>; container: HTMLElement; menu: HTMLElement }> {
   const menu = document.createElement('div')
   menu.setAttribute('role', 'menu')
   document.body.appendChild(menu)
@@ -102,6 +116,7 @@ async function mount(directory: ModelDirectoryLike): Promise<{ root: ReturnType<
   const root = createRoot(container)
   root.render(createElement(ComposerSlider, {
     directory,
+    ...(configuredInputs === undefined ? {} : { configuredInputs }),
     t: (key: string) => key,
   }))
   // createRoot renders are scheduled; give the initial commit a tick.
@@ -333,6 +348,90 @@ describe('ComposerSlider search', () => {
   })
 })
 
+describe('ComposerSlider search follow-ups', () => {
+  it('applies the stored model order to the searched matches too', async () => {
+    // The search path runs the SAME orderModelEntries fold the per-provider
+    // column runs: a drag on the settings page reorders the flat matches as
+    // well, or the two views would disagree about the same models.
+    setModelOrder('aliyun', ['qwen-plus', 'qwen-max'])
+    try {
+      const { directory } = fixture({
+        groups: ([
+          {
+            id: 'aliyun',
+            name: 'Aliyun',
+            models: [
+              { id: 'qwen-max', name: 'Qwen Max', reasoning: { efforts: LADDER } },
+              { id: 'qwen-plus', name: 'Qwen Plus', reasoning: { efforts: LADDER.slice(0, 4) } },
+            ],
+          },
+        ] as unknown) as Groups,
+      })
+      const { root, container } = await mount(directory)
+      await search(container, 'qwen')
+      expect(modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent))
+        .toEqual(['Aliyun · Qwen Plus', 'Aliyun · Qwen Max'])
+      root.unmount()
+    } finally {
+      syncModelOrders({})
+    }
+  })
+
+  it('clears the query on Escape without closing the menu', async () => {
+    const { directory } = fixture()
+    const { root, container } = await mount(directory)
+    await search(container, 'plus')
+    expect(modelOptions(container)).toHaveLength(1)
+    const input = container.querySelector<HTMLInputElement>('.bre-menu-search .bre-menu-search-input')
+    input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // The filter lifts: the per-provider column is back.
+    expect(modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent))
+      .toEqual(['Qwen Max', 'Qwen Plus'])
+    root.unmount()
+  })
+})
+
+describe('ComposerSlider provider column', () => {
+  it('switches the right column to the clicked provider without selecting anything', async () => {
+    const { directory, selectSpy } = fixture({
+      groups: ([
+        {
+          id: 'aliyun',
+          name: 'Aliyun',
+          models: [{ id: 'qwen-max', name: 'Qwen Max', reasoning: { defaultEffort: 'medium', efforts: LADDER } }],
+        },
+        { id: 'openai', name: 'OpenAI', models: [{ id: 'gpt-6.1', name: 'GPT 6.1', reasoning: { efforts: LADDER } }] },
+      ] as unknown) as Groups,
+    })
+    const { root, container } = await mount(directory)
+    const providers = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.bre-provider'))
+    expect(providers().map(el => el.querySelector('.bre-option-name')?.textContent)).toEqual(['Aliyun', 'OpenAI'])
+    // The current model's provider opens first.
+    expect(providers()[0]?.classList.contains('is-open')).toBe(true)
+    expect(modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent)).toEqual(['Qwen Max'])
+
+    click(providers()[1])
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // The right column now shows the other provider's models; the open accent
+    // moved with it; no selection was made.
+    expect(modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent)).toEqual(['GPT 6.1'])
+    expect(providers()[1]?.classList.contains('is-open')).toBe(true)
+    expect(providers()[0]?.classList.contains('is-open')).toBe(false)
+    expect(selectSpy).not.toHaveBeenCalled()
+    root.unmount()
+  })
+
+  it('shows the empty state when no provider holds models', async () => {
+    const bare = fixture({ current: null, groups: [] })
+    const { root, container } = await mount(bare.directory)
+    expect(container.querySelectorAll('.bre-provider')).toHaveLength(0)
+    expect(container.querySelectorAll('.bre-empty')).toHaveLength(2)
+    expect(container.querySelector('.bre-empty')?.textContent).toBe('sliderNoCurrent')
+    root.unmount()
+  })
+})
+
 describe('ComposerSlider model picker', () => {
   it('marks the current model by colour alone, never with a tick beside the badges', async () => {
     const { directory } = fixture()
@@ -550,6 +649,58 @@ describe('ComposerSlider commit', () => {
     pickLevel(container, 'High')
     await vi.waitFor(() => expect(selectSpy).toHaveBeenCalledWith({ provider: 'aliyun', model: 'qwen-max', reasoningEffort: 'high' }))
     expect(loadSpy).not.toHaveBeenCalled()
+    root.unmount()
+  })
+})
+
+describe('ComposerSlider image-generation filter and capacity tag', () => {
+  it('hides a 生图-marked model from the columns, the search and the provider count', async () => {
+    // The models page marked wanx-v1 an image generator: it cannot serve a
+    // chat turn, so the switcher drops it everywhere — the columns, the
+    // matches and the count beside the provider name.
+    const facts = fakeFacts({ aliyun: { 'wanx-v1': { imageGen: true } } })
+    const { directory } = fixture({
+      groups: ([{
+        id: 'aliyun',
+        name: 'Aliyun',
+        models: [
+          { id: 'qwen-max', name: 'Qwen Max', reasoning: { defaultEffort: 'medium', efforts: LADDER } },
+          { id: 'qwen-plus', name: 'Qwen Plus', reasoning: { efforts: LADDER.slice(0, 4) } },
+          { id: 'wanx-v1', name: 'Wanx v1' },
+        ],
+      }] as unknown) as Groups,
+    })
+    const { root, container } = await mount(directory, facts)
+    const names = modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent)
+    expect(names).toEqual(['Qwen Max', 'Qwen Plus'])
+    // The provider count answers for the OFFERED models only.
+    expect(container.querySelector('.bre-provider-count')?.textContent).toBe('2')
+    // And the search cannot reach the hidden row either.
+    await search(container, 'wanx')
+    expect(container.querySelector('.bre-provider-models')?.textContent).toContain('modelSearchNoMatches')
+    root.unmount()
+  })
+
+  it('keeps offering every model when nothing is marked 生图', async () => {
+    const { directory } = fixture()
+    const { root, container } = await mount(directory, fakeFacts({}))
+    expect(modelOptions(container)).toHaveLength(2)
+    root.unmount()
+  })
+
+  it('tags the declared context window the way catalogues spell it', async () => {
+    // Binary-exact values spell in binary units (131072 -> 128K, 1048576 ->
+    // 1M); a model with no declared window carries no tag at all.
+    const facts = fakeFacts({
+      aliyun: {
+        'qwen-max': { contextWindow: 131072 },
+        'qwen-plus': { contextWindow: 1048576 },
+      },
+    })
+    const { directory } = fixture()
+    const { root, container } = await mount(directory, facts)
+    const caps = Array.from(container.querySelectorAll<HTMLElement>('.bre-provider-models .bre-option-cap'))
+    expect(caps.map(el => el.textContent)).toEqual(['128K', '1M'])
     root.unmount()
   })
 })

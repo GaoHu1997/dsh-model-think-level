@@ -120,6 +120,15 @@ export interface KnowledgeEntry {
    */
   input?: InputModalities
   /**
+   * The family is IMAGE GENERATION (生图): these models produce images from
+   * prompts and cannot serve a chat turn, so the composer's model switcher
+   * hides them and the row editor's modality pills stand down to the single
+   * 生图 answer. Such an entry declares `efforts: false` (a generator takes no
+   * reasoning_effort) and no `input` — the two chat-input answers would read
+   * it back as a vision chat model.
+   */
+  imageGen?: true
+  /**
    * Reference context window in tokens. Rendered as footnote advice, and a
    * mounted row's official capacity input echoes it (fill-only) when a
    * suggestion is applied.
@@ -164,6 +173,14 @@ export interface EndpointFacts {
    * discipline: silence is not refusal.
    */
   input?: readonly string[]
+  /**
+   * The listing's OUTPUT-modality disclosure, normalized to lowercase strings,
+   * when it named one (OpenRouter's `architecture.output_modalities` and its
+   * flattened copies). This is the disclosure that answers "is this an image
+   * generator": a model whose listing says it outputs images and not text
+   * cannot serve a chat turn.
+   */
+  output?: readonly string[]
   /** Context length the listing disclosed, when it carries one. */
   contextLength?: number
 }
@@ -190,6 +207,8 @@ export interface EffortSuggestion {
   input?: InputModalities
   /** Where the modality part came from -- its confidence rides this. */
   inputSource?: InputSource
+  /** Whether the model is an image generator (生图), when derivable. */
+  imageGen?: boolean
   /** Reference context window; echoed into the row's official capacity input when one is mounted. */
   contextWindow?: number
   /** Reference max output tokens (same echo rule as the context window). */
@@ -1452,6 +1471,81 @@ export const KNOWLEDGE_BASE: readonly KnowledgeEntry[] = [
     input: ['text'],
     note: '蚂蚁 Ling-2.6（含 -flash）：非思考模型，无 effort 控件（2026-10 校准新增；Ring-2.6 思考线见上条）。',
   },
+  // ---- Image-generation families (生图) -----------------------------------
+  // These models produce images from prompts and cannot serve a chat turn, so
+  // every entry declares `imageGen: true` with `efforts: false` and NO `input`:
+  // the composer's switcher hides the row and the row editor's modality pills
+  // stand down to the single 生图 answer. A relay renaming them keeps matching
+  // through the name heuristic below.
+  {
+    id: 'openai-gpt-image',
+    // 'dalle' covers aggregator spellings that strip the hyphen.
+    patterns: ['gpt-image', 'dall-e', 'dalle'],
+    efforts: false,
+    imageGen: true,
+    note: 'OpenAI 生图系（gpt-image-1 / DALL·E 3）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+  },
+  {
+    id: 'google-imagen',
+    // '-image' keys the Gemini-native image-output generations
+    // (gemini-2.5-flash-image "nano banana", gemini-3-pro-image…), whose ids
+    // carry the word as its own token; 'imagen' keys the dedicated generator.
+    patterns: ['imagen', 'flash-image', 'pro-image', 'nano-banana'],
+    efforts: false,
+    imageGen: true,
+    note: 'Google 生图系（Imagen / Gemini-Image "nano banana"）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+  },
+  {
+    id: 'black-forest-flux',
+    patterns: ['flux'],
+    efforts: false,
+    imageGen: true,
+    note: 'FLUX 系（FLUX.1 schnell/dev/pro 等）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+  },
+  {
+    id: 'stability-sd',
+    patterns: ['stable-diffusion', 'sdxl', 'sd3'],
+    efforts: false,
+    imageGen: true,
+    note: 'Stability 生图系（Stable Diffusion / SDXL / SD3）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+  },
+  {
+    id: 'zhipu-cogview',
+    patterns: ['cogview'],
+    efforts: false,
+    imageGen: true,
+    note: '智谱 CogView 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+  },
+  {
+    id: 'aliyun-wanx',
+    patterns: ['wanx'],
+    efforts: false,
+    imageGen: true,
+    note: '阿里万相 Wanx 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+  },
+  {
+    id: 'bytedance-seedream',
+    patterns: ['seedream', 'seededit'],
+    efforts: false,
+    imageGen: true,
+    note: '字节 Seedream / SeedEdit 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+  },
+  {
+    id: 'qwen-image',
+    // The generation line only: 'qwen-vl' stays with the vision entry above
+    // (longest-hit keeps the strictly longer 'qwen-vl' ahead where both fire).
+    patterns: ['qwen-image'],
+    efforts: false,
+    imageGen: true,
+    note: '通义千问 Qwen-Image 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+  },
+  {
+    id: 'midjourney',
+    patterns: ['midjourney', 'niji'],
+    efforts: false,
+    imageGen: true,
+    note: 'Midjourney / Niji 生图系（中转常见）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。',
+  },
 ]
 
 /**
@@ -1761,6 +1855,49 @@ export function inferModalitiesFromName(modelId: string): InputModalities | unde
 }
 
 /**
+ * Image-generation name tokens -- the last-resort tier for rows neither the
+ * knowledge base nor the endpoint named: the vendor/generator tokens that
+ * appear in image-generation ids. Boundary matching keeps 'flux' from hitting
+ * 'afflux' and 'sd3' from hitting 'sd3x5-anything-else' spellings it should
+ * still hit ('sd3.5' normalizes to 'sd3 5', where the boundary holds).
+ */
+const IMAGE_GEN_NAME_TOKENS: readonly string[] = [
+  'dall-e',
+  'dalle',
+  'gpt-image',
+  'imagen',
+  'flux',
+  'stable-diffusion',
+  'sdxl',
+  'sd3',
+  'cogview',
+  'wanx',
+  'seedream',
+  'seededit',
+  'midjourney',
+  'niji',
+  'nano-banana',
+  'image-gen',
+  'imagegen',
+  'qwen-image',
+  'grok-2-image',
+]
+
+/** Whether the id alone reads as an image generator (生图) -- the lowest-confidence tier. */
+export function inferImageGenFromName(modelId: string): boolean {
+  const haystack = normalizeLoose(modelId)
+  for (const token of IMAGE_GEN_NAME_TOKENS) {
+    const needle = normalizeLoose(token)
+    let at = haystack.indexOf(needle)
+    while (at >= 0) {
+      if (onBoundary(haystack, at, needle.length)) return true
+      at = haystack.indexOf(needle, at + 1)
+    }
+  }
+  return false
+}
+
+/**
  * Intersect a raw listing disclosure with the core vocabulary. Returns
  * undefined when the listing never named a modality field OR named one whose
  * members all fall outside the core vocabulary (an audio-only declaration
@@ -1806,9 +1943,11 @@ export function suggestEfforts(
   // ---- Modality + capacity parts (orthogonal to the effort ladder) ----
   let input: InputModalities | undefined
   let inputSource: InputSource | undefined
+  let imageGen: boolean | undefined
   let contextWindow: number | undefined
   let maxTokens: number | undefined
 
+  if (entry?.imageGen === true) imageGen = true
   if (entry?.input !== undefined) {
     input = entry.input
     inputSource = 'knowledge'
@@ -1817,17 +1956,27 @@ export function suggestEfforts(
   if (entry?.maxTokens !== undefined) maxTokens = entry.maxTokens
 
   // An endpoint disclosure outranks the knowledge base; a disclosed context
-  // length likewise replaces the reference value. Silence changes nothing.
+  // length likewise replaces the reference value. Silence changes nothing. The
+  // OUTPUT disclosure is the endpoint's word on "is this an image generator":
+  // a listing that says the model outputs images and not text cannot serve a
+  // chat turn, and one that names text output is a chat model even when a
+  // relay renamed it into a generator-looking id.
   const listedInput = declaredCoreInput(endpoint?.input)
   if (listedInput !== undefined) {
     input = listedInput
     inputSource = 'endpoint'
   }
+  const listedOutput = endpoint?.output
+  if (listedOutput !== undefined) {
+    imageGen = listedOutput.includes('image') && !listedOutput.includes('text')
+  }
   if (endpoint?.contextLength !== undefined && Number.isFinite(endpoint.contextLength) && endpoint.contextLength > 0) {
     contextWindow = endpoint.contextLength
   }
 
-  // L3: nothing named the modalities -- fall back to the name heuristic.
+  // L3: nothing named the modalities -- fall back to the name heuristic. The
+  // image-generation guess stands beside it: an id that names a generator is
+  // answered with the 生图 marker instead of a vision-chat declaration.
   if (input === undefined) {
     const guessed = inferModalitiesFromName(modelId)
     if (guessed !== undefined) {
@@ -1835,10 +1984,20 @@ export function suggestEfforts(
       inputSource = 'heuristic'
     }
   }
+  if (imageGen === undefined && inferImageGenFromName(modelId)) imageGen = true
+
+  // The 生图 answer replaces the chat-input declaration, whichever tier named
+  // it: a request-modality array beside the marker would read the row back as
+  // a vision chat model on every reader that ignores the marker.
+  if (imageGen === true) {
+    input = undefined
+    inputSource = undefined
+  }
 
   const modalityParts = {
     ...(input === undefined ? {} : { input }),
     ...(inputSource === undefined ? {} : { inputSource }),
+    ...(imageGen === undefined ? {} : { imageGen }),
     ...(contextWindow === undefined ? {} : { contextWindow }),
     ...(maxTokens === undefined ? {} : { maxTokens }),
   }

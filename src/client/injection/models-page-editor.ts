@@ -31,19 +31,19 @@
  * @module dsh-model-think-level/client/injection/models-page-editor
  */
 
-import { AUTOFILL_MARKER, INPUT_UNSET_MARKER, PLUGIN_ID, UNSET_MARKER } from '../../constants.js'
+import { AUTOFILL_MARKER, INPUT_IMAGE_GEN_MARKER, INPUT_UNSET_MARKER, PLUGIN_ID, UNSET_MARKER } from '../../constants.js'
 import { suggestEfforts, type CompatSuggestion, type InputModalities, type ReasoningEfforts } from '../../knowledge.js'
 import { modelsOf, routeFactsOf, isRecord } from '../../shared.js'
 import { buildIntent, draftFrom, sameEfforts } from '../effort.js'
 import { parseCapacity } from '../capacity.js'
 import {
-  buildModalityIntent,
+  buildModalityWrite,
   ladderIntent,
   modalityFrom,
   pendingWriteOf,
   sameModality,
 } from '../EffortEditor.js'
-import { compatOf, createEditorApi, defaultEffortOf, effortsOf, inputOf, invalidateProbeCache, nameOf, providersOf, writeModelRows, type RowIntent } from '../ops.js'
+import { compatOf, createEditorApi, defaultEffortOf, effortsOf, imageGenOf, inputOf, invalidateProbeCache, nameOf, providersOf, writeModelRows, type RowIntent } from '../ops.js'
 import type { EffortEditorApi, EffortWriteIntent, HeldWrite, RemoteApi, SettingsJoin } from '../types.js'
 import { cataloguesOf, reconcileAutoEffortSeats, type AutoEffortSeatTarget } from './auto-effort-seat.js'
 import type { AutoAdaptReport } from '../auto-effort.js'
@@ -125,6 +125,14 @@ export interface HostLabels {
   contextWindow: readonly string[]
   /** The disclosure's max-output input ("Max output" / "最大输出"). */
   maxOutput: readonly string[]
+  /**
+   * The model list's add button ("Add model" / "添加模型"). Clicking it appends
+   * a row and focuses its first input, and the browser's own scroll into view
+   * (plus the anchoring around the growth) is what made the whole card appear
+   * to squeeze upward — the capture-phase pin wired on it answers that (see
+   * {@link wireAddModelRepin}).
+   */
+  addModel: readonly string[]
 }
 
 /** A row's identity as found on the page, resolved from the settings join. */
@@ -210,6 +218,8 @@ export interface EditorMountProps {
   effortsUnset?: boolean
   /** The model's current input-modality declaration. */
   input?: InputModalities
+  /** Whether the model is declared an image generator (生图). */
+  imageGen?: boolean
   /** The model's stored compat block (passthrough; the editor merges suggestions over it). */
   compat?: CompatSuggestion
   /** The model's stored per-model default-effort pick, when one is set. */
@@ -317,6 +327,8 @@ export interface ScanState {
   disclosureWired: WeakSet<Element>
   /** Provider-row Edit buttons already wired for the top re-pin. */
   editWired: WeakSet<Element>
+  /** The model lists' add-model buttons already wired for the top re-pin. */
+  addModelWired: WeakSet<Element>
 }
 
 /**
@@ -335,6 +347,11 @@ export interface StagedDeclaration {
   efforts: Exclude<EffortWriteIntent, undefined>
   compat?: CompatSuggestion
   input?: InputModalities
+  /**
+   * The image-generation part, when the staging carried one: true marks the
+   * row 生图, false clears the marker. Undefined touches nothing.
+   */
+  imageGen?: boolean
   defaultEffort?: string | null
 }
 
@@ -540,6 +557,7 @@ export function createScanState(): ScanState {
     cancelWired: new WeakSet(),
     disclosureWired: new WeakSet(),
     editWired: new WeakSet(),
+    addModelWired: new WeakSet(),
   }
   restoreLedger(state)
   return state
@@ -619,6 +637,11 @@ export function stageEffortsInto(
    */
   input?: InputModalities | null,
   defaultEffort?: string | null,
+  /**
+   * The image-generation part as the write carried it: true marks the row 生图,
+   * false or null clears the marker, undefined touches nothing.
+   */
+  imageGen?: boolean | null,
 ): void {
   try {
     const models = state.pending.get(route)
@@ -634,6 +657,7 @@ export function stageEffortsInto(
       efforts,
       ...(compat === undefined ? {} : { compat }),
       ...(input === undefined ? {} : { input }),
+      ...(imageGen === undefined ? {} : { imageGen: imageGen === true }),
       ...(defaultEffort === undefined ? {} : { defaultEffort }),
     }))
   } finally {
@@ -744,6 +768,8 @@ export interface EffectiveStagedIntents {
   efforts: EffortWriteIntent
   compat?: CompatSuggestion
   input?: InputModalities
+  /** The staged image-generation intent, when it is a change. */
+  imageGen?: boolean
   /** The staged default-effort pick, when the staging carried one. */
   defaultEffort?: string | null
 }
@@ -796,15 +822,24 @@ export function effectiveStagedIntents(
       || current[INPUT_UNSET_MARKER] === true
   const efforts: EffortWriteIntent = ladderTaken ? 'keep' : declaration.efforts
   const input = inputTaken ? undefined : declaration.input
+  // The image-generation part: the same per-part rule, decided against the
+  // row's stored marker. A staged value that matches what the document holds
+  // is a no-op; anything else (set, clear) passes through untouched — the
+  // marker is plugin-owned, so there is no host autofill footprint to arbitrate.
+  const storedImageGen = current[INPUT_IMAGE_GEN_MARKER] === true
+  const imageGen = declaration.imageGen !== undefined && declaration.imageGen !== storedImageGen
+    ? declaration.imageGen
+    : undefined
   // The default-effort pick has no takeover question: host autofill never
   // writes this field, so whatever the document holds is a user decision and
   // the staged intent (write or clear) passes through untouched.
   const defaultEffort = declaration.defaultEffort
-  if (efforts === 'keep' && input === undefined && defaultEffort === undefined) return null
+  if (efforts === 'keep' && input === undefined && imageGen === undefined && defaultEffort === undefined) return null
   return {
     efforts,
     ...(declaration.compat === undefined ? {} : { compat: declaration.compat }),
     ...(input === undefined ? {} : { input }),
+    ...(imageGen === undefined ? {} : { imageGen }),
     ...(defaultEffort === undefined ? {} : { defaultEffort }),
   }
 }
@@ -901,6 +936,7 @@ async function flushRoute(
       efforts: effective.efforts,
       ...(effective.compat === undefined ? {} : { compat: effective.compat }),
       ...(effective.input === undefined ? {} : { input: effective.input }),
+      ...(effective.imageGen === undefined ? {} : { imageGen: effective.imageGen }),
       ...(effective.defaultEffort === undefined ? {} : { defaultEffort: effective.defaultEffort }),
     })
   }
@@ -993,6 +1029,7 @@ async function flushQueued(deps: InjectorDeps, state: ScanState, ignoreFence = f
       efforts: write.efforts,
       ...(write.compat === undefined ? {} : { compat: write.compat }),
       ...(write.input === undefined ? {} : { input: write.input }),
+      ...(write.imageGen === undefined ? {} : { imageGen: write.imageGen }),
       ...(write.defaultEffort === undefined ? {} : { defaultEffort: write.defaultEffort }),
     }))
     const results = await writeModelRows(deps.api, route, intents, undefined, ignoreFence ? undefined : officialCardOpen)
@@ -1878,8 +1915,8 @@ export async function adaptEveryModel(
     const api = createEditorApi(
       deps.api,
       describe,
-      (stagedRoute, modelId, efforts, compat, input, defaultEffort) => {
-        stageEffortsInto(state, stagedRoute, modelId, efforts, compat, modalityIntent(modelId, input), defaultEffort)
+      (stagedRoute, modelId, efforts, compat, input, defaultEffort, imageGen) => {
+        stageEffortsInto(state, stagedRoute, modelId, efforts, compat, modalityIntent(modelId, input), defaultEffort, imageGen)
       },
       (heldRoute, modelId, write) => {
         queueWriteInto(state, heldRoute, modelId, { ...write, input: modalityIntent(modelId, write.input) })
@@ -1892,6 +1929,7 @@ export async function adaptEveryModel(
       if (modelId.length === 0) continue
       const initialEfforts = effortsOf(models, modelId)
       const initialInput = inputOf(models, modelId)
+      const storedImageGen = model[INPUT_IMAGE_GEN_MARKER] === true
       // A collapsed row has no editor, so the document is the only record.
       // Same rule as the expanded skip above: a stored ladder, `false`, or the
       // durable unset marker is a decision and must survive this click.
@@ -1902,9 +1940,11 @@ export async function adaptEveryModel(
       // seat that reports the provider as configured while that flag stays off
       // is the same silent lie in a smaller place. So the statement about
       // images rides a ladder-less write of its own (`efforts: 'keep'`), see
-      // {@link mergeRowIntent}.
+      // {@link mergeRowIntent}. The image-generation marker is a modality
+      // answer of its own and settles the half the same way.
       const settledModality = (Array.isArray(initialInput) && initialInput.length > 0)
         || model[INPUT_UNSET_MARKER] === true
+        || storedImageGen
       // An expanded row's mounted editor owns its LADDER: it answers this same
       // click through its own listener, so the walk stays out of that half. Its
       // modality gap is nobody's -- that listener refuses a row whose ladder is
@@ -1959,14 +1999,20 @@ export async function adaptEveryModel(
       // maps it: an untouched ladder and an untouched modality stay out of the
       // write rather than stamping an unset marker onto the row. The vendor
       // default travels the same way the row's own auto-adapt does: a fresh
-      // editor starts from the stored pick and only reports a change.
-      const nextModality = parts.input === undefined ? modalityFrom(initialInput) : modalityFrom(parts.input)
+      // editor starts from the stored pick and only reports a change. A 生图
+      // verdict stands alone — it replaces the chat-input pair.
+      const nextModality = parts.imageGen === true
+        ? modalityFrom(undefined, true)
+        : parts.input === undefined
+          ? modalityFrom(initialInput, storedImageGen)
+          : modalityFrom(parts.input)
       if (settledLadder) {
         // The row's ladder is a decision, so this write states nothing about it
         // ('keep') and only fills the modality gap. A suggestion that names no
-        // image is deliberately not written here: a text-only declaration adds
-        // nothing the row lacks while silencing the host's own auto-fill.
-        if (!nextModality.image) continue
+        // image and no generation is deliberately not written here: a
+        // text-only declaration adds nothing the row lacks while silencing the
+        // host's own auto-fill.
+        if (!nextModality.image && !nextModality.imageGen) continue
         // The row's editor reported something for it: never overrule the user's
         // latest word with a suggestion (the held ledger keeps one write per
         // row, so this one would replace theirs).
@@ -1984,7 +2030,8 @@ export async function adaptEveryModel(
         //
         // A row whose control could not be reached is not left unfolded for this
         // (see {@link imprintModality}): `imprintFor` answers `false` and the
-        // verdict rides the write below instead.
+        // verdict rides the write below instead. A 生图 verdict has no official
+        // control at all, so it always rides the write.
         if (await imprintFor(modelId, nextModality)) {
           held += 1
           continue
@@ -1992,14 +2039,17 @@ export async function adaptEveryModel(
         stagedRow = !docIds.has(modelId)
         api.commit(route, modelId, pendingWriteOf({
           efforts: 'keep',
-          input: buildModalityIntent(nextModality),
+          ...buildModalityWrite(nextModality),
         }))
         if (stagedRow) deps.onPendingChanged?.()
         stagedRow = false
         held += 1
         continue
       }
-      const nextDefault = parts.defaultEffort ?? initialDefault
+      // The vendor default fills a BLANK pick only — a pick the user already
+      // chose stays, the same rule the row's own auto-adapt applies
+      // (applySuggestion): a stored pick is a hand decision about this row.
+      const nextDefault = initialDefault !== '' ? initialDefault : (parts.defaultEffort ?? initialDefault)
       const defaultEffort = nextDefault === initialDefault
         ? undefined
         : nextDefault === '' ? null : nextDefault
@@ -2016,9 +2066,13 @@ export async function adaptEveryModel(
         ...(parts.maxTokens === undefined ? {} : { maxTokens: parts.maxTokens }),
       })
       const imprinted = imprint !== false && imprint.modality
+      const modalityWrite = imprinted || sameModality(nextModality, initialInput, storedImageGen)
+        ? undefined
+        : buildModalityWrite(nextModality)
       api.commit(route, modelId, pendingWriteOf({
         efforts: ladderIntent(nextThinking, buildIntent(draftFrom(parts.efforts)), initialEfforts),
-        input: imprinted || sameModality(nextModality, initialInput) ? undefined : buildModalityIntent(nextModality),
+        input: modalityWrite?.input,
+        imageGen: modalityWrite?.imageGen,
         defaultEffort,
         appliedCompat: parts.compat,
         routeApi,
@@ -2070,6 +2124,7 @@ function sameProps(a: EditorMountProps, b: EditorMountProps): boolean {
     && a.effortsUnset === b.effortsUnset
     && sameEfforts(a.efforts, b.efforts)
     && sameInput(a.input, b.input)
+    && a.imageGen === b.imageGen
     && sameCompat(a.compat, b.compat)
 }
 
@@ -2353,6 +2408,13 @@ export function suppressScrollAnchoring(node: HTMLElement, windowMs: number = RE
       known.timer = window.setTimeout(() => releaseAnchoring(target), windowMs)
       continue
     }
+    // An inline 'none' that is already in place belongs to somebody else — a
+    // live pin window, or the host's own style. Capturing it would make this
+    // hold restore 'none' after that owner's own release, leaving the host's
+    // anchoring off for good (the poison the two ledgers can write into each
+    // other). The element is already suppressed, so skipping changes nothing
+    // about this window and returns the decision to its owner.
+    if (target.style.overflowAnchor === 'none') continue
     ANCHOR_HOLDS.set(target, {
       saved: target.style.overflowAnchor,
       timer: window.setTimeout(() => releaseAnchoring(target), windowMs),
@@ -2402,7 +2464,13 @@ function pinCardTop(card: HTMLElement, windowMs: number): void {
   const anchors = new Map<HTMLElement, string>()
   for (const target of chain) {
     lastSet.set(target, target.scrollTop)
-    anchors.set(target, target.style.overflowAnchor)
+    const anchor = target.style.overflowAnchor
+    // A 'none' already in place belongs to another suppressor (a concurrent
+    // suppress hold, or the host's own inline style): restoring it here would
+    // outlive that owner's own release and leave anchoring off for good. The
+    // element reads 'none' for this window either way, so only the RESTORE is
+    // left to whoever set it.
+    if (anchor !== 'none') anchors.set(target, anchor)
     target.style.overflowAnchor = 'none'
   }
   // Every container in the chain counts as watched: a movement of any of them
@@ -2948,6 +3016,57 @@ function wireEditRepin(trigger: HTMLElement, wired: WeakSet<Element>): void {
 }
 
 /**
+ * The model list's add-model buttons, found by the host's own copy.
+ *
+ * Matched like every other official control — by the resolved dictionary copy,
+ * never by a class — but through BOTH channels the button may carry: an
+ * aria-label when the host gave it one, else its own text content (the DSH
+ * host renders it as a plain labelled button). Buttons inside this plugin's
+ * own DOM are skipped, exactly like the Edit buttons above.
+ */
+export function addModelTriggersOf(scope: HTMLElement, labels: HostLabels): HTMLElement[] {
+  const found: HTMLElement[] = []
+  for (const button of Array.from(scope.querySelectorAll<HTMLElement>('button'))) {
+    if (button.closest('[data-plugin]') !== null) continue
+    const aria = button.getAttribute('aria-label') ?? ''
+    if (labels.addModel.some(label => aria.startsWith(label))) {
+      found.push(button)
+      continue
+    }
+    const text = (button.textContent ?? '').trim()
+    if (text.length > 0 && labels.addModel.some(label => text === label || text === `+ ${label}`)) {
+      found.push(button)
+    }
+  }
+  return found
+}
+
+/**
+ * Wire one add-model button so appending a row expands the card DOWNWARD
+ * instead of squeezing the page upward (user item 1).
+ *
+ * Two movements answer one click: the browser's scroll anchoring, which buys
+ * the growth back from whichever anchor it picks (often below the inserted
+ * row, which scrolls the card's own header up out of view), and the official
+ * handler's FOCUS scroll, which brings the new row's first input into view by
+ * moving the scroll offset synchronously — before this module's mutation
+ * microtask can measure anything. Both are answered by pinning the card's top
+ * from the click's CAPTURE phase: the window opens with a baseline measured
+ * before the official handler runs, and every offset the handler (or the
+ * anchoring behind it) writes is absorbed back, so the header keeps its place
+ * and the new row simply extends the card below the button. The window
+ * outlives the growth (it extends while the card is still changing), so the
+ * debounced scan's editor mounts inside it too. Capture phase, like the
+ * chevrons and Edit buttons, so the window is open before the official
+ * handler commits.
+ */
+function wireAddModelRepin(trigger: HTMLElement, card: HTMLElement, wired: WeakSet<Element>): void {
+  wireOnce(trigger, wired, () => {
+    if (card.isConnected) pinCardTop(card, REPIN_CLICK_MS)
+  })
+}
+
+/**
  * Whether an official editing card is open on the page, told from the card's
  * own action row (its Cancel/commit pair) with the model-row containers as a
  * fallback signal.
@@ -3045,6 +3164,14 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // rest of the app. See {@link wireEditRepin}.
   for (const row of Array.from(root.querySelectorAll<HTMLElement>('[class*="rowCard"], [class*="setupCard"]'))) {
     for (const trigger of editTriggersOf(row, labels)) wireEditRepin(trigger, state.editWired)
+  }
+  // The add-model buttons ride the same pre-gate wiring: clicking one is the
+  // other large height change a card can take, and it happens exactly when no
+  // gate below has run — the downward-expansion pin has to be on the button
+  // before its own click commits, or the first add after a card opens still
+  // squeezes the page (see {@link wireAddModelRepin}).
+  for (const card of Array.from(root.querySelectorAll<HTMLElement>('[class*="rowCard"], [class*="setupCard"], [class*="addCard"]'))) {
+    for (const trigger of addModelTriggersOf(card, labels)) wireAddModelRepin(trigger, card, state.addModelWired)
   }
   // The provider card's own layout (display name → API protocol → base URL, the
   // protocol-labelled address, the 更多端点 second endpoint). Wired before every
@@ -3297,6 +3424,9 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       const input = staged
         ? state.pending.get(route)?.get(target.modelId)?.input
         : inputOf(models, target.modelId)
+      const imageGen = staged
+        ? state.pending.get(route)?.get(target.modelId)?.imageGen
+        : imageGenOf(models, target.modelId)
       const compat = staged
         ? state.pending.get(route)?.get(target.modelId)?.compat
         : compatOf(models, target.modelId)
@@ -3331,6 +3461,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
         ...efforts === undefined ? {} : { efforts },
         ...effortsUnset ? { effortsUnset } : {},
         ...input === undefined ? {} : { input },
+        ...imageGen ? { imageGen: true } : {},
         ...compat === undefined ? {} : { compat },
         ...defaultEffort === undefined ? {} : { defaultEffort },
         index,
@@ -3346,8 +3477,8 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
           ...createEditorApi(
             deps.api,
             undefined,
-            (r, m, e, c, i, de) => {
-              stageEffortsInto(state, r, m, e, c, officialModalityIntent(container, i, labels.inputImage), de)
+            (r, m, e, c, i, de, ig) => {
+              stageEffortsInto(state, r, m, e, c, officialModalityIntent(container, i, labels.inputImage), de, ig)
             },
             // This row is on screen: it ALWAYS holds the document. The card it
             // lives in froze its revision baseline, so the intent is queued and

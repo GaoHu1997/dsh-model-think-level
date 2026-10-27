@@ -166,13 +166,6 @@ function listingCouldExceedPlainRequest(keys: readonly KeyCandidate[]): boolean 
 }
 
 /**
- * The caller's request headers as a mutable copy, seeded the way Fetch itself
- * resolves them: an explicit `init.headers` replaces a `Request`'s own headers,
- * and the `Request`'s are inherited only when the init names none. Seeding from
- * the wrong one would either drop the caller's headers or resurrect the ones
- * the caller replaced.
- */
-/**
  * Read at most `limit` characters of a response body WITHOUT pulling the rest.
  *
  * `response.clone().text()` would read the whole reply into one branch and tee
@@ -202,10 +195,35 @@ async function readBoundedText(response: Response, limit: number): Promise<strin
   return text.slice(0, limit)
 }
 
+/**
+ * The caller's request headers as a mutable copy, seeded the way Fetch itself
+ * resolves them: an explicit `init.headers` replaces a `Request`'s own headers,
+ * and the `Request`'s are inherited only when the init names none. Seeding from
+ * the wrong one would either drop the caller's headers or resurrect the ones
+ * the caller replaced.
+ */
 function seedHeaders(input: unknown, init: RequestInit | undefined): Headers {
   if (init?.headers !== undefined && init.headers !== null) return new Headers(init.headers as HeadersInit)
   if (typeof Request !== 'undefined' && input instanceof Request) return new Headers(input.headers)
   return new Headers()
+}
+
+/**
+ * The caller's request as it should leave the wrapper when this layer does NOT
+ * claim it: identical to what came in, except an internal wire-dispatch marker
+ * (see WIRE_DISPATCH_HEADER) is stripped. The wire seam marks the requests it
+ * has already signed — including ones this layer will never match (a key
+ * endpoint on another origin than the route's base URL leaves the index
+ * empty) — and a marker that survives a passthrough ships an internal
+ * identifier upstream. Unmarked requests come back untouched, so the plain
+ * passthrough keeps the caller's exact object identity.
+ */
+function passthroughInit(input: RequestInfo | URL, init: RequestInit | undefined): RequestInit | undefined {
+  if (init?.headers === undefined || init.headers === null) return init
+  const headers = new Headers(init.headers as HeadersInit)
+  if (headers.get(WIRE_DISPATCH_HEADER) !== '1') return init
+  headers.delete(WIRE_DISPATCH_HEADER)
+  return { ...init, headers }
 }
 
 /**
@@ -216,7 +234,7 @@ function seedHeaders(input: unknown, init: RequestInit | undefined): Headers {
 function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>): typeof globalThis.fetch {
   return async function fetchWithProviderHeaders(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const url = requestUrlOf(input)
-    if (url === undefined) return base(input, init)
+    if (url === undefined) return base(input, passthroughInit(input, init))
     // The URL (origin + endpoint path) narrows the route. Only when it leaves
     // several candidates does the request body's `model` have to decide -- so a
     // single-route deployment keeps the zero-read, zero-allocation fast path.
@@ -230,7 +248,7 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
         break
       }
     }
-    if (entry === undefined || candidates.length === 0) return base(input, init)
+    if (entry === undefined || candidates.length === 0) return base(input, passthroughInit(input, init))
 
     const keyed = entry.keys !== undefined
     // The body model is needed to disambiguate sibling routes AND to pick a key.
@@ -240,7 +258,7 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       model = body === undefined ? undefined : modelOfJsonBody(body)
     }
     const override = candidates.length === 1 ? candidates[0] : selectOverrideFrom(candidates, model)
-    if (override === undefined) return base(input, init)
+    if (override === undefined) return base(input, passthroughInit(input, init))
 
     // The route's stored request headers (static strings only). A route that
     // claims the request but declares none is a deliberate "send nothing": its
@@ -281,10 +299,12 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
     // key, the wire and the endpoint, and it owns the failover for them (see
     // WIRE_DISPATCH_HEADER). Strip the marker, send exactly once with the
     // signature already on the headers, and charge nothing — the wire seam
-    // benches its own keys from the stream events it sees.
+    // benches its own keys from the stream events it sees. The marker is
+    // stripped from a COPY either way: a route that declares no headers of its
+    // own (the common shape) has `hasPatch === false`, and returning the
+    // original input/init here would ship the internal marker upstream.
     if (patched.get(WIRE_DISPATCH_HEADER) === '1') {
       patched.delete(WIRE_DISPATCH_HEADER)
-      if (!hasPatch) return base(input, init)
       return attempt(undefined)
     }
 
@@ -324,7 +344,7 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       }
     }
 
-    if (!hasPatch && keyCandidates.length === 0) return base(input, init)
+    if (!hasPatch && keyCandidates.length === 0) return base(input, passthroughInit(input, init))
 
     /**
      * Charge one rejected attempt to the key that placed it: the status, the

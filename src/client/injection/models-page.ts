@@ -121,6 +121,11 @@ const HOST_LABEL_KEYS = {
   // label's text (the inputs themselves carry no aria-label on the DSH host).
   contextWindow: ['modelContextWindow', 'contextWindow', 'Context window', '上下文窗口'],
   maxOutput: ['modelMaxOutput', 'maxOutput', 'maxTokens', 'Max output', '最大输出'],
+  // The model list's add button. Its copy is an anchor in both languages from
+  // the start: the button may render as plain text (no aria-label), and a host
+  // that ships no dictionary would otherwise leave the downward-expansion pin
+  // unwired (see wireAddModelRepin).
+  addModel: ['addModel', 'Add model', '添加模型'],
 } as const satisfies Record<keyof HostLabels, readonly [string, string, ...string[]]>
 
 /** What the Models-page injection needs from its host. */
@@ -205,6 +210,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       inputImage: resolve(HOST_LABEL_KEYS.inputImage),
       contextWindow: resolve(HOST_LABEL_KEYS.contextWindow),
       maxOutput: resolve(HOST_LABEL_KEYS.maxOutput),
+      addModel: resolve(HOST_LABEL_KEYS.addModel),
     }
   }
 

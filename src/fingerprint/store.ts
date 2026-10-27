@@ -14,10 +14,11 @@ import { harnessHome } from '../key-index.js'
 import {
   type FingerprintRecord,
   type FingerprintStatus,
+  type FingerprintTiming,
   type FingerprintTopEntry,
 } from './verdict.js'
 
-export { type FingerprintRecord, type FingerprintStatus, type FingerprintTopEntry }
+export { type FingerprintRecord, type FingerprintStatus, type FingerprintTiming, type FingerprintTopEntry }
 
 export interface FingerprintDocument {
   version: 1
@@ -93,6 +94,16 @@ function parseRecord(provider: string, model: string, raw: unknown): Fingerprint
       cvAccuracy: finiteNumber(fields['cvAccuracy'], 0),
     }
   }
+  const timing = record['timing']
+  if (typeof timing === 'object' && timing !== null && !Array.isArray(timing)) {
+    const fields = timing as Record<string, unknown>
+    const parsed: FingerprintTiming = {}
+    for (const key of ['firstTokenMs', 'durationMs', 'charsPerSecond'] as const) {
+      const value = fields[key]
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) parsed[key] = value
+    }
+    if (Object.keys(parsed).length > 0) out.timing = parsed
+  }
   // 失败的那次没有归属结论可谈：`prediction` 等字段只属于 identified / doubtful。
   if (status === 'failed') {
     delete out.prediction
@@ -102,6 +113,7 @@ function parseRecord(provider: string, model: string, raw: unknown): Fingerprint
     delete out.familyProbability
     delete out.top
     delete out.calibration
+    delete out.timing
   }
   return out
 }

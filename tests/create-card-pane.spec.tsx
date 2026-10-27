@@ -378,8 +378,10 @@ describe('CreateCardPane', () => {
       // would address does not exist yet.
       expect(Array.from(card.host.querySelectorAll('button')).map(b => b.textContent))
         .not.toContain(en.headersSave)
-      expect(card.host.textContent).toContain(en.pendingSave)
-      expect(card.host.textContent).toContain(en.pendingHint)
+      // The pending-save copy is gone (user item 3): the draft states itself
+      // through the staged ledger, not through provenance notes.
+      expect(card.host.textContent).not.toContain('已修改')
+      expect(card.host.textContent).not.toContain('一并丢弃')
 
       await typeHeader(card.host, 'X-Tenant', 'acme')
 

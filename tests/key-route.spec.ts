@@ -293,12 +293,25 @@ describe('cooldownFor', () => {
     expect(cooldownFor('auth')).toBe(300_000)
     expect(cooldownFor('rate')).toBe(60_000)
     expect(cooldownFor('server')).toBe(30_000)
+    // The remaining baselines: quota is the long "done for the window" bench,
+    // timeout and refused the short ones (README: 额度耗尽 30 分钟、连接被拒 60 秒).
+    expect(cooldownFor('quota')).toBe(1_800_000)
+    expect(cooldownFor('timeout')).toBe(30_000)
+    expect(cooldownFor('refused')).toBe(60_000)
   })
 
   it('honours a longer provider Retry-After as the floor', () => {
     expect(cooldownFor('rate', 1, 120_000)).toBe(120_000)
     // A shorter one cannot undercut the kind's baseline.
     expect(cooldownFor('rate', 1, 5_000)).toBe(60_000)
+  })
+
+  it('clamps a Retry-After that asks for longer than the cap', () => {
+    // "Come back in an hour" reads as the cap: repeated failures may escalate,
+    // but no single bench outruns the 30-minute ceiling.
+    expect(cooldownFor('rate', 1, 3_600_000)).toBe(REST_COOLDOWN_CAP_MS)
+    // And the escalation on top of it stays inside the cap too.
+    expect(cooldownFor('rate', 2, 3_600_000)).toBe(REST_COOLDOWN_CAP_MS)
   })
 
   it('doubles on repeated failures and caps the wait', () => {

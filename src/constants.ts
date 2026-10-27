@@ -96,6 +96,20 @@ export const UNSET_MARKER = 'reasoningEffortsUnset'
 export const INPUT_UNSET_MARKER = 'inputUnset'
 
 /**
+ * Model-level marker declaring the row an IMAGE-GENERATION model (生图).
+ *
+ * The chat wire's own `input` vocabulary (pi-ai's MODALITY_GATE) only knows
+ * text/image — the request modalities a model ACCEPTS — and an image generator
+ * is not a request-modality answer at all: it is a different kind of model that
+ * the composer's model switcher must hide (its entries cannot serve a chat
+ * turn), so it lives beside the declaration as its own marker. Schemastery
+ * passes unknown model keys through, so the marker survives official-page saves
+ * and restarts like the other three; absence means "not an image generator",
+ * and `false`/absent are the same state.
+ */
+export const INPUT_IMAGE_GEN_MARKER = 'inputImageGen'
+
+/**
  * Model-level provenance marker written beside every ladder the HOST autofill
  * fills from the knowledge base, carrying the settings revision the fill read.
  *

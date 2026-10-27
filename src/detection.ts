@@ -35,6 +35,13 @@ export interface EndpointSignal {
    * layer owns the intersection with the core vocabulary.
    */
   input?: readonly string[]
+  /**
+   * The listing's output-modality disclosure, lowercased, when it named one
+   * (OpenRouter's `architecture.output_modalities` and its flattened copies).
+   * This is the disclosure that answers "is this an image generator": a model
+   * whose listing outputs images and not text cannot serve a chat turn.
+   */
+  output?: readonly string[]
   /** Context length the listing disclosed, when it carries one. */
   contextLength?: number
 }
@@ -166,6 +173,8 @@ export function analyzeListingEntry(entry: unknown): EndpointSignal {
  *     every aggregator that mirrors it)
  *   - top-level `input_modalities: [...]`                     (flattened copies)
  *   - `modalities: { input: [...] }`                          (models.dev style)
+ *   - `architecture.output_modalities` / `output_modalities` /
+ *     `modalities.output`                                     (generation kind)
  *   - `supported_features: [..., "vision"]` /
  *     `capabilities: [..., "vision"]`                         (feature arrays)
  *   - `supports_vision` / `supportsVision` /
@@ -175,8 +184,8 @@ export function analyzeListingEntry(entry: unknown): EndpointSignal {
  * Absence stays absent: a listing that names no recognized field yields no
  * `input` part at all -- never an implicit "text only".
  */
-function signalParts(entry: Record<string, unknown>): Pick<EndpointSignal, 'input' | 'contextLength'> {
-  const parts: { input?: readonly string[]; contextLength?: number } = {}
+function signalParts(entry: Record<string, unknown>): Pick<EndpointSignal, 'input' | 'output' | 'contextLength'> {
+  const parts: { input?: readonly string[]; output?: readonly string[]; contextLength?: number } = {}
 
   const rawList = (value: unknown): readonly string[] | undefined => {
     if (!Array.isArray(value)) return undefined
@@ -235,6 +244,17 @@ function signalParts(entry: Record<string, unknown>): Pick<EndpointSignal, 'inpu
   // maps to the text floor every supported protocol carries -- so the fusion
   // layer can strip an image claim instead of mistaking refusal for silence.
   if (input !== undefined) parts.input = input.length === 0 ? ['text'] : input
+
+  // The OUTPUT disclosure, same conventions as the input one. Presence is the
+  // answer -- whatever its members -- because it names the generation kind an
+  // image-generation verdict (or its refutation) rides on.
+  let output = rawList(architecture?.['output_modalities'])
+  if (output === undefined) output = rawList(entry['output_modalities'])
+  if (output === undefined) {
+    const modalities = isRecord(entry['modalities']) ? entry['modalities'] : undefined
+    output = rawList(modalities?.['output'])
+  }
+  if (output !== undefined) parts.output = output
 
   // Capacity conventions: top-level, OpenRouter's top_provider, the Anthropic
   // native max_input_tokens (a 0 placeholder means 'not disclosed' — never a

@@ -376,4 +376,139 @@ describe('runProbe', () => {
     expect(DEFAULT_PROBE_TIMEOUT_MS).toBe(120_000)
     expect(DEFAULT_PROBE_MAX_TOKENS).toBe(4000)
   })
+
+  it('times every challenge: duration on all outcomes, first token only when text flowed', async () => {
+    const { llm } = dispatch({
+      answers: {
+        P1: [{ type: 'text-delta', index: 0, text: '5 12 40 ' }, { type: 'finish', reason: { kind: 'stop' } }],
+        P2: [{ type: 'finish', reason: { kind: 'error', failure: { message: 'boom' } } }],
+        P3: [{ type: 'text-delta', index: 0, text: '' }],
+      },
+    })
+    const run = await runProbe({ provider: 'magpie', model: 'gpt-5.5', challenges: CHALLENGES, llm })
+
+    for (const outcome of run.outcomes) {
+      expect(typeof outcome.durationMs).toBe('number')
+      expect(outcome.durationMs!).toBeGreaterThanOrEqual(0)
+    }
+    // Only the challenge that actually produced text has a first-token wait;
+    // a rejected or empty answer has nothing to timestamp.
+    expect(run.outcomes[0]!.firstTokenMs).toBeGreaterThanOrEqual(0)
+    expect(run.outcomes[1]!.firstTokenMs).toBeUndefined()
+    expect(run.outcomes[2]!.firstTokenMs).toBeUndefined()
+  })
+
+  it('does not report an empty first delta as the first token', async () => {
+    // Some adapters open with a zero-length delta; the wait must be measured
+    // to the first character, or it reads as 0ms and the timing line lies.
+    const { llm } = dispatch({
+      answers: {
+        P1: [
+          { type: 'text-delta', index: 0, text: '' },
+          { type: 'text-delta', index: 0, text: '5 ' },
+          { type: 'finish', reason: { kind: 'stop' } },
+        ],
+      },
+    })
+    const run = await runProbe({ provider: 'magpie', model: 'gpt-5.5', challenges: [CHALLENGES[0]!], llm })
+
+    expect(run.outcomes[0]!.firstTokenMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('early exit: a confident shouldStop aborts the still-running challenge and it is not progress', async () => {
+    let thirdAborted = false
+    const llm = {
+      async prepareCall(config: Record<string, unknown>): Promise<unknown> {
+        return { ...config }
+      },
+      stream(request: Record<string, unknown>): AsyncIterable<unknown> {
+        const messages = request['messages'] as Array<{ content: Array<{ text: string }> }> | undefined
+        const prompt = String(messages?.[0]?.content?.[0]?.text ?? '')
+        if (prompt !== 'P3') {
+          return stream({ type: 'text-delta', index: 0, text: '5 ' }, { type: 'finish', reason: { kind: 'stop' } })
+        }
+        // The third challenge hangs exactly the way a slow provider does, and
+        // only ends once the early exit cancels it.
+        return (async function* (): AsyncGenerator<unknown> {
+          const signal = request['signal'] as AbortSignal | undefined
+          while (signal?.aborted !== true) await new Promise(resolve => setTimeout(resolve, 0))
+          thirdAborted = true
+          // Ending without a finish chunk models the stream being cut.
+        })()
+      },
+    }
+
+    const gates: number[] = []
+    const seen: ProbeOutcome[] = []
+    const run = await runProbe({
+      provider: 'magpie',
+      model: 'gpt-5.5',
+      challenges: CHALLENGES,
+      llm,
+      shouldStop: settled => {
+        gates.push(settled.length)
+        return settled.filter(outcome => outcome.ok).length >= 2
+      },
+      onOutcome: outcome => seen.push(outcome),
+    })
+
+    // The gate saw the run accumulate: one settled, then two — and once it
+    // said stop it is never consulted again; the run is closing.
+    expect(gates).toEqual([1, 2])
+    expect(thirdAborted).toBe(true)
+    // The aborted challenge still lands in the outcomes (as cancelled), but it
+    // never reached onOutcome: it did not answer, so it is not progress.
+    expect(run.outcomes).toHaveLength(3)
+    expect(run.outcomes[2]!.ok).toBe(false)
+    expect(run.outcomes[2]!.error).toBe('cancelled')
+    expect(seen).toHaveLength(2)
+    // The accepted subset is exactly the two that answered.
+    expect(run.outputs).toEqual([
+      { text: '5 ', expected_count: 300 },
+      { text: '5 ', expected_count: 301 },
+    ])
+  })
+
+  it('keeps all three running when shouldStop never says stop', async () => {
+    const { llm } = dispatch({
+      answers: {
+        P1: [{ type: 'text-delta', index: 0, text: '1 ' }, { type: 'finish', reason: { kind: 'stop' } }],
+        P2: [{ type: 'text-delta', index: 0, text: '2 ' }, { type: 'finish', reason: { kind: 'stop' } }],
+        P3: [{ type: 'text-delta', index: 0, text: '3 ' }, { type: 'finish', reason: { kind: 'stop' } }],
+      },
+    })
+    const seen: ProbeOutcome[] = []
+    const run = await runProbe({
+      provider: 'magpie',
+      model: 'gpt-5.5',
+      challenges: CHALLENGES,
+      llm,
+      shouldStop: () => false,
+      onOutcome: outcome => seen.push(outcome),
+    })
+
+    expect(run.outputs).toHaveLength(3)
+    expect(seen).toHaveLength(3)
+  })
+
+  it('does not consult shouldStop once the caller cancelled', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const prepareCall = vi.fn()
+    let consulted = false
+    const run = await runProbe({
+      provider: 'magpie',
+      model: 'gpt-5.5',
+      challenges: CHALLENGES,
+      llm: { prepareCall },
+      signal: controller.signal,
+      shouldStop: () => {
+        consulted = true
+        return true
+      },
+    })
+
+    expect(run.outcomes.every(outcome => outcome.error === 'cancelled')).toBe(true)
+    expect(consulted).toBe(false)
+  })
 })

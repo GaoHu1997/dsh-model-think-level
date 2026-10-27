@@ -34,6 +34,7 @@ function record(overrides: Partial<FingerprintRecord> = {}): FingerprintRecord {
     familyProbability: 0.977,
     top: [{ model: 'gpt-5.5', probability: 0.912, similarity: 0.71 }],
     calibration: { queries: 3, cvAccuracy: 1 },
+    timing: { firstTokenMs: 1200, durationMs: 41_000, charsPerSecond: 437.5 },
     ...overrides,
   }
 }
@@ -111,6 +112,49 @@ describe('parseFingerprintStore', () => {
       BANK,
     )
     expect(document.records['m\u0000x'].top?.map((entry) => entry.model)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('round-trips the timing picture and keeps only finite non-negative members', () => {
+    const document = parseFingerprintStore(
+      {
+        version: 1,
+        bankBuiltAt: BANK,
+        records: {
+          'm\u0000good': record(),
+          'm\u0000partial': record({
+            model: 'gpt-5.4',
+            timing: { firstTokenMs: 900, durationMs: -5, charsPerSecond: Number.NaN },
+          }),
+          'm\u0000junk': record({ model: 'gpt-6-sol', timing: 'fast' as unknown as FingerprintRecord['timing'] }),
+          'm\u0000empty': record({ model: 'claude-sonnet-5', timing: {} }),
+        },
+      },
+      BANK,
+    )
+    expect(document.records['m\u0000good'].timing).toEqual({
+      firstTokenMs: 1200,
+      durationMs: 41_000,
+      charsPerSecond: 437.5,
+    })
+    // Negative and NaN members are dropped; the meaningful one stays.
+    expect(document.records['m\u0000partial'].timing).toEqual({ firstTokenMs: 900 })
+    expect(document.records['m\u0000junk'].timing).toBeUndefined()
+    // An object with nothing usable in it is no timing at all.
+    expect(document.records['m\u0000empty'].timing).toBeUndefined()
+  })
+
+  it('strips the timing from a failed verdict alongside the attribution fields', () => {
+    const document = parseFingerprintStore(
+      {
+        version: 1,
+        bankBuiltAt: BANK,
+        records: { 'm\u0000x': record({ status: 'failed', error: 'error: rate limited' }) },
+      },
+      BANK,
+    )
+    const failed = document.records['m\u0000x']
+    expect(failed.prediction).toBeUndefined()
+    expect(failed.timing).toBeUndefined()
   })
 })
 

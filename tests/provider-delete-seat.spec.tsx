@@ -34,6 +34,7 @@ const LABELS: HostLabels = {
   inputImage: ['Image'],
   contextWindow: ['Context window'],
   maxOutput: ['Max output'],
+  addModel: ['Add model', '添加模型'],
 }
 
 /** The seat module's dependencies with a translator that echoes its key. */

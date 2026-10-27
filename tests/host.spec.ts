@@ -11,6 +11,9 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { keyIndexFilePath, readKeyIndex, writeKeyIndex } from '../src/key-index.js'
 import { maskKeyValue } from '../src/key-refs.js'
+import { loadBankSync } from '../src/fingerprint/bank.js'
+import { analyzeGlobalOutputs } from '../src/fingerprint/core.js'
+import { EARLY_IDENTIFIED_PROBABILITY } from '../src/fingerprint/verdict.js'
 
 type HostCtx = Parameters<typeof import('../src/index.js').apply>[0]
 
@@ -2219,156 +2222,6 @@ describe('apply() key-index route', () => {
     expect(cleared[0]?.['rest']).toBeUndefined()
   })
 
-  it('binds each key to the models its own /models listing returns', async () => {
-    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] } }, indexFile())
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-a', ALIYUN_KEY_2: 'sk-b' })
-    const { handler } = await mounted({ aliyun: profile }, credentials)
-    // Each key reaches a different subset: the first sees glm-4, the second only
-    // kimi models. The listing URL is the same; the key says which.
-    const listings: Record<string, string[]> = {
-      'Bearer sk-a': ['glm-4', 'glm-4-flash'],
-      'Bearer sk-b': ['kimi-k2'],
-    }
-    const fetchMock = vi.fn(async (_url: string, init: { headers: Record<string, string> }) => {
-      const ids = listings[init.headers['authorization'] ?? ''] ?? []
-      return {
-        ok: true,
-        headers: { get: () => null },
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(JSON.stringify({ data: ids.map(id => ({ id })) })))
-            controller.close()
-          },
-        }),
-      }
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const { res, out } = fakeRes()
-    await handler(fakeReq({ method: 'POST', body: { op: 'discover' } }), res)
-
-    expect(out().status).toBe(200)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([
-      { ref: 'ALIYUN_KEY', models: ['glm-4', 'glm-4-flash'] },
-      { ref: 'ALIYUN_KEY_2', models: ['kimi-k2'] },
-    ])
-    const entries = out().body['entries'] as Array<Record<string, unknown>>
-    expect(entries[0]).toMatchObject({ ref: 'ALIYUN_KEY', enabled: true, models: ['glm-4', 'glm-4-flash'] })
-    expect(entries[1]).toMatchObject({ ref: 'ALIYUN_KEY_2', models: ['kimi-k2'] })
-    vi.unstubAllGlobals()
-  })
-
-  it('leaves a key its previous scope when its listing cannot be read', async () => {
-    writeKeyIndex(
-      { version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY', models: ['kept'] }, { ref: 'ALIYUN_KEY_2' }] } },
-      indexFile(),
-    )
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-a', ALIYUN_KEY_2: 'sk-b' })
-    const { handler } = await mounted({ aliyun: profile }, credentials)
-    const fetchMock = vi.fn(async (_url: string, init: { headers: Record<string, string> }) => {
-      if (init.headers['authorization'] === 'Bearer sk-a') throw new Error('network down')
-      return {
-        ok: true,
-        headers: { get: () => null },
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(JSON.stringify({ data: [{ id: 'fresh' }] })))
-            controller.close()
-          },
-        }),
-      }
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const { res, out } = fakeRes()
-    await handler(fakeReq({ method: 'POST', body: { op: 'discover' } }), res)
-
-    expect(out().status).toBe(200)
-    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([
-      { ref: 'ALIYUN_KEY', models: ['kept'] },
-      { ref: 'ALIYUN_KEY_2', models: ['fresh'] },
-    ])
-    vi.unstubAllGlobals()
-  })
-
-  it('refuses to detect models on a route it cannot interrogate', async () => {
-    // A protocol with no listing endpoint leaves discovery to the manual scope
-    // editor rather than guessing.
-    const exotic = { api: 'some-other-api', baseURL: 'https://gw.example.com/v1', apiKeyEnv: 'ALIYUN_KEY', models: [] }
-    const { handler } = await mounted({ aliyun: exotic }, credentialStore({ ALIYUN_KEY: 'sk-a' }))
-    const fetchMock = vi.fn()
-    vi.stubGlobal('fetch', fetchMock)
-
-    const { res, out } = fakeRes()
-    await handler(fakeReq({ method: 'POST', body: { op: 'discover' } }), res)
-
-    expect(out().status).toBe(400)
-    expect(String(out().body['error'])).toContain('cannot be interrogated')
-    expect(fetchMock).not.toHaveBeenCalled()
-    vi.unstubAllGlobals()
-  })
-
-  it('probes each key only on the protocols it can be dispatched to', async () => {
-    // The unpinned key would be sent on the route's own wire; the pinned one on
-    // its own family's address. Detection must ask each on ITS wire, signed by
-    // its own credential, and report where it asked in the response.
-    writeKeyIndex(
-      {
-        version: 1,
-        providers: {
-          aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ANTHROPIC_KEY', protocol: 'anthropic-messages' }],
-        },
-        endpoints: { aliyun: { anthropic: 'https://gw.example.com/anthropic' } },
-      },
-      indexFile(),
-    )
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-openai', ANTHROPIC_KEY: 'sk-anthropic' })
-    const { handler } = await mounted({ aliyun: profile }, credentials)
-    const asked: Array<{ url: string; authorization: string | null; xApiKey: string | null }> = []
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const headers = new Headers(init?.headers)
-      asked.push({
-        url: String(input),
-        authorization: headers.get('authorization'),
-        xApiKey: headers.get('x-api-key'),
-      })
-      const id = String(input).includes('gw.example.com/anthropic') ? 'claude-sonnet-5.5' : 'glm-4'
-      return new Response(JSON.stringify({ data: [{ id }] }), { status: 200 })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const { res, out } = fakeRes()
-    await handler(fakeReq({ method: 'POST', body: { op: 'discover' } }), res)
-
-    expect(out().status).toBe(200)
-    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([
-      { ref: 'ALIYUN_KEY', models: ['glm-4', 'claude-sonnet-5.5'] },
-      { ref: 'ANTHROPIC_KEY', protocol: 'anthropic-messages', models: ['claude-sonnet-5.5'] },
-    ])
-    // Keys probe with bounded concurrency, so which anthropic ask lands first
-    // is scheduling, not contract. What the op promises is that each target was
-    // asked exactly once per key, signed by that key's own credential.
-    expect(asked).toHaveLength(3)
-    expect(asked.filter(ask => ask.url === 'https://gw.example.com/v1/models')).toEqual([
-      {
-        url: 'https://gw.example.com/v1/models',
-        authorization: 'Bearer sk-openai',
-        xApiKey: null,
-      },
-    ])
-    const anthropicAsks = asked.filter(ask => ask.url === 'https://gw.example.com/anthropic/v1/models?limit=1000')
-    expect(anthropicAsks.map(ask => ask.xApiKey).sort()).toEqual(['sk-anthropic', 'sk-openai'])
-    expect(anthropicAsks.map(ask => ask.authorization)).toEqual([null, null])
-    const probe = out().body['probe'] as Array<{ ref: string; targets: Array<{ api: string; url: string; ok: boolean }> }>
-    expect(probe.map(entry => [entry.ref, entry.targets.map(target => target.api)])).toEqual([
-      ['ALIYUN_KEY', ['openai-completions', 'anthropic-messages']],
-      ['ANTHROPIC_KEY', ['anthropic-messages']],
-    ])
-    expect(probe[0]?.targets[0]).toMatchObject({ ok: true, url: 'https://gw.example.com/v1/models' })
-    vi.unstubAllGlobals()
-  })
-
   it('adds a spare key beside the running one instead of overwriting it', async () => {
     // The profile names the reference the plugin would have minted itself, which
     // is the ordinary case for a card the official page configured: a list made
@@ -2843,28 +2696,84 @@ describe('apply() fingerprint route', () => {
   }
 
   /**
-   * A dispatch that answers every challenge with a full integer run, so the
-   * bank has something to attribute. Deterministic via an LCG: the point is the
-   * plumbing, not the verdict.
+   * Deterministic LCG text: `count` integers in [1, 355], one run of digits.
+   * Unlike a shared-state LCG across parallel streams, the answer does not
+   * depend on challenge scheduling.
    */
-  function speakingLlm(): Record<string, unknown> {
-    let state = 1
+  function lcgText(seed: number, count: number): string {
+    let state = seed >>> 0
     const next = (): number => {
       state = (Math.imul(state, 1664525) + 1013904223) >>> 0
       return state
     }
+    return Array.from({ length: count }, () => 1 + (next() % 355)).join(' ')
+  }
+
+  /**
+   * Expand one bank model's stored counts into the answer text it summarizes.
+   * The counts are the model's aggregated number distribution, so the text
+   * reproduces exactly the profile the bank attributes to that model.
+   */
+  function bankCountsText(bank: ReturnType<typeof loadBankSync>, modelId: string): string {
+    const model = bank.models.find(entry => entry.id === modelId)
+    if (model === undefined) throw new Error(`the bank has no model "${modelId}"`)
+    const values: number[] = []
+    model.counts.forEach((count, index) => {
+      for (let k = 0; k < count; k += 1) values.push(index + 1)
+    })
+    return values.join(' ')
+  }
+
+  /** The route's early-exit gate, evaluated verbatim for one pair of answers. */
+  function gateFires(a: string, b: string, bank: ReturnType<typeof loadBankSync>): boolean {
+    try {
+      const outputs = [
+        { text: a, expected_count: 300 },
+        { text: b, expected_count: 301 },
+      ]
+      const pooled = analyzeGlobalOutputs(outputs, bank)
+      if (pooled.probability < EARLY_IDENTIFIED_PROBABILITY) return false
+      const first = analyzeGlobalOutputs([outputs[0]!], bank)
+      const second = analyzeGlobalOutputs([outputs[1]!], bank)
+      return first.prediction === second.prediction
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Three noise answers such that NO pair of them trips the early-exit gate:
+   * the pooled probability stays under the bar or the two singles disagree.
+   * Chosen once per process by a fixed seed scan, so the full three-challenge
+   * flow below is deterministic regardless of which pair lands first.
+   */
+  const quietAnswers: string[] = (() => {
+    const bank = loadBankSync()
+    const found: string[] = []
+    for (let seed = 1; found.length < 3 && seed < 500; seed += 1) {
+      const text = lcgText(seed, 300)
+      if (found.every(other => !gateFires(other, text, bank))) found.push(text)
+    }
+    if (found.length < 3) throw new Error('no quiet answer triple found')
+    return found
+  })()
+
+  /**
+   * A dispatch that answers every challenge with a full integer run, so the
+   * bank has something to attribute. The point is the plumbing, not the
+   * verdict: each challenge gets one of the pairwise-quiet noise answers.
+   */
+  function speakingLlm(): Record<string, unknown> {
+    let call = 0
     return {
       async prepareCall(config: Record<string, unknown>): Promise<Record<string, unknown>> {
         return { ...config }
       },
-      stream(options: Record<string, unknown>): AsyncIterable<unknown> {
-        const messages = options['messages'] as Array<{ content: Array<{ text: string }> }> | undefined
-        const prompt = String(messages?.[0]?.content?.[0]?.text ?? '')
-        const count = /(\d+)\s*个/.exec(prompt)?.[1]
-        const wanted = Number(count ?? '300')
-        const values = Array.from({ length: wanted }, () => 1 + (next() % 355))
+      stream(): AsyncIterable<unknown> {
+        const text = quietAnswers[call % quietAnswers.length]!
+        call += 1
         return (async function* (): AsyncGenerator<unknown> {
-          yield { type: 'text-delta', index: 0, text: values.join(' ') }
+          yield { type: 'text-delta', index: 0, text }
           yield { type: 'finish', reason: { kind: 'stop' } }
         })()
       },
@@ -3001,6 +2910,111 @@ describe('apply() fingerprint route', () => {
     const records = (JSON.parse(written) as { records: Record<string, unknown> }).records
     expect(Object.keys(records)).toHaveLength(1)
     expect(Object.keys(records)[0]).toBe('aliyun\u0000gpt-5.5')
+  })
+
+  it('concludes from two confident answers before the slowest challenge lands', async () => {
+    const bank = loadBankSync()
+    const confident = bankCountsText(bank, 'claude-opus-5')
+    // Self-check the gate before paying for the route run: the pooled pair
+    // clears the 2-query bar and both answers name the same winner. If the
+    // bank ever stops satisfying this, this test must be reworked, not hung.
+    expect(gateFires(confident, confident, bank)).toBe(true)
+
+    let confidentCalls = 0
+    let hungAborted = false
+    const llm = {
+      async prepareCall(config: Record<string, unknown>): Promise<Record<string, unknown>> {
+        return { ...config }
+      },
+      stream(options: Record<string, unknown>): AsyncIterable<unknown> {
+        confidentCalls += 1
+        if (confidentCalls <= 2) {
+          return (async function* (): AsyncGenerator<unknown> {
+            yield { type: 'text-delta', index: 0, text: confident }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          })()
+        }
+        // The third challenge is a slow provider: it produces nothing until
+        // the early exit cancels it.
+        const signal = options['signal'] as AbortSignal | undefined
+        return (async function* (): AsyncGenerator<unknown> {
+          while (signal?.aborted !== true) await new Promise(resolve => setTimeout(resolve, 0))
+          hungAborted = true
+        })()
+      },
+    }
+    const handler = await mounted({ llm })
+    const fake = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { model: 'gpt-5.5' } }), fake.res)
+
+    // The suppressed challenge is NOT progress: two lines, then the verdict.
+    const emitted = fake.lines()
+    const progress = emitted.filter(line => line['type'] === 'progress')
+    expect(progress).toHaveLength(2)
+    expect(progress.every(line => line['ok'] === true)).toBe(true)
+
+    const result = emitted.find(line => line['type'] === 'result') as Record<string, unknown>
+    const record = result['record'] as Record<string, unknown>
+    expect(hungAborted).toBe(true)
+    expect(record['usedOutputs']).toBe(2)
+    expect(record['status']).toBe('identified')
+    expect(record['prediction']).toBe('claude-opus-5')
+    expect((record['calibration'] as Record<string, unknown>)['queries']).toBe(2)
+    // The timing picture exists and describes the two answers that ran.
+    const timing = record['timing'] as Record<string, number>
+    expect(typeof timing['durationMs']).toBe('number')
+    expect(timing['durationMs']).toBeGreaterThanOrEqual(0)
+
+    // And the 2-query verdict is on disk like any other.
+    const written = JSON.parse(
+      readFileSync(join(home, 'dsh-model-think-level', 'fingerprint.json'), 'utf8'),
+    ) as { records: Record<string, { usedOutputs?: number }> }
+    expect(written.records['aliyun\u0000gpt-5.5'].usedOutputs).toBe(2)
+  })
+
+  it('waits for the third answer when the first two point at different models', async () => {
+    const bank = loadBankSync()
+    const claude = bankCountsText(bank, 'claude-opus-5')
+    const gpt = bankCountsText(bank, 'gpt-5.5')
+    // Each answer alone is confident, but they name different winners — the
+    // agreement half of the gate must hold the run open for the third.
+    const mixed = analyzeGlobalOutputs([
+      { text: claude, expected_count: 300 },
+      { text: gpt, expected_count: 301 },
+    ], bank)
+    expect(mixed.probability).toBeLessThan(EARLY_IDENTIFIED_PROBABILITY)
+
+    const answers = [claude, gpt, gpt]
+    let call = 0
+    const llm = {
+      async prepareCall(config: Record<string, unknown>): Promise<Record<string, unknown>> {
+        return { ...config }
+      },
+      stream(): AsyncIterable<unknown> {
+        const text = answers[Math.min(call, answers.length - 1)]!
+        call += 1
+        return (async function* (): AsyncGenerator<unknown> {
+          yield { type: 'text-delta', index: 0, text }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        })()
+      },
+    }
+    const handler = await mounted({ llm })
+    const fake = fakeRes()
+    await handler(fakeReq({ method: 'POST', body: { model: 'gpt-5.5' } }), fake.res)
+
+    // No early exit: all three challenges ran, all three are progress.
+    const emitted = fake.lines()
+    expect(emitted.filter(line => line['type'] === 'progress')).toHaveLength(3)
+    const record = (emitted.find(line => line['type'] === 'result') as Record<string, unknown>)['record'] as Record<string, unknown>
+    expect(record['usedOutputs']).toBe(3)
+    // The majority answer wins the pooled verdict, whatever the grader's edge.
+    const expected = analyzeGlobalOutputs([
+      { text: claude, expected_count: 300 },
+      { text: gpt, expected_count: 301 },
+      { text: gpt, expected_count: 302 },
+    ], bank)
+    expect(record['prediction']).toBe(expected.prediction)
   })
 
   it('stores a verdict under the model id and can forget it again', async () => {

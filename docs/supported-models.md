@@ -6,7 +6,7 @@
 >
 > **Data source**: [`src/knowledge.ts`](../src/knowledge.ts), the authoritative set Auto-adapt actually consults. This file is generated — edit the source and re-run the script.
 
-当前共 **78** 个条目（66 个带推理档位，12 个声明为无推理控制；57 个声明图片输入）。核对基线：2026-08 对照各厂商官方文档全量复核并交叉核对公开目录；2026-09 增补（DeepSeek V4.1-Flash、Step-5-Preview、MiMo v2.5–2.6、Grok 4.7）。
+当前共 **87** 个条目（66 个带推理档位，21 个声明为无推理控制；57 个声明图片输入）。核对基线：2026-08 对照各厂商官方文档全量复核并交叉核对公开目录；2026-09 增补（DeepSeek V4.1-Flash、Step-5-Preview、MiMo v2.5–2.6、Grok 4.7）。
 
 **图例**
 
@@ -298,4 +298,62 @@
 - **`thinkingmachines-inkling`**：Thinking Machines Inkling：全档 Minimal / Low / Medium(默认) / High / XHigh / Max，off 显式 none；带图输入，512K 上下文 / 131,072 输出（2026-10 校准新增；together 中继侧 effort 参数未开放，需支持方转发）。
 - **`antling-ring`**：蚂蚁 Ling Ring-2.6-1T：档位 High / XHigh（off 以省略表达）；262,144 / 65,536（2026-10 校准新增）。
 - **`antling-ling`**：蚂蚁 Ling-2.6（含 -flash）：非思考模型，无 effort 控件（2026-10 校准新增；Ring-2.6 思考线见上条）。
+
+## OpenAI
+
+| 模型 / 匹配写法 | 档位 → wire 拼写 | 默认档 | 图片 | 容量（上下文 / 最大输出） | 兼容开关 |
+|---|---|---|---|---|---|
+| openai-gpt-image<br>`gpt-image`<br>`dall-e`<br>`dalle` | —（无推理控制） | — | （继承） |  |  |
+
+**条目备注**
+
+- **`openai-gpt-image`**：OpenAI 生图系（gpt-image-1 / DALL·E 3）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+
+## Google Gemini
+
+| 模型 / 匹配写法 | 档位 → wire 拼写 | 默认档 | 图片 | 容量（上下文 / 最大输出） | 兼容开关 |
+|---|---|---|---|---|---|
+| google-imagen<br>`imagen`<br>`flash-image`<br>`pro-image`<br>`nano-banana` | —（无推理控制） | — | （继承） |  |  |
+
+**条目备注**
+
+- **`google-imagen`**：Google 生图系（Imagen / Gemini-Image "nano banana"）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+
+## Other
+
+| 模型 / 匹配写法 | 档位 → wire 拼写 | 默认档 | 图片 | 容量（上下文 / 最大输出） | 兼容开关 |
+|---|---|---|---|---|---|
+| black-forest-flux<br>`flux` | —（无推理控制） | — | （继承） |  |  |
+| stability-sd<br>`stable-diffusion`<br>`sdxl`<br>`sd3` | —（无推理控制） | — | （继承） |  |  |
+| zhipu-cogview<br>`cogview` | —（无推理控制） | — | （继承） |  |  |
+| aliyun-wanx<br>`wanx` | —（无推理控制） | — | （继承） |  |  |
+| bytedance-seedream<br>`seedream`<br>`seededit` | —（无推理控制） | — | （继承） |  |  |
+
+**条目备注**
+
+- **`black-forest-flux`**：FLUX 系（FLUX.1 schnell/dev/pro 等）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+- **`stability-sd`**：Stability 生图系（Stable Diffusion / SDXL / SD3）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+- **`zhipu-cogview`**：智谱 CogView 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+- **`aliyun-wanx`**：阿里万相 Wanx 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+- **`bytedance-seedream`**：字节 Seedream / SeedEdit 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+
+## Qwen（通义千问）
+
+| 模型 / 匹配写法 | 档位 → wire 拼写 | 默认档 | 图片 | 容量（上下文 / 最大输出） | 兼容开关 |
+|---|---|---|---|---|---|
+| qwen-image<br>`qwen-image` | —（无推理控制） | — | （继承） |  |  |
+
+**条目备注**
+
+- **`qwen-image`**：通义千问 Qwen-Image 生图系：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
+
+## Other
+
+| 模型 / 匹配写法 | 档位 → wire 拼写 | 默认档 | 图片 | 容量（上下文 / 最大输出） | 兼容开关 |
+|---|---|---|---|---|---|
+| midjourney<br>`midjourney`<br>`niji` | —（无推理控制） | — | （继承） |  |  |
+
+**条目备注**
+
+- **`midjourney`**：Midjourney / Niji 生图系（中转常见）：图像生成模型，不能作为对话模型使用——输入框模型切换列表不展示。请勿勾思考档。
 

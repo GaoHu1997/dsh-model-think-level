@@ -501,17 +501,10 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
                     <datalist id={uaListId}>
                       {USER_AGENT_PRESETS.map(preset => <option key={preset} value={preset} />)}
                     </datalist>
-                    {/* The deferred pane's contract, stated where its Save would
-                        have been: the draft is real, it is not written yet, and
-                        it lands with the card's own commit. */}
-                    {isDeferred
-                      ? (
-                        <>
-                          <p className="bre-effort-note">{t('pendingSave')}</p>
-                          <p className="bre-effort-note">{t('pendingHint')}</p>
-                        </>
-                      )
-                      : null}
+                    {/* The pending-save copy the deferred pane used to carry is
+                        gone (user item 3): the official Save button beside the
+                        card's own commit is the contract, and the provenance
+                        notes read as noise next to it. */}
                   </div>
                 )
                 : (

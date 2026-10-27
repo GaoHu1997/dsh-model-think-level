@@ -179,6 +179,12 @@ export function createComposerMenu(deps: ComposerMenuDeps): ComposerMenuInjectio
   const restoreOfficialBody = (): void => {
     for (const [node, display] of hidOfficial) node.style.display = display
     hidOfficial.clear()
+    // The focus handover pinned the menu as a programmatically-focusable stop
+    // (tabindex -1) while its own body was hidden; with the body back, that
+    // extra focus point goes too, or the host menu keeps a stray Tab/program
+    // target for as long as the plugin lives.
+    const menu = menuOf()
+    if (menu !== undefined && menu.getAttribute('tabindex') === '-1') menu.removeAttribute('tabindex')
   }
 
   /**

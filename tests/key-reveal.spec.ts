@@ -346,6 +346,55 @@ describe('the eye and a key that is already stored', () => {
   })
 })
 
+describe('a stale reveal', () => {
+  it('does not write the answer once the eye it belongs to is gone', async () => {
+    // The card re-dresses while the host answers: the eye this click armed can
+    // be dropped and replaced. Writing through would fill a box nobody asked
+    // to fill — and the next Save would store the secret again (user item 7).
+    const field = keyField()
+    let release: ((value: string | undefined) => void) | undefined
+    const loadKey = (): Promise<string | undefined> =>
+      new Promise<string | undefined>((resolve) => {
+        release = resolve
+      })
+    revealKeyField(field, deps({ route: 'aliyun', loadKey }))
+    const eye = eyeOf(field) as HTMLButtonElement
+
+    click(eye)
+    await flush()
+    // The re-dress: the field's eye is swapped for a fresh one.
+    eye.remove()
+    field.appendChild(Object.assign(document.createElement('button'), { type: 'button', className: KEY_EYE_CLASS }))
+
+    release?.('sk-stored')
+    await flush()
+
+    const input = inputOf(field)
+    expect(input.value).toBe('')
+    expect(input.type).toBe('password')
+  })
+
+  it('does not overwrite a value the user typed while the host answered', async () => {
+    const field = keyField()
+    let release: ((value: string | undefined) => void) | undefined
+    const loadKey = (): Promise<string | undefined> =>
+      new Promise<string | undefined>((resolve) => {
+        release = resolve
+      })
+    revealKeyField(field, deps({ route: 'aliyun', loadKey }))
+    const eye = eyeOf(field) as HTMLButtonElement
+
+    click(eye)
+    await flush()
+    inputOf(field).value = 'sk-typed-by-user'
+
+    release?.('sk-stored')
+    await flush()
+
+    expect(inputOf(field).value).toBe('sk-typed-by-user')
+  })
+})
+
 describe('loadProviderKey', () => {
   it('asks the host route for one route, uncached and same-origin', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, key: 'sk-stored' }), { status: 200 }))
@@ -399,6 +448,20 @@ describe('resetKeyField', () => {
     // Nothing official was moved or dropped on the way out.
     expect(field.querySelector('.fieldLabel')).not.toBeNull()
     expect(field.children).toHaveLength(2)
+  })
+
+  it('takes a borrowed value back out of the box, not one the user typed', async () => {
+    const field = keyField()
+    revealKeyField(field, deps({ route: 'aliyun', loadKey: async () => 'sk-stored' }))
+    click(eyeOf(field) as HTMLButtonElement)
+    await flush()
+    expect(inputOf(field).value).toBe('sk-stored')
+
+    resetKeyField(field)
+
+    // The reveal was a loan: without this, the box would read as a draft the
+    // user typed and the official Save would store the secret again.
+    expect(inputOf(field).value).toBe('')
   })
 
   it('forgets the card, so a click after the takeover cannot fetch again', async () => {

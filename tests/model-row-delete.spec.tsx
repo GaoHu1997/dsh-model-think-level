@@ -36,6 +36,7 @@ const LABELS: HostLabels = {
   inputImage: ['Image'],
   contextWindow: ['Context window'],
   maxOutput: ['Max output'],
+  addModel: ['Add model', '添加模型'],
 }
 const deps = (): { t: (k: string) => string; labels: () => HostLabels } => ({ t: (k: string) => k, labels: () => LABELS })
 const PROVIDER = 'aliyun'

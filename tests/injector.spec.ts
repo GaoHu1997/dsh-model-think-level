@@ -7,7 +7,7 @@
 
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { absorbDelta, adaptEveryModel, createScanState, effectiveStagedIntents, flushOnUnload, hideOfficialReasoning, officialReasoningOf, pinModelListCards, releaseModelListRepins, queueWriteInto, reconcile, showOfficialReasoning, stageEffortsInto, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
+import { absorbDelta, adaptEveryModel, addModelTriggersOf, createScanState, effectiveStagedIntents, flushOnUnload, hideOfficialReasoning, officialReasoningOf, pinModelListCards, releaseModelListRepins, queueWriteInto, reconcile, showOfficialReasoning, stageEffortsInto, suppressScrollAnchoring, unwatchModelListOffsets, watchModelListOffsets, type EditorMountProps, type InjectorDeps, type MountedEditor, type SettingsJoin } from '../src/client/injection/models-page-editor.js'
 import { suggestEfforts, type ReasoningEfforts } from '../src/knowledge.js'
 import type { RemoteApi } from '../src/client/types.js'
 
@@ -156,6 +156,7 @@ function makeDeps(overrides?: Partial<InjectorDeps>): InjectorDeps & {
       inputImage: ['Image'],
       contextWindow: ['Context window'],
       maxOutput: ['Max output'],
+      addModel: ['Add model', '添加模型'],
     }),
     mount,
     editors,
@@ -2113,6 +2114,32 @@ describe('the auto-adapt seat', () => {
     expect(held?.has('qwen-turbo')).toBe(true)
   })
 
+  it('keeps a stored default-effort pick over the suggestion\'s vendor default', async () => {
+    // The pick is a hand decision about this row: the walk fills the LADDER
+    // gap but must not overwrite the pick with the knowledge base's own
+    // default — the same rule the row's own auto-adapt applies.
+    const configured = structuredClone(join)
+    const layers = [
+      configured.namespace!.value as { providers: { aliyun: { models: Array<Record<string, unknown>> } } },
+      configured.namespace!.user as { providers: { aliyun: { models: Array<Record<string, unknown>> } } },
+    ]
+    for (const layer of layers) {
+      layer.providers.aliyun.models[0] = { id: 'qwen3.8-27b', defaultEffort: 'high' }
+    }
+    const deps = makeDeps({ describeNamespace: async () => configured })
+    const state = createScanState()
+    const root = buildModelsDom()
+    await settle(() => reconcile(root, deps, state), state)
+
+    await adaptEveryModel(state, deps, 'aliyun')
+
+    const held = state.queued.get('aliyun')
+    // The ladder gap is still filled...
+    expect(held?.get('qwen3.8-27b')?.efforts).toEqual({ off: null, low: 'low', medium: 'medium', xhigh: 'xhigh' })
+    // ...but the pick stays the user's ('high'), not the vendor's 'xhigh'.
+    expect(held?.get('qwen3.8-27b')?.defaultEffort).toBeUndefined()
+  })
+
   it('adapts nothing on a read-only page', async () => {
     const deps = makeDeps({ describeNamespace: async () => ({ ...join, writable: false }) })
     const state = createScanState()
@@ -2751,6 +2778,78 @@ describe('disclosure re-pin', () => {
     // ...and it lets go on its own once the card has stopped moving.
     await wait(700)
     expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('opens the downward-expansion pin on the add-model button click (user item 1)', async () => {
+    const section = buildModelsDom()
+    const host = scrollHostAround(section)
+    // The official model list's add button, found by its copy (aria-label or
+    // text) — never by a class this plugin cannot rely on.
+    const editor = section.querySelector<HTMLElement>('.editor')
+    const add = document.createElement('button')
+    add.textContent = '添加模型'
+    editor?.appendChild(add)
+    const state = createScanState()
+    const deps = makeDeps()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+
+    add.click()
+
+    // Suppressed in the click's own capture phase — BEFORE the official
+    // handler appends the row and scrolls its first input into view, which is
+    // the squeeze the user reported.
+    expect(host.style.overflowAnchor).toBe('none')
+    // The window outlives the growth: the row (and the editor a later scan
+    // mounts into its disclosure) arrive over the next frames.
+    await wait(150)
+    expect(host.style.overflowAnchor).toBe('none')
+    await wait(700)
+    expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('never lets a suppress hold restore the none a pin window wrote', async () => {
+    const section = buildModelsDom()
+    const host = scrollHostAround(section)
+    const editor = section.querySelector<HTMLElement>('.editor')
+    const add = document.createElement('button')
+    add.textContent = '添加模型'
+    editor?.appendChild(add)
+    const deps = makeDeps()
+    const state = createScanState()
+    await settle(() => { reconcile(document.body, deps, state) }, state)
+
+    // The click opens the pin and takes the chain to 'none' (saved '').
+    add.click()
+    expect(host.style.overflowAnchor).toBe('none')
+    // A suppress hold starting INSIDE the pin's window must not capture the
+    // pin's 'none': its own release, landing after the pin released, would
+    // otherwise write 'none' back and leave the host's anchoring off for good.
+    suppressScrollAnchoring(section, 60)
+    // The pin answers user input: a wheel anywhere releases it, restoring ''.
+    document.dispatchEvent(new Event('wheel'))
+    await wait(20)
+    expect(host.style.overflowAnchor).toBe('')
+    // The skipped suppress hold has nothing to restore; the chain stays as
+    // the pin's own release left it.
+    await wait(90)
+    expect(host.style.overflowAnchor).toBe('')
+  })
+
+  it('finds the add-model button by aria-label or its own text, and skips plugin DOM', () => {
+    const scope = document.createElement('div')
+    const aria = document.createElement('button')
+    aria.setAttribute('aria-label', 'Add model 3')
+    const text = document.createElement('button')
+    text.textContent = '+ 添加模型'
+    const foreign = document.createElement('button')
+    foreign.textContent = '添加模型'
+    foreign.dataset['plugin'] = 'dsh-model-think-level'
+    scope.append(aria, text, foreign)
+    const labels = makeDeps().labels()
+    const found = addModelTriggersOf(scope, labels)
+    expect(found).toHaveLength(2)
+    expect(found).toContain(aria)
+    expect(found).toContain(text)
   })
 
   it('pins a setup card too — the card the user is actually editing', async () => {

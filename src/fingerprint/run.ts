@@ -55,6 +55,13 @@ export interface ProbeOutcome {
   error?: string
   /** Why the stream stopped, when one was reported. */
   finish?: string
+  /**
+   * Milliseconds from dispatch start to the first visible text chunk. Absent
+   * when no text arrived (rejected, cancelled, empty answer).
+   */
+  firstTokenMs?: number
+  /** Total wall time of the challenge, milliseconds. */
+  durationMs?: number
 }
 
 /** Everything one model's fingerprint run learned, ready for the bank. */
@@ -91,8 +98,19 @@ export interface RunProbeOptions {
   /**
    * Called as each challenge settles, so a caller can stream progress. Fire
    * order is completion order, which for parallel runs is not `index` order.
+   * Challenges aborted by {@link shouldStop} do NOT fire this: they never
+   * answered, so they are not progress.
    */
   onOutcome?: (outcome: ProbeOutcome) => void
+  /**
+   * Early-exit hook, called after each challenge settles with every outcome
+   * so far. Returning true aborts every challenge still in flight; their
+   * outcomes come back cancelled and stay out of `onOutcome` and of any
+   * caller-side progress accounting. This is what lets two confident answers
+   * close the run before the slowest challenge lands — aborting the tail is
+   * the whole point of firing all three at once.
+   */
+  shouldStop?: (outcomes: readonly ProbeOutcome[]) => boolean
 }
 
 /** Default per-challenge timeout: two minutes is generous for 300 integers. */
@@ -165,9 +183,20 @@ export async function runProbe(options: RunProbeOptions): Promise<ProbeRunResult
 
   // The three challenges go out together (design §5.3): they are independent
   // samples of the same behaviour, so serializing them only triples the wall
-  // clock. The per-challenge deadline is what bounds a hung provider.
-  const settled = await Promise.all(
+  // clock. The per-challenge deadline is what bounds a hung provider. Each
+  // challenge also carries its own stop controller so an early-exit decision
+  // can abort only the ones still running.
+  const stopControllers = new Map<number, AbortController>()
+  const settled: ProbeOutcome[] = []
+  let stopping = false
+  /** Indices aborted BY the early exit — their silence is deliberate, not a loss. */
+  const suppressed = new Set<number>()
+
+  const settledAll = await Promise.all(
     challenges.map(async (challenge, index): Promise<ProbeOutcome> => {
+      const stop = new AbortController()
+      stopControllers.set(index, stop)
+      const stopSignal = signal === undefined ? stop.signal : AbortSignal.any([signal, stop.signal])
       const outcome = signal?.aborted === true
         ? {
             index,
@@ -177,12 +206,23 @@ export async function runProbe(options: RunProbeOptions): Promise<ProbeRunResult
             text: '',
             error: 'cancelled',
           } satisfies ProbeOutcome
-        : await runChallenge({ ...options, index, challenge, timeoutMs, maxTokens })
+        : await runChallenge({ ...options, index, challenge, timeoutMs, maxTokens, signal: stopSignal })
+      stopControllers.delete(index)
+      settled.push(outcome)
+
+      if (!stopping && signal?.aborted !== true && options.shouldStop?.([...settled]) === true) {
+        stopping = true
+        for (const [pending, controller] of stopControllers) {
+          suppressed.add(pending)
+          controller.abort()
+        }
+      }
+      if (suppressed.has(index)) return outcome
       options.onOutcome?.(outcome)
       return outcome
     }),
   )
-  const outcomes = [...settled]
+  const outcomes = [...settledAll]
 
   const outputs: Output[] = []
   for (const outcome of outcomes) {
@@ -205,6 +245,14 @@ async function runChallenge(options: RunChallengeOptions): Promise<ProbeOutcome>
     challengeId: challenge.id,
     expectedCount: challenge.expected_count,
   }
+
+  const startedAt = Date.now()
+  let firstTokenMs: number | undefined
+  /** Timing folded into every exit path: the outcome should always carry it. */
+  const timing = (): { firstTokenMs?: number; durationMs: number } => ({
+    ...(firstTokenMs === undefined ? {} : { firstTokenMs }),
+    durationMs: Date.now() - startedAt,
+  })
 
   const deadline = AbortSignal.timeout(timeoutMs)
   const combined = signal === undefined ? deadline : AbortSignal.any([signal, deadline])
@@ -246,29 +294,33 @@ async function runChallenge(options: RunChallengeOptions): Promise<ProbeOutcome>
       const type = chunk['type']
       if (type === 'text-delta') {
         const delta = chunk['text']
-        if (typeof delta === 'string') text += delta
+        if (typeof delta === 'string') {
+          if (delta.length > 0 && firstTokenMs === undefined) firstTokenMs = Date.now() - startedAt
+          text += delta
+        }
       } else if (type === 'finish') {
         finish = finishProblem(chunk['reason'])
       }
     }
 
     if (signal?.aborted === true) {
-      return { ...base, ok: false, text: '', error: 'cancelled' }
+      return { ...base, ...timing(), ok: false, text: '', error: 'cancelled' }
     }
     if (finish !== undefined) {
       const detail = finish.message === undefined ? finish.kind : `${finish.kind}: ${finish.message}`
-      return { ...base, ok: false, text: '', error: detail, finish: finish.kind }
+      return { ...base, ...timing(), ok: false, text: '', error: detail, finish: finish.kind }
     }
     if (text.trim().length === 0) {
-      return { ...base, ok: false, text: '', error: 'the model answered with no visible text' }
+      return { ...base, ...timing(), ok: false, text: '', error: 'the model answered with no visible text' }
     }
-    return { ...base, ok: true, text }
+    return { ...base, ...timing(), ok: true, text }
   } catch (error) {
     if (signal?.aborted === true) {
-      return { ...base, ok: false, text: '', error: 'cancelled' }
+      return { ...base, ...timing(), ok: false, text: '', error: 'cancelled' }
     }
     return {
       ...base,
+      ...timing(),
       ok: false,
       text: '',
       error: error instanceof Error ? error.message : String(error),

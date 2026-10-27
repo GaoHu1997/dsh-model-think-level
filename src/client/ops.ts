@@ -12,7 +12,7 @@ import {
   type InputModalities,
   type ReasoningEfforts,
 } from '../knowledge.js'
-import { AUTOFILL_MARKER, DEFAULT_EFFORT_FIELD, INPUT_UNSET_MARKER, PI_AI_NS, PROBE_PATH, UNSET_MARKER } from '../constants.js'
+import { AUTOFILL_MARKER, DEFAULT_EFFORT_FIELD, INPUT_IMAGE_GEN_MARKER, INPUT_UNSET_MARKER, PI_AI_NS, PROBE_PATH, UNSET_MARKER } from '../constants.js'
 import { detectModelSignal, type EndpointSignal } from '../detection.js'
 import { isRecord, looksLikeCompatRefusal, routeFactsOf } from '../shared.js'
 import type { SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
@@ -21,6 +21,7 @@ import type {
   EffortEditorApi,
   EffortWriteIntent,
   HeldWrite,
+  ImageGenIntent,
   InputIntent,
   RemoteApi,
   SettingsJoin,
@@ -112,6 +113,17 @@ export function compatOf(models: Record<string, unknown>[], modelId: string): Co
   const compat = entry?.['compat']
   if (!isRecord(compat)) return undefined
   return { ...(compat as CompatSuggestion) }
+}
+
+/**
+ * Whether one model in a route's models is declared an IMAGE GENERATOR (生图).
+ * The marker is plugin-owned and truthy-only: any value other than `true`
+ * reads as "not an image generator", so a hostile or stale document can never
+ * half-apply the state.
+ */
+export function imageGenOf(models: Record<string, unknown>[], modelId: string): boolean {
+  const entry = models.find(model => model['id'] === modelId)
+  return entry?.[INPUT_IMAGE_GEN_MARKER] === true
 }
 
 /** The display name of one model in a route's models. */
@@ -220,6 +232,7 @@ export function createEditorApi(
     compat?: CompatSuggestion,
     input?: InputModalities | null,
     defaultEffort?: string | null,
+    imageGen?: ImageGenIntent,
   ) => void,
   /**
    * Present only on a seam an ON-SCREEN editor drives: while the official card
@@ -279,6 +292,7 @@ export function createEditorApi(
           ...(suggestion.defaultEffort === undefined ? {} : { defaultEffort: suggestion.defaultEffort }),
           ...(suggestion.input === undefined ? {} : { input: suggestion.input }),
           ...(suggestion.inputSource === undefined ? {} : { inputSource: suggestion.inputSource }),
+          ...(suggestion.imageGen === undefined ? {} : { imageGen: suggestion.imageGen }),
           ...(suggestion.contextWindow === undefined ? {} : { contextWindow: suggestion.contextWindow }),
           ...(suggestion.maxTokens === undefined ? {} : { maxTokens: suggestion.maxTokens }),
           matched: suggestion.matched,
@@ -295,23 +309,24 @@ export function createEditorApi(
       // until the official card's Save. Both are synchronous and memory-only:
       // the change must register before the user can reach that Save button.
       if (stagedOf?.() === true) {
-        stage?.(route, modelId, write.efforts, write.compat, write.input, write.defaultEffort)
+        stage?.(route, modelId, write.efforts, write.compat, write.input, write.defaultEffort, write.imageGen)
         return
       }
       hold?.(route, modelId, {
         efforts: write.efforts,
         ...(write.compat === undefined ? {} : { compat: write.compat }),
         ...(write.input === undefined ? {} : { input: write.input }),
+        ...(write.imageGen === undefined ? {} : { imageGen: write.imageGen }),
         ...(write.defaultEffort === undefined ? {} : { defaultEffort: write.defaultEffort }),
       })
     },
     withdraw(route, modelId) {
       withdraw?.(route, modelId)
     },
-    stageEfforts(route, modelId, efforts, compat, input, defaultEffort) {
-      stage?.(route, modelId, efforts, compat, input, defaultEffort)
+    stageEfforts(route, modelId, efforts, compat, input, defaultEffort, imageGen) {
+      stage?.(route, modelId, efforts, compat, input, defaultEffort, imageGen)
     },
-    async writeEfforts(route, modelId, rawEfforts, compat, input, defaultEffort) {
+    async writeEfforts(route, modelId, rawEfforts, compat, input, defaultEffort, imageGen) {
       // While an editor owns the document (the official editing card is open)
       // commit nothing: that card froze its own revision baseline, so any
       // write from here makes the user's NEXT save in it fail with
@@ -324,6 +339,7 @@ export function createEditorApi(
           efforts: rawEfforts,
           ...(compat === undefined ? {} : { compat }),
           ...(input === undefined ? {} : { input }),
+          ...(imageGen === undefined ? {} : { imageGen }),
           ...(defaultEffort === undefined ? {} : { defaultEffort }),
         })
         return { ok: true, staged: true }
@@ -337,6 +353,7 @@ export function createEditorApi(
         efforts: rawEfforts,
         ...(compat === undefined ? {} : { compat }),
         ...(input === undefined ? {} : { input }),
+        ...(imageGen === undefined ? {} : { imageGen }),
         ...(defaultEffort === undefined ? {} : { defaultEffort }),
       }], describe)
       const result = results[0] ?? { ok: false, error: 'no-result' }
@@ -360,6 +377,8 @@ export interface RowIntent {
   efforts: EffortWriteIntent
   compat?: CompatSuggestion
   input?: InputIntent
+  /** The image-generation part; undefined leaves the marker untouched. */
+  imageGen?: ImageGenIntent
   defaultEffort?: DefaultEffortIntent
 }
 
@@ -545,6 +564,21 @@ function mergeRowIntent(
     } else {
       delete copy[INPUT_UNSET_MARKER]
       copy['input'] = [...row.input]
+    }
+  }
+  // The image-generation part rides the same mutate: omitted = untouched, false
+  // clears the marker (back to a chat model), true writes it. A write that
+  // DECLARES the row an image generator also clears the modality declaration
+  // and its unset marker — the two states are mutually exclusive by definition,
+  // and a stale text/image answer beside the marker would read as a vision
+  // chat model again on a reader that ignores the marker.
+  if (row.imageGen !== undefined) {
+    if (row.imageGen === true) {
+      copy[INPUT_IMAGE_GEN_MARKER] = true
+      delete copy['input']
+      delete copy[INPUT_UNSET_MARKER]
+    } else {
+      delete copy[INPUT_IMAGE_GEN_MARKER]
     }
   }
   // The per-model default-effort pick rides the same mutate: omitted =

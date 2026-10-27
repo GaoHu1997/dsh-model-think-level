@@ -776,7 +776,7 @@ describe('cross-seam: the fetch layer honours the wire seam\'s signature', () =>
   const MODEL = { id: 'gpt-6.1', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }
 
   /** Both seams over one stubbed network; records every outgoing request. */
-  function crossSeamSetup(status = 200) {
+  function crossSeamSetup(status = 200, headers: Record<string, string> | undefined = { 'x-route': 'alpha' }) {
     const outgoing: Array<{ url: string; headers: Headers }> = []
     const realFetch = globalThis.fetch
     // The stub lands UNDER the overlay: installHeaderOverlay wraps whatever
@@ -793,7 +793,7 @@ describe('cross-seam: the fetch layer honours the wire seam\'s signature', () =>
         alpha: {
           baseURL: 'https://relay.example.com/v1',
           models: [{ id: 'gpt-6.1' }],
-          headers: { 'x-route': 'alpha' },
+          ...(headers === undefined ? {} : { headers }),
         },
       }),
       // List order puts the cross-family pin first — keysForModel's pick. The
@@ -849,6 +849,44 @@ describe('cross-seam: the fetch layer honours the wire seam\'s signature', () =>
       // The route's header patch still applies, and the marker never leaves.
       expect(outgoing[0]?.headers.get('x-route')).toBe('alpha')
       expect(outgoing[0]?.headers.has('x-dsh-model-think-level-wire')).toBe(false)
+    } finally {
+      restore()
+    }
+  })
+
+  it('strips the marker even when the route declares no headers of its own', async () => {
+    // The common deployment shape: the route matches (so the fetch layer owns
+    // its key routing) but stores no header patch. The strip must not be tied
+    // to the patch — returning the original init there shipped the internal
+    // marker upstream.
+    const { adapter, outgoing, restore } = crossSeamSetup(200, {})
+    try {
+      const events = await drain(callStream(adapter, MODEL))
+      expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
+      expect(outgoing).toHaveLength(1)
+      // The wire seam's signature survives untouched; the marker does not.
+      expect(outgoing[0]?.headers.get('authorization')).toBe('Bearer sk-b')
+      expect(outgoing[0]?.headers.has('x-dsh-model-think-level-wire')).toBe(false)
+      expect(outgoing[0]?.headers.has('x-route')).toBe(false)
+    } finally {
+      restore()
+    }
+  })
+
+  it('strips the marker from a request this layer does not claim at all', async () => {
+    // The wire seam marks the requests it dispatches, including ones to a key
+    // endpoint on ANOTHER origin than the route's base URL — the fetch layer's
+    // index never matches those, so the marker would ride the passthrough
+    // upstream unless the unclaimed exits strip it too.
+    const { outgoing, restore } = crossSeamSetup()
+    try {
+      await globalThis.fetch('https://key-endpoint.example.com/v1/chat', {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-b', 'x-dsh-model-think-level-wire': '1' },
+      })
+      expect(outgoing).toHaveLength(1)
+      expect(outgoing[0]?.headers.has('x-dsh-model-think-level-wire')).toBe(false)
+      expect(outgoing[0]?.headers.get('authorization')).toBe('Bearer sk-b')
     } finally {
       restore()
     }

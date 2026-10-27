@@ -193,28 +193,6 @@ body[data-ds-dark-theme] {
   opacity: 0.4;
   cursor: default;
 }
-/* The applied suggestion, as the board's pill: 22px, a hairline, quiet ink, and
-   the accent glyph that marks it as advice rather than state. */
-.bre-effort-suggest {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 100%;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: var(--bre-r-pill);
-  border: 1px solid var(--bre-line-2);
-  background: var(--bre-surface);
-  font-size: 11px;
-  color: var(--bre-ink-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.bre-effort-suggest svg {
-  flex: none;
-  color: var(--bre-accent);
-}
 .bre-link-button {
   background: none;
   border: none;
@@ -694,12 +672,6 @@ body[data-ds-dark-theme] {
   background-size: 12px 12px;
 }
 .bre-error { color: var(--dsw-alias-state-error-primary); }
-/* ---- Zoned suggestion display ---- */
-.bre-suggestion {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
 /* The two capacities are EDITABLE fields, not a footnote (user request: 上下文
   参数/最大长度这两个参数需要可以配置): each is the row's own official input,
   mirrored here, so the label sits above a sunken field with the unit inside it.
@@ -1119,6 +1091,18 @@ body[data-ds-dark-theme] {
 .bre-option.is-active .bre-option-tags { color: var(--bre-accent); opacity: .9; }
 .bre-tag { display: inline-flex; align-items: center; }
 .bre-tag-icon { display: block; width: 13px; height: 13px; }
+/* The declared context window, spelled the way catalogues do (128K, 1M).
+   Tabular digits so a column of them compares at a glance; muted like the
+   badges, with its own title carrying the field copy. */
+.bre-option-cap {
+  flex: none;
+  color: var(--bre-ink-3);
+  opacity: .78;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.bre-option.is-active .bre-option-cap { color: var(--bre-accent); opacity: .9; }
 .bre-empty { padding: 8px; font-size: 12px; color: var(--bre-ink-hint); }
 
 /* ---- Truncated-label tooltip (custom, replaces the native title) ----
@@ -2760,42 +2744,6 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   color: var(--dsw-alias-label-secondary, #6b7280);
 }
 
-.bre-keys-discover {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary, #6b7280);
-  font: inherit;
-  font-size: 11px;
-  cursor: pointer;
-  -webkit-appearance: none;
-  appearance: none;
-  transition: color 120ms ease;
-}
-
-.bre-keys-discover:hover { color: var(--dsw-alias-label-primary, #0f1115); }
-
-.bre-keys-discover:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary, #3b82f6);
-  border-radius: 4px;
-}
-
-.bre-keys-discover:disabled { opacity: 0.55; cursor: default; }
-
-.bre-keys-discover-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-}
-
-.bre-keys-discover-mark > svg { width: 13px; height: 13px; }
-
 .bre-keys-add-mark {
   display: inline-flex;
   flex: 0 0 auto;
@@ -3710,7 +3658,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 @media (prefers-reduced-motion: reduce) {
   .bre-editor-tab { transition: none; }
   .bre-key-eye { transition: none; }
-  .bre-keys-actions, .bre-keys-add, .bre-keys-discover, .bre-keys-chip { transition: none; }
+  .bre-keys-actions, .bre-keys-add, .bre-keys-chip { transition: none; }
 }
 
 /* ---- 指纹检测页签 / the fingerprint tab pane ----------------------------
@@ -3800,6 +3748,12 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   border-color: var(--bre-accent);
   box-shadow: 0 0 0 3px var(--bre-accent-glow);
 }
+/* The fold control is borderless, so its focus ring rides the model id. */
+.bre-fp-fold:focus-visible {
+  outline: none;
+  border-radius: var(--bre-r-sm);
+  box-shadow: 0 0 0 2px var(--bre-accent-glow);
+}
 .bre-fp-all:disabled,
 .bre-fp-action:disabled { opacity: 0.55; cursor: default; }
 
@@ -3822,6 +3776,25 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   min-height: 44px;
   padding: 6px 12px;
 }
+/* The result card's fold control: chevron + model id as ONE button, so the
+   target is the label the user reads and the row keeps a keyboard path to its
+   own result card. Quiet until hover — the chevron alone carries the state. */
+.bre-fp-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: -6px -4px -6px -8px;
+  padding: 6px 4px 6px 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+.bre-fp-fold:hover .bre-fp-model { color: var(--bre-accent); }
+.bre-fp-chev { flex: none; color: var(--bre-ink-3); opacity: .7; }
 .bre-fp-model {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
@@ -3918,6 +3891,17 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   font-size: 11px;
   line-height: 16px;
   color: var(--bre-ink-3);
+}
+/* The timing line answers "why was this slow" in one muted sentence:
+   a long first-token wait means thinking preamble, a low chars/s means
+   provider throughput. Same voice as the note, one line, no numbers that
+   pretend to be measurements they are not. */
+.bre-fp-timing {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+  font-variant-numeric: tabular-nums;
 }
 
 @media (prefers-reduced-motion: reduce) {

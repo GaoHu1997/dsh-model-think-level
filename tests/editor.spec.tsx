@@ -312,10 +312,9 @@ describe('EffortEditor', () => {
 
     await act(async () => { buttonByText(container, t('autoAdapt')).click() })
 
-    // The provenance lives in the head pill (the redesign's one-line suggestion).
-    const pill = container.querySelector('.bre-effort-suggest')
-    expect(pill?.textContent).toContain('endpoint:supported_features')
-    expect(pill?.textContent).toContain(t('confidence_medium'))
+    // The provenance pill is gone (user item 3): the draft IS the report, so
+    // no source/confidence copy is rendered anywhere on the card.
+    expect(container.querySelector('.bre-effort-suggest')).toBeNull()
     // The draft followed the suggestion: low is now armed too.
     expect(pillFor(container, t('level_low')).classList.contains('is-on')).toBe(true)
   })
@@ -374,9 +373,9 @@ describe('EffortEditor', () => {
     // stages (unsaved route) or queues (saved row).
     expect(api.commit).toHaveBeenCalledWith('acme-gateway', 'qwen-max', { efforts: { high: 'high' } })
     expect(api.writeEfforts).not.toHaveBeenCalled()
-    // The copy says "modified, it lands with the card's save" -- never a
-    // "Saved." that would be a lie until the official Save lands.
-    expect(container.querySelector('.bre-effort-message')?.textContent).toContain(t('pendingSave'))
+    // The pending-save copy is gone (user item 3): the Reset button -- the only
+    // affordance whose enabled state reports the edit -- is the report.
+    expect(container.querySelector('.bre-effort-message')).toBeNull()
   })
 
   it('staged: auto-adapt feeds the card-typed protocol and endpoint as inference facts', async () => {
@@ -442,6 +441,7 @@ describe('EffortEditor', () => {
       efforts: { off: null, low: 'low', high: 'high', max: 'max' },
       compat,
       input: ['text', 'image'],
+      imageGen: false,
     })
   })
 
@@ -511,7 +511,7 @@ describe('EffortEditor modality', () => {
     // never declared, so the effort part must travel as 'keep' -- NOT as the
     // unset intent, which would stamp a durable marker onto nothing.
     await act(async () => { modalityPill(container, t('modalityImage')).click() })
-    expect(api.commit).toHaveBeenCalledWith('aliyun', 'qwen-max', { efforts: 'keep', input: ['text'] })
+    expect(api.commit).toHaveBeenCalledWith('aliyun', 'qwen-max', { efforts: 'keep', input: ['text'], imageGen: false })
   })
 
   it('clearing the declaration writes the durable unset', async () => {
@@ -522,7 +522,7 @@ describe('EffortEditor modality', () => {
     expect(container.textContent).toContain(t('modalityInherit'))
     // The durable unset travels as the null intent, not as an omission: the
     // injector must record the absence as the user's decision.
-    expect(api.commit).toHaveBeenCalledWith('aliyun', 'qwen-max', { efforts: 'keep', input: null })
+    expect(api.commit).toHaveBeenCalledWith('aliyun', 'qwen-max', { efforts: 'keep', input: null, imageGen: false })
   })
 
   it('renders a resolved-layer empty input array as inheriting', async () => {
@@ -575,7 +575,9 @@ describe('EffortEditor modality', () => {
     )
     // The modal pills render on the same card; the ladder is not the only part.
     expect(container.querySelector(`[aria-label^="${t('modalityText')}"]`)).not.toBeNull()
-    expect(container.textContent).toContain(t('inputHintEndpoint'))
+    // The modality-source hint is gone (user item 3): the armed pills are the
+    // whole report.
+    expect(container.textContent).not.toContain('inputHint')
   })
 
   it('an undeclared row stays untouched by an effort-only apply', async () => {
@@ -588,7 +590,7 @@ describe('EffortEditor modality', () => {
     expect(api.commit).toHaveBeenCalledWith('aliyun', 'qwen-max', { efforts: { high: 'high' } })
   })
 
-  it('auto-adapt renders the footnote reference block and provenance hints', async () => {
+  it('auto-adapt renders the footnote reference block', async () => {
     const api = baseApi()
     api.suggest.mockResolvedValue({
       ok: true,
@@ -617,7 +619,9 @@ describe('EffortEditor modality', () => {
     expect(capacityField(container, t('maxTokensLabel')).value).toBe('128,000')
     expect(container.textContent).toContain(t('contextWindowLabel'))
     expect(container.textContent).toContain(t('maxTokensLabel'))
-    expect(container.textContent).toContain(t('inputHintEndpoint'))
+    // The provenance hints are gone (user item 3): the fields and pills are
+    // the report.
+    expect(container.textContent).not.toContain('inputHint')
     // The suggestion's text-only advice leaves the image pill disarmed.
     expect(modalityPill(container, t('modalityImage')).classList.contains('is-on')).toBe(false)
   })
@@ -638,7 +642,7 @@ describe('EffortEditor modality', () => {
     expect(api.fillCapacities).not.toHaveBeenCalled()
   })
 
-  it('heuristic modality advice surfaces the verify hint and arms the pill', async () => {
+  it('heuristic modality advice arms the pill without a provenance hint', async () => {
     const api = baseApi()
     api.suggest.mockResolvedValue({
       ok: true,
@@ -655,12 +659,101 @@ describe('EffortEditor modality', () => {
 
     await act(async () => { buttonByText(container, t('autoAdapt')).click() })
 
-    expect(container.textContent).toContain(t('inputHintHeuristic'))
+    // The verify hint is gone (user item 3): the armed pill is the report.
+    expect(container.textContent).not.toContain('inputHint')
     expect(modalityPill(container, t('modalityImage')).classList.contains('is-on')).toBe(true)
     // No capacities in the suggestion: the fields stay blank, which is the
     // catalogue-fallback state rather than a block hidden from the user.
     expect(capacityField(container, t('contextWindowLabel')).value).toBe('')
     expect(capacityField(container, t('contextWindowLabel')).getAttribute('placeholder')).toBe(t('capacityBlank'))  })
+})
+
+describe('EffortEditor image-generation pill (生图)', () => {
+  it('stands as the third pill and clears the text/image declaration when picked', async () => {
+    const api = baseApi()
+    const { container } = await renderEditor(baseProps({ api, input: ['text', 'image'] }))
+    // Three pills now: 文本, 图片, 生图 — 生图 disarmed while the pair is declared.
+    expect(modalityPill(container, t('modalityImageGen')).textContent).toBe(t('modalityImageGen'))
+    expect(modalityPill(container, t('modalityImageGen')).classList.contains('is-on')).toBe(false)
+    await act(async () => { modalityPill(container, t('modalityImageGen')).click() })
+    // 生图 is the whole modality answer: the pair goes (null = the durable
+    // unset) and the marker rides the same write.
+    expect(api.commit).toHaveBeenLastCalledWith('aliyun', 'qwen-max', {
+      efforts: 'keep',
+      input: null,
+      imageGen: true,
+    })
+    expect(modalityPill(container, t('modalityImageGen')).classList.contains('is-on')).toBe(true)
+    expect(modalityPill(container, t('modalityText')).classList.contains('is-on')).toBe(false)
+    expect(modalityPill(container, t('modalityImage')).classList.contains('is-on')).toBe(false)
+  })
+
+  it('toggling 生图 off returns the row to undeclared', async () => {
+    const api = baseApi()
+    const { container } = await renderEditor(baseProps({ api, imageGen: true }))
+    expect(modalityPill(container, t('modalityImageGen')).classList.contains('is-on')).toBe(true)
+    await act(async () => { modalityPill(container, t('modalityImageGen')).click() })
+    expect(api.commit).toHaveBeenLastCalledWith('aliyun', 'qwen-max', {
+      efforts: 'keep',
+      input: null,
+      imageGen: false,
+    })
+  })
+
+  it('declaring text or image replaces a stored 生图 marker', async () => {
+    const api = baseApi()
+    const { container } = await renderEditor(baseProps({ api, imageGen: true }))
+    await act(async () => { modalityPill(container, t('modalityImage')).click() })
+    // The pair replaces the marker: text+image declared, imageGen cleared.
+    expect(api.commit).toHaveBeenLastCalledWith('aliyun', 'qwen-max', {
+      efforts: 'keep',
+      input: ['text', 'image'],
+      imageGen: false,
+    })
+  })
+
+  it('follows an image-generation push that lands while the draft is clean', async () => {
+    // The row was marked 生图 elsewhere (a bulk adapt, another seat) while this
+    // editor stayed mounted: the injector re-renders in place, so the draft
+    // must follow the document — or the row would read as modified and the
+    // next edit would silently clear the marker it just received.
+    const api = baseApi()
+    const page = await renderEditor(baseProps({ api }))
+    await page.setProps(baseProps({ api, imageGen: true }))
+    expect(modalityPill(page.container, t('modalityImageGen')).classList.contains('is-on')).toBe(true)
+    // Nothing is modified, so Reset stands down.
+    const reset = page.container.querySelector<HTMLButtonElement>('.bre-secondary-button')!
+    expect(reset.disabled).toBe(true)
+    // A subsequent LADDER edit carries no modality part: the marker is the
+    // document's own answer now, not this edit's to restate or undo.
+    await act(async () => { pillFor(page.container, t('level_high')).click() })
+    expect(api.commit).toHaveBeenLastCalledWith('aliyun', 'qwen-max', { efforts: { high: 'high' } })
+  })
+
+  it('an image-generation suggestion from auto-adapt arms the pill and unsets the pair', async () => {
+    const api = baseApi()
+    api.suggest.mockResolvedValue({
+      ok: true,
+      suggestion: {
+        efforts: false,
+        matched: true,
+        source: 'openai-gpt-image',
+        confidence: 'high',
+        imageGen: true,
+      },
+    } satisfies SuggestReply)
+    const { container } = await renderEditor(baseProps({ api, input: ['text'] }))
+    await act(async () => { buttonByText(container, t('autoAdapt')).click() })
+    expect(api.commit).toHaveBeenLastCalledWith('aliyun', 'qwen-max', {
+      efforts: false,
+      input: null,
+      imageGen: true,
+    })
+    // The verdict also says "does not reason": the switch follows it and the
+    // card folds away, so the pills are not rendered to check — the write IS
+    // the report.
+    expect(container.querySelector('.bre-effort-card')).toBeNull()
+  })
 })
 
 describe('EffortEditor compat controls', () => {
@@ -880,7 +973,8 @@ describe('EffortEditor auto-adapt requests', () => {
     expect(api.suggest).toHaveBeenCalledWith('auto-spec-a', 'qwen-max', undefined)
     // The draft followed the suggestion, exactly as a click on the link would.
     expect(pillFor(container, t('level_low')).classList.contains('is-on')).toBe(true)
-    expect(container.querySelector('.bre-effort-suggest')?.textContent).toContain('endpoint:supported_features')
+    // The provenance pill is gone (user item 3): the draft is the report.
+    expect(container.querySelector('.bre-effort-suggest')).toBeNull()
   })
 
   it('leaves every other provider alone', async () => {

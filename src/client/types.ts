@@ -217,6 +217,8 @@ export type SuggestReply =
         input?: InputModalities
         /** Where the modality part came from -- its confidence rides this. */
         inputSource?: InputSource
+        /** Whether the model is an image generator (生图), when derivable. */
+        imageGen?: boolean
         /** Reference context window; a mounted row also echoes it into the official capacity input. */
         contextWindow?: number
         /** Reference max output tokens; a mounted row also echoes it into the official capacity input. */
@@ -246,6 +248,13 @@ export interface StagedRouteFacts {
  */
 export type InputIntent = InputModalities | null | undefined;
 /**
+ * The image-generation part of a write intent. Undefined leaves whatever the
+ * document holds untouched (a ladder-only edit never flips the row's kind);
+ * false clears the marker durably; true writes it — the composer's switcher
+ * then hides the row (it cannot serve a chat turn).
+ */
+export type ImageGenIntent = boolean | null | undefined;
+/**
  * The effort-ladder part of a write intent. Undefined unsets the declaration
  * durably (the marker records the absence); the 'keep' sentinel leaves
  * whatever the document holds completely untouched -- what a modality-only
@@ -272,6 +281,8 @@ export interface HeldWrite {
   compat?: CompatSuggestion;
   /** The modality part, when this edit made one. */
   input?: InputIntent;
+  /** The image-generation part, when this edit made one. */
+  imageGen?: ImageGenIntent;
   /** The per-model default-effort pick, when this edit made one. */
   defaultEffort?: DefaultEffortIntent;
 }
@@ -292,6 +303,8 @@ export interface PendingWrite {
   compat?: CompatSuggestion;
   /** The modality part, when this edit made one. */
   input?: InputIntent;
+  /** The image-generation part, when this edit made one. */
+  imageGen?: ImageGenIntent;
   /** The per-model default-effort pick, when this edit made one. */
   defaultEffort?: DefaultEffortIntent;
 }
@@ -307,6 +320,8 @@ export interface PendingWriteParts {
   efforts: EffortWriteIntent;
   /** The modality intent, when this write made one. */
   input?: InputIntent;
+  /** The image-generation intent, when this write made one. */
+  imageGen?: ImageGenIntent;
   /** The compat block of an applied suggestion. */
   appliedCompat?: CompatSuggestion;
   /** The route's wire protocol: what decides the thinking-budget default. */
@@ -389,11 +404,11 @@ export interface EffortEditorApi {
    * itself reports through {@link commit} since C2, and the injector's ledgers
    * call the batch writer directly — neither goes through this method.
    */
-  writeEfforts(route: string, modelId: string, efforts: EffortWriteIntent, compat?: CompatSuggestion, input?: InputIntent, defaultEffort?: DefaultEffortIntent): Promise<WriteEffortsReply>;
+  writeEfforts(route: string, modelId: string, efforts: EffortWriteIntent, compat?: CompatSuggestion, input?: InputIntent, defaultEffort?: DefaultEffortIntent, imageGen?: ImageGenIntent): Promise<WriteEffortsReply>;
   /**
    * Stage one model's declaration for a route that does not exist in the
    * settings document yet (the create card). Synchronous, memory-only; the
    * injector flushes staged declarations once the route appears.
    */
-  stageEfforts(route: string, modelId: string, efforts: EffortWriteIntent, compat?: CompatSuggestion, input?: InputModalities, defaultEffort?: DefaultEffortIntent): void;
+  stageEfforts(route: string, modelId: string, efforts: EffortWriteIntent, compat?: CompatSuggestion, input?: InputModalities, defaultEffort?: DefaultEffortIntent, imageGen?: ImageGenIntent): void;
 }

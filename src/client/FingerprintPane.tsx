@@ -60,6 +60,12 @@ function clock(ms: number): string {
   return new Date(ms).toLocaleString()
 }
 
+/** 毫秒 → 一位小数的秒；没有就给占位符。 */
+function seconds(ms: number | undefined): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—'
+  return (Math.round(ms / 100) / 10).toFixed(1)
+}
+
 /** 一家供应商的指纹检测面板。 */
 export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPaneProps): ReactNode {
   // 新增供应商卡片整个不出现（m00883）。判定放在这里而不是只放在页签可用性
@@ -71,6 +77,20 @@ export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPanePro
   const [loadError, setLoadError] = useState<string | undefined>(undefined)
   /** 运输层失败：没有记录可看，只能把原因说出来。 */
   const [runError, setRunError] = useState<{ model: string; error: string } | undefined>(undefined)
+  /**
+   * 每行结果卡的折叠状态（用户需求 2：检测结果需要可以折叠）。默认全部展开
+   * —— 行数少时信息一屏可读，行为与旧版一致；用户逐行收起是显式动作。折叠
+   * 的只是结果卡：行头的徽章、证据行与检测按钮始终在场。
+   */
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
+  const toggleRow = useCallback((model: string): void => {
+    setCollapsed((current) => {
+      const next = new Set(current)
+      if (next.has(model)) next.delete(model)
+      else next.add(model)
+      return next
+    })
+  }, [])
 
   const runner = useMemo(() => (create ? undefined : fingerprintRunner(route)), [create, route])
   const runnerState = useSyncExternalStore(
@@ -196,7 +216,7 @@ export function FingerprintPane({ route, api, t, ctx, host }: FingerprintPanePro
     createElement(
       'div',
       { className: 'bre-fp-rows' },
-      ...rows.map((row) => renderRow(row, { t, runner, runnerState, records, route })),
+      ...rows.map((row) => renderRow(row, { t, runner, runnerState, records, route, collapsed, onToggle: toggleRow })),
     ),
   )
 }
@@ -207,15 +227,41 @@ interface RowDeps {
   runnerState: FingerprintRunnerState
   records: ReadonlyMap<string, FingerprintRecord>
   route: string
+  /** The models whose result card is folded away. */
+  collapsed: ReadonlySet<string>
+  /** Fold or unfold one model's result card. */
+  onToggle: (model: string) => void
+}
+
+/** The disclosure chevron of a result card, on the row head's 12px grid. */
+function chevron(open: boolean): ReactNode {
+  return createElement(
+    'svg',
+    {
+      className: 'bre-fp-chev' + (open ? ' is-open' : ''),
+      viewBox: '0 0 16 16',
+      width: 12,
+      height: 12,
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 1.5,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      'aria-hidden': true,
+      focusable: false,
+    },
+    createElement('path', { d: open ? 'M4.5 6.5 8 10 11.5 6.5' : 'M6.5 4.5 10 8 6.5 11.5' }),
+  )
 }
 
 function renderRow(row: Row, deps: RowDeps): ReactNode {
-  const { t, runner, runnerState, records } = deps
+  const { t, runner, runnerState, records, collapsed, onToggle } = deps
   const record = records.get(row.model)
   const done = runnerState.running.get(row.model)
   const position = runnerState.queued.indexOf(row.model)
   const running = done !== undefined
   const queued = position >= 0
+  const open = !collapsed.has(row.model)
 
   const badge = running
     ? { className: 'is-running', text: t('fpStateRunning', { done, total: FULL_RUN_QUERIES }) }
@@ -242,11 +288,26 @@ function renderRow(row: Row, deps: RowDeps): ReactNode {
 
   return createElement(
     'div',
-    { className: 'bre-fp-row', key: row.model },
+    { className: 'bre-fp-row', key: row.model, 'data-bre-fp-open': open ? '1' : undefined },
     createElement(
       'div',
       { className: 'bre-fp-row-head' },
-      createElement('span', { className: 'bre-fp-model' }, row.model),
+      // The fold control: the chevron carries the state, and the whole toggle
+      // (chevron + model id) is one button — a bigger target than the 12px
+      // glyph alone, and the row's keyboard path to its own result card.
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'bre-fp-fold',
+          'aria-expanded': open,
+          'aria-label': (open ? t('fpDetailHide') : t('fpDetailShow')) + ' ' + row.model,
+          title: open ? t('fpDetailHide') : t('fpDetailShow'),
+          onClick: (): void => { onToggle(row.model) },
+        },
+        chevron(open),
+        createElement('span', { className: 'bre-fp-model' }, row.model),
+      ),
       createElement('span', { className: `bre-fp-badge ${badge.className}` }, badge.text),
       createElement('span', { className: 'grow' }),
       createElement(
@@ -273,17 +334,20 @@ function renderRow(row: Row, deps: RowDeps): ReactNode {
         t(action),
       ),
     ),
-    record !== undefined && record.status !== 'failed'
-      ? renderResult(record, t)
-      : record !== undefined && record.error !== undefined
-        ? createElement('div', { className: 'bre-fp-body' }, createElement('p', { className: 'bre-fp-error' }, record.error))
-        : null,
+    !open || record === undefined
+      ? null
+      : record.status !== 'failed'
+        ? renderResult(record, t)
+        : record.error !== undefined
+          ? createElement('div', { className: 'bre-fp-body' }, createElement('p', { className: 'bre-fp-error' }, record.error))
+          : null,
   )
 }
 
-/** 结果卡：家族占比、前三候选、闭集告警。 */
+/** 结果卡：家族占比、前三候选、耗时画像、闭集告警。 */
 function renderResult(record: FingerprintRecord, t: Translate): ReactNode {
   const top = record.top ?? []
+  const timing = record.timing
   return createElement(
     'div',
     { className: 'bre-fp-body' },
@@ -299,6 +363,14 @@ function renderResult(record: FingerprintRecord, t: Translate): ReactNode {
       createElement('span', { className: 'grow' }),
       createElement('span', { className: 'bre-fp-k' }, t('fpCheckedAt', { time: clock(record.checkedAt) })),
     ),
+    timing !== undefined
+      ? createElement('p', { className: 'bre-fp-timing' },
+          t('fpTiming', {
+            first: seconds(timing.firstTokenMs),
+            total: seconds(timing.durationMs),
+            rate: timing.charsPerSecond === undefined ? '—' : String(Math.round(timing.charsPerSecond)),
+          }))
+      : null,
     createElement('div', { className: 'bre-fp-k', style: { marginTop: '8px' } }, t('fpCandidates')),
     createElement(
       'div',

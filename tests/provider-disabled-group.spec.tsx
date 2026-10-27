@@ -48,6 +48,7 @@ const LABELS: HostLabels = {
   inputImage: ['Image'],
   contextWindow: ['Context window'],
   maxOutput: ['Max output'],
+  addModel: ['Add model', '添加模型'],
 }
 
 /** The group's dependencies with a translator that echoes key and count. */

@@ -318,9 +318,11 @@ describe('the key list contract with the stylesheet', () => {
     expect(STYLES).not.toContain('.bre-keys-actions.is-end')
   })
 
-  it('offers a discover control for automatic model binding', () => {
-    expect(STYLES).toContain('.bre-keys-footer {')
-    expect(STYLES).toContain('.bre-keys-discover {')
+  it('keeps the footer but no discover control — binding comes from the chips', () => {
+    // The 探测模型 button was retired (the composer reads the merged catalogue
+    // through 获取模型 instead); its style must not linger behind a dead name.
+    expect(STYLES).toContain('.bre-keys-footer { display: flex; justify-content: flex-end; }')
+    expect(STYLES).not.toContain('.bre-keys-discover')
   })
 
   it('hands the field’s input to the list while the list manages the field', () => {

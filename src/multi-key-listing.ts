@@ -25,8 +25,8 @@
  * key's extras appended, scattering one letter across both ends.
  *
  * Probing is the caller's job: {@link collectKeyListings} only bounds how many
- * probes run at once and merges what comes back, so the panel, the `discover`
- * operation and the fetch overlay all share one merge.
+ * probes run at once and merges what comes back, so the fetch overlay and every
+ * other catalogue reader share one merge.
  *
  * @module dsh-model-think-level/multi-key-listing
  */
@@ -145,7 +145,7 @@ export function mergeKeyListings(
 export interface CollectKeyListingsOptions<Key> {
   /** The keys to ask, in the order the catalogue should read. */
   readonly keys: readonly Key[]
-  /** Ask one key for its listing (typically `probeKeyModels`). */
+  /** Ask one key for its listing (the overlay's per-key probe). */
   readonly probe: (key: Key) => Promise<KeyProbeResult>
   /**
    * The ref a key is known by. When given, a probe that THROWS is recorded as
@@ -191,7 +191,7 @@ export async function collectKeyListings<Key>(
         // recording it that way (rather than dropping the key) is what lets the
         // merge keep the models the key was last seen serving.
         const ref = options.refOf?.(key)
-        if (ref !== undefined) results[index] = { ref, models: undefined, targets: [] }
+        if (ref !== undefined) results[index] = { ref, models: undefined }
       }
     }
   }
