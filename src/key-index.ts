@@ -172,7 +172,14 @@ export function readKeyIndex(file: string = keyIndexFilePath()): KeyIndexDocumen
     }
     throw error
   }
-  const raw: unknown = JSON.parse(text)
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    // The raw SyntaxError names neither the file nor the repair; every caller
+    // surfaces this message verbatim, so it carries the essentials itself.
+    throw new Error('the key index is malformed; repair it before changing keys')
+  }
   const record = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
     ? raw as Record<string, unknown> : undefined
   const providers = record?.['providers']

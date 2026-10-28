@@ -64,10 +64,28 @@ describe('buildAutofillPatch', () => {
 
   it('adds a compat block for openai-completions suggestions', () => {
     const patch = buildAutofillPatch({
-      route: { api: 'openai-completions', models: [{ id: 'mystery' }] },
+      route: { api: 'openai-completions', models: [{ id: 'deepseek-chat' }] },
     })
     const models = (patch!.providers as Record<string, { models: Record<string, unknown>[] }>).route.models
-    expect(models[0]['compat']).toEqual({ thinkingFormat: 'openai', supportsReasoningEffort: true })
+    expect(models[0]['compat']).toEqual({ thinkingFormat: 'deepseek', supportsReasoningEffort: true })
+  })
+
+  it('never declares reasoning for a LOW-CONFIDENCE suggestion (P0-3)', () => {
+    // 'mystery' matches nothing: protocol inference is confident 'low', and a
+    // written ladder there is a false "this model reasons" claim (on a
+    // self-hosted endpoint it also ships reasoning_effort +
+    // thinking_token_budget to models like llama/phi that never asked).
+    const patch = buildAutofillPatch({
+      route: { api: 'openai-completions', baseURL: 'http://localhost:8000/v1', models: [{ id: 'mystery' }] },
+    })
+    expect(patch).toBeUndefined()
+    // The modality half keeps filling for a name the heuristic knows, even
+    // when the reasoning half is withheld (orthogonal signals).
+    const visionish = buildAutofillPatch({
+      route: { api: 'openai-completions', models: [{ id: 'my-model-vl' }] },
+    })
+    const row = (visionish?.providers as Record<string, { models: Array<Record<string, unknown>> }>)?.route?.models?.[0]
+    expect(row?.['reasoningEfforts']).toBeUndefined()
   })
 
   it('withholds compat on protocols whose gate does not take it', () => {
@@ -150,7 +168,7 @@ describe('buildAutofillPatch', () => {
       route: {
         models: [
           { id: 'a', reasoningEffortsUnset: true },
-          { id: 'b' },
+          { id: 'deepseek-chat' },
         ],
       },
     }

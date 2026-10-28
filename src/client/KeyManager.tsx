@@ -286,6 +286,17 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     [t],
   )
 
+  /**
+   * The route this mounted panel currently serves, readable from async
+   * continuations. A mutation fired on route A can outlive the user switching
+   * the panel to route B; adopting A's answer then would paint A's key list
+   * (and its refs) onto B, and the NEXT click would edit the wrong row.
+   */
+  const liveRouteRef = useRef(route)
+  useEffect(() => {
+    liveRouteRef.current = route
+  }, [route])
+
   useEffect(() => {
     let live = true
     void (async () => {
@@ -340,10 +351,14 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   const run = useCallback(
     async (action: () => Promise<KeyAnswer>, okText: string | undefined): Promise<void> => {
       const held = editing
+      const atRoute = route
       setBusy(true)
       setConfirming(undefined)
       try {
         const answer = await action()
+        // The panel moved to another route while this mutation flew: its
+        // answer belongs to a list that is no longer on screen.
+        if (liveRouteRef.current !== atRoute) return
         adopt(answer, okText)
         if (answer.ok && held !== undefined && held.kind !== 'add'
           && !answer.entries.some(entry => entry.ref === held.ref)) {
@@ -353,7 +368,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
         setBusy(false)
       }
     },
-    [adopt, editing],
+    [adopt, editing, route],
   )
 
   const openForm = (kind: 'alias' | 'value' | 'scope', row: KeyRow): void => {
@@ -384,6 +399,8 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     // Captured before the await: the form may be re-rendered (or cleared) while
     // the create is in flight, and the pin must ride the protocol the user saw.
     const pinnedProtocol = protocolDraft
+    const atRoute = route
+    const abandoned = (): boolean => liveRouteRef.current !== atRoute
     setBusy(true)
     void (async () => {
       try {
@@ -392,6 +409,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
           // the new row is the one this list did not already hold.
           const before = new Set((rows ?? []).map(row => row.ref))
           const answer = await client.add(route, valueDraft, alias)
+          if (abandoned()) return
           if (!answer.ok) {
             adopt(answer, t('keysAdded'))
             return
@@ -407,20 +425,24 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
           const pinned: KeyAnswer = created === undefined
             ? { ok: false }
             : await client.setProtocol(route, created.ref, pinnedProtocol)
-          adopt(pinned, t('keysAdded'))
+          if (!abandoned()) adopt(pinned, t('keysAdded'))
           return
         }
         if (ref === undefined) return
         if (kind === 'scope') {
           const answer = await client.setScope(route, ref, scopeDraft.length === 0 ? undefined : scopeDraft)
-          adopt(answer, t('keysScopeSaved'))
-          if (answer.ok) closeForm()
+          if (!abandoned()) {
+            adopt(answer, t('keysScopeSaved'))
+            if (answer.ok) closeForm()
+          }
           return
         }
         const answer =
           kind === 'alias' ? await client.rename(route, ref, alias) : await client.replace(route, ref, valueDraft)
-        adopt(answer, kind === 'alias' ? t('keysRenamed') : t('keysReplaced'))
-        if (answer.ok) closeForm()
+        if (!abandoned()) {
+          adopt(answer, kind === 'alias' ? t('keysRenamed') : t('keysReplaced'))
+          if (answer.ok) closeForm()
+        }
       } finally {
         setBusy(false)
       }

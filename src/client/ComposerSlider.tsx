@@ -21,21 +21,17 @@
  *
  * @module dsh-model-think-level/client/ComposerSlider
  */
-import {
-  createElement,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from 'react'
+import { createElement, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
+import {
+  EMPTY_CONFIGURED_INPUTS,
+  type ConfiguredInputs,
+  type ModelFacts,
+} from './configured-inputs.js'
 import { inferModalitiesFromName, matchKnowledgeBase } from '../knowledge.js'
-import { selectRefusalMessage } from './effort-memory.js'
 import { capacityShort } from './capacity.js'
-import { EMPTY_CONFIGURED_INPUTS, type ConfiguredInputs, type ModelFacts } from './configured-inputs.js'
+import { selectRefusalMessage } from './effort-memory.js'
 import {
   disabledProviders,
   subscribeDisabledProviders,
@@ -152,10 +148,31 @@ interface TruncatedTipState {
 }
 
 /**
+ * Whether the anchor can still host a bubble. A row that was unmounted, hidden
+ * or collapsed reports an all-zero rect, and the viewport clamp would then pin
+ * the bubble to the top-left corner of the window — the stray bar users see.
+ * The bubble must therefore never be drawn for an anchor that fails this.
+ */
+function tipAnchorUsable(target: HTMLElement): boolean {
+  if (typeof document === 'undefined' || !target.isConnected) return false
+  // display:none and detached nodes lay out no client rects at all.
+  if (target.getClientRects().length === 0) return false
+  const box = target.getBoundingClientRect()
+  return box.width > 0 || box.height > 0
+}
+
+/**
  * The tip is only for spans that ACTUALLY truncate: the check is
  * `scrollWidth > clientWidth` on enter, so a short provider or model name never
  * pops a bubble. Positioning happens at show time, under the span, aligned to
  * its right edge — the truncated end — and clamped to the viewport.
+ *
+ * The bubble is owned by this hook, not by the row: the row can vanish while
+ * the pointer still sits on it (menu closed by a click elsewhere, provider
+ * switched, list re-rendered), and then the row's own `mouseleave` never fires.
+ * So the state is also dropped by every gesture that can close the menu, by a
+ * document watcher for anchors that disappear without a gesture, and by the
+ * unmount itself.
  */
 function useTruncatedTip(): {
   tip: TruncatedTipState | null
@@ -165,7 +182,6 @@ function useTruncatedTip(): {
 } {
   const [tip, setTip] = useState<TruncatedTipState | null>(null)
   const timerRef = useRef<number>(0)
-  useEffect(() => () => { window.clearTimeout(timerRef.current) }, [])
   const onLeave = useCallback((): void => {
     window.clearTimeout(timerRef.current)
     setTip(null)
@@ -176,9 +192,51 @@ function useTruncatedTip(): {
     // Truncation check first: nothing to show for a name that fits.
     if (target.scrollWidth <= target.clientWidth + 1) return
     timerRef.current = window.setTimeout(() => {
+      // The anchor can die during the dwell; a bubble opened for it would sit
+      // in the corner with nothing to be about.
+      if (!tipAnchorUsable(target)) return
+      if (target.scrollWidth <= target.clientWidth + 1) return
       setTip({ target, text })
     }, 300)
   }, [])
+  // Unmounting clears the timer and whatever the bubble was showing: the portal
+  // goes with the tree, but the state must not outlive the anchor either.
+  useEffect(() => () => {
+    window.clearTimeout(timerRef.current)
+    setTip(null)
+  }, [])
+  // While a bubble is up, retire it as soon as its anchor stops being a valid
+  // place to sit: a gesture that dismisses the menu, or the anchor's own
+  // removal/restyle by a re-render. Both cases used to leave it behind.
+  useEffect(() => {
+    if (tip === null) return
+    const anchor = tip.target
+    const drop = (): void => { setTip(null) }
+    window.addEventListener('pointerdown', drop, true)
+    window.addEventListener('keydown', drop, true)
+    window.addEventListener('scroll', drop, true)
+    window.addEventListener('wheel', drop, { capture: true, passive: true })
+    window.addEventListener('resize', drop)
+    const observer = typeof MutationObserver === 'undefined'
+      ? null
+      : new MutationObserver(() => {
+        if (!tipAnchorUsable(anchor)) drop()
+      })
+    observer?.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'hidden'],
+    })
+    return () => {
+      window.removeEventListener('pointerdown', drop, true)
+      window.removeEventListener('keydown', drop, true)
+      window.removeEventListener('scroll', drop, true)
+      window.removeEventListener('wheel', drop, true)
+      window.removeEventListener('resize', drop)
+      observer?.disconnect()
+    }
+  }, [tip])
   return { tip, onEnter, onLeave }
 }
 
@@ -210,7 +268,13 @@ type KeyboardEventLike = { key: string; preventDefault: () => void }
  */
 function TruncatedTip({ state }: { state: TruncatedTipState }): ReactNode {
   if (typeof document === 'undefined') return null
-  const box = state.target.getBoundingClientRect()
+  const target = state.target
+  // Last line of defence: an anchor that is gone, hidden or collapsed has no
+  // rect to sit under, and clamping a zero rect parks the bubble off the
+  // top-left corner of the window. Draw nothing rather than draw it there.
+  if (!tipAnchorUsable(target)) return null
+  const box = target.getBoundingClientRect()
+  if (box.top > window.innerHeight || box.bottom < 0) return null
   const left = Math.max(12, Math.min(box.right, window.innerWidth - 12))
   return createPortal(
     createElement(
@@ -374,7 +438,8 @@ export function effortRampColor(t: number): string {
 /**
  * The capability badges of one model, or null when it declares none: the eye
  * for image input, the sparkle for a declared ladder, the frame-with-sparkle
- * for a 生图 generator.
+ * for a 生图 generator. Exported for the order regression (视觉 → 思考 → 生图)
+ * the image-generation design pins.
  */
 export function modelTags(
   model: ModelChoiceLike,
@@ -961,7 +1026,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
       ? [createElement(
         'div',
         { key: 'no-models', className: 'bre-empty' },
-        searching ? t('modelSearchNoMatches') : t('sliderNoCurrent'),
+        searching ? t('modelSearchNoMatches') : emptyCopy,
       )]
       : shownModels.map(({ provider, choice }) => {
         const key = provider + '/' + choice.id

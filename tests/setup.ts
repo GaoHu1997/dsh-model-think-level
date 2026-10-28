@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { beforeEach } from 'vitest'
 
 import { resetWireMemories } from '../src/headers-pi-ai.js'
@@ -16,6 +19,17 @@ import { keyRest, resetRoutePlans } from '../src/key-route-core.js'
  */
 if (typeof HTMLCanvasElement !== 'undefined') {
   HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext
+}
+
+/**
+ * The harness home defaults to the REAL `~/.dsh` when `DSH_HOME` is unset, and
+ * the host's apply() now also syncs the image-generation config file there at
+ * boot. A test run must never write into the user's own harness home, so an
+ * unset DSH_HOME is pointed at a per-process temp dir first. Suites that need
+ * a specific home (host.spec, key-index tests) set or pass their own paths.
+ */
+if (typeof process !== 'undefined' && !process.env['DSH_HOME']) {
+  process.env['DSH_HOME'] = mkdtempSync(join(tmpdir(), 'bre-test-home-'))
 }
 
 /**

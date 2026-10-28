@@ -83,6 +83,10 @@ import { createSessionDirectoryTracker } from './injection/session-directory.js'
 import { modelMenuOf, modelTriggerOf } from './injection/model-menu.js'
 import { registerProviderCardSlot } from './injection/provider-card-slot.js'
 import { registerSliderToggleSlot } from './injection/slider-toggle-slot.js'
+// Image generation (生图): the Models-page title-row button opens the config
+// pane; the `/生图` completion source rides the host input-trigger pipeline.
+import { mountConfigPane } from './ConfigPane.tsx'
+import { registerImagegenCompletion, invalidateImagegenModels } from './injection/imagegen-entry.js'
 
 /** Stable plugin id, matching the cordis.patch.yml row and the bundle id. */
 export const name = PLUGIN_ID
@@ -197,8 +201,18 @@ export function apply(ctx: ClientContext): void {
   // The running auto-fill complement (issue #7): the host fills once at boot,
   // everything a session adds afterwards is filled on the idle pass.
   const autofill = createIdleAutofill({ api: settingsApi })
+  // The config pane is mounted at most once at a time: reopening replaces the
+  // one that is up (the Models-page button can be clicked twice fast).
+  let configPane: { close(): void } | undefined
   const modelsPage = createModelsPage({
     ctx, api: settingsApi, t, onIdle: autofill.run, refreshed,
+    configSeat: {
+      t,
+      onOpen: () => {
+        configPane?.close()
+        configPane = mountConfigPane({ api: settingsApi, t })
+      },
+    },
   })
 
   /**
@@ -223,6 +237,10 @@ export function apply(ctx: ClientContext): void {
       // Restore every wrapped directory's original select (the instances
       // outlive the fiber on disable/HMR and must submit officially again).
       sessionDirectory.dispose()
+      // The config pane is a foreign root too: a dead fiber must not leave a
+      // live panel writing through a stale api face.
+      configPane?.close()
+      configPane = undefined
     }
   }, 'dsh-model-think-level: DOM injector')
 
@@ -258,6 +276,9 @@ export function apply(ctx: ClientContext): void {
       configuredEfforts.invalidate()
       configuredInputs.invalidate()
       autofill.invalidate()
+      // The `/生图` completion's cached model list too: the host re-derives
+      // image.json on this same event, so the cache would answer stale rows.
+      invalidateImagegenModels()
       modelsPage.schedule()
     }
     // A pushed invalidation is not a command to refresh once per event; see
@@ -289,7 +310,7 @@ export function apply(ctx: ClientContext): void {
         syncDisabledProviders(parseDisabledProviders(event.newValue))
       }
       else if (event.key === MODEL_ORDER_KEY) syncModelOrders(parseModelOrders(event.newValue))
-    }
+      }
     window.addEventListener('storage', onStorage)
     const dispose = subscribeSliderEnabled(() => { modelsPage.schedule() })
     const disposeOrder = subscribeProviderOrder(() => { modelsPage.schedule() })
@@ -316,6 +337,10 @@ export function apply(ctx: ClientContext): void {
     () => registerProviderCardSlot(ctx, settingsApi, t),
     'dsh-model-think-level: provider-card slot activation',
   )
+
+  // The `/生图` completion source: model-level candidates after the command
+  // word, registered only when the host exposes the input-trigger service.
+  ctx.effect(() => registerImagegenCompletion(ctx), 'dsh-model-think-level: imagegen completion source')
 }
 
 export type { BreKey }

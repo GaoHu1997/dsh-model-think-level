@@ -83,6 +83,7 @@ import {
   listingEntries,
   probeListingUrl,
   readBounded,
+  redactUrlSecrets,
   type ListedModel,
 } from './listing.js'
 import { buildHeaderIndex, emptyIndex, type UserAgentIndex } from './headers-core.js'
@@ -125,6 +126,7 @@ import {
   withRecord,
   withoutRecord,
   type FingerprintRecord,
+  type FingerprintChallenge,
   type FingerprintTiming,
 } from './fingerprint/store.js'
 import { statusOf, topEntriesOf, EARLY_IDENTIFIED_PROBABILITY } from './fingerprint/verdict.js'
@@ -194,6 +196,44 @@ function fingerprintTimingOf(outcomes: readonly ProbeOutcome[]): FingerprintTimi
     ...(firstTokenMs > 0 ? { firstTokenMs } : {}),
     ...(generatingMs > 0 ? { charsPerSecond: characters / (generatingMs / 1000) } : {}),
   }
+}
+
+/**
+ * Fold each challenge's outcome into the per-question ledger the result card
+ * draws as pills: how many integers this one asked for, how many came back,
+ * and whether that counted. The accepted flag is NOT recomputed here — it is
+ * read from the attribution's own diagnostics when there is one, so the pill
+ * and the verdict can never disagree about which answers were pooled. Only the
+ * floor rule is duplicated, and only for the no-attribution case (every call
+ * died), where there is nothing to read.
+ *
+ * `diagnostics` is indexed by position in `run.outputs`, which holds ONLY the
+ * challenges that answered — so a dead challenge shifts every later entry by
+ * one. The running `pooled` counter is what keeps a pill from borrowing its
+ * neighbour's number.
+ *
+ * `skipped` marks the challenge an early exit aborted: it never answered, and
+ * calling that "未计入" would send the user chasing a failure that did not
+ * happen. Statistics only — no answer text (design §4.2).
+ */
+function fingerprintChallengesOf(
+  outcomes: readonly ProbeOutcome[],
+  attribution: AttributionResult | null,
+): FingerprintChallenge[] {
+  const diagnostics = attribution?.diagnostics
+  let pooled = -1
+  return outcomes.map((outcome, position) => {
+    if (outcome.ok) pooled += 1
+    const diagnostic = outcome.ok ? diagnostics?.[pooled] : undefined
+    const parsed = diagnostic?.parsed_numbers ?? 0
+    return {
+      index: position + 1,
+      expected: outcome.expectedCount,
+      parsed,
+      accepted: diagnostic?.accepted ?? false,
+      ...(outcome.skipped === true ? { skipped: true } : {}),
+    }
+  })
 }
 
 /**
@@ -678,6 +718,23 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body))
 }
 
+/** What a masked credential header value reads as in diagnostics responses. */
+const SENSITIVE_HEADER_MASK = '[stored, not echoed]'
+
+/** Whether a header name is credential-shaped (auth keys, tokens, cookies). */
+function sensitiveHeader(name: string): boolean {
+  return /authorization|api-?key|token|secret|cookie|session/i.test(name)
+}
+
+/** Copy a headers dict with credential-shaped values masked. */
+function maskSensitiveHeaders(headers: Record<string, string>): Record<string, string> {
+  const masked: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers)) {
+    masked[name] = sensitiveHeader(name) ? SENSITIVE_HEADER_MASK : value
+  }
+  return masked
+}
+
 /**
  * The llm-service surface the default-guard wraps: only the two dispatch
  * entries, typed structurally so no new dependency is needed.
@@ -968,9 +1025,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   const refreshKeyScopes = (): void => { keyScopes.current = readRouteKeyScopes(providersOf()) }
   // Names and declared model edits do not change the upstream catalogue. A
   // Save followed by adapter refresh can reuse it without remote detection.
-  const catalogueSource = (): string => JSON.stringify(Object.entries(providersOf()).map(([route, profile]) => [
-    route, profile['api'], profile['baseURL'], profile['apiKeyEnv'], profile['headers'],
-  ]).sort(([a], [b]) => String(a).localeCompare(String(b))))
+  // A half-written document can park `null` on a provider slot; skipped here,
+  // or the boot read would throw before the routes even register.
+  const catalogueSource = (): string => JSON.stringify(Object.entries(providersOf())
+    .filter(([, profile]) => isRecord(profile))
+    .map(([route, profile]) => [
+      route, profile['api'], profile['baseURL'], profile['apiKeyEnv'], profile['headers'],
+    ]).sort(([a], [b]) => String(a).localeCompare(String(b))))
   let catalogueSourceStamp = catalogueSource()
   const invalidateListings = (): void => {
     probeRouteCache.clear()
@@ -1495,9 +1556,13 @@ export function apply(ctx: Context, config: Config = {}): void {
               probeRouteCache.set(listingKey, { at: Date.now(), data: entries })
               sendJson(res, 200, { ok: true, url: displayUrl(listingURL), data: entries })
             } catch (error) {
+              // undici's own failure texts quote the original URL verbatim
+              // ("Request cannot be constructed from a URL that includes
+              // credentials: http://user:sekrit@…") — the message loses its
+              // secrets before it reaches the response body.
               sendJson(res, 502, {
                 ok: false,
-                error: `could not reach ${displayUrl(listingURL)}: ${error instanceof Error ? error.message : String(error)}`,
+                error: `could not reach ${displayUrl(listingURL)}: ${redactUrlSecrets(error instanceof Error ? error.message : String(error))}`,
               })
             }
           },
@@ -1516,6 +1581,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           handler: (req, res) => {
             if (!isTrustedRequest(req)) {
               sendJson(res, 403, { ok: false, error: 'forbidden' })
+              return
+            }
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
               return
             }
             sendJson(res, 200, {
@@ -1910,7 +1979,13 @@ export function apply(ctx: Context, config: Config = {}): void {
               } else if (op === 'scope') {
                 // Store the manual assignment from the provider's added models.
                 // Omission clears it to catch-all; [] is an explicit empty
-                // assignment.
+                // assignment. Anything else that is not an array — a comma
+                // string above all — is refused: silently widening a narrowed
+                // key to catch-all is the one direction a typo must not go.
+                if (isRecord(body) && body['models'] !== undefined && !Array.isArray(body['models'])) {
+                  refuse('model assignments must be an array of model ids')
+                  return
+                }
                 const document = readKeyIndex(indexFile)
                 const known = ref !== undefined && (hasKeyEntry(document, route, ref) || ref === enabledNow())
                 if (ref === undefined || !known) {
@@ -2186,6 +2261,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           kind: 'exact',
           path: HEADERS_CONFIG_PATH,
           handler: async (req, res) => {
+            // The override map can carry credential headers the user configured
+            // for a gateway (an `authorization`, an `x-api-key`); nothing this
+            // answers may sit in a cache, and those values must not echo.
+            res.setHeader('cache-control', 'no-store')
             if (!isTrustedRequest(req)) {
               sendJson(res, 403, { ok: false, error: 'forbidden' })
               return
@@ -2202,17 +2281,26 @@ export function apply(ctx: Context, config: Config = {}): void {
                 enabled: resolved.uaOverride,
                 /** Whether this plugin's wrapper currently owns the global fetch. */
                 installed: headerOverlayInstalled(),
-                /** Routes whose configured request headers are sent, by origin. */
+                /** Routes whose configured request headers are sent, by origin.
+                 *  Credential-shaped values are masked: this is a status report,
+                 *  not the editor's data source (the editor reads the settings
+                 *  document through its own face), so no consumer needs them. */
                 overrides: index.overrides.map(entry => ({
                   origin: entry.origin,
                   route: entry.route,
-                  headers: entry.headers,
+                  headers: maskSensitiveHeaders(entry.headers),
                   ...(entry.userAgent === undefined ? {} : { userAgent: entry.userAgent }),
                 })),
                 /** Same-origin routes with different User-Agent values. */
                 conflicts: index.conflicts,
-                /** Same-origin differences for any configured request header. */
-                headerConflicts: index.headerConflicts,
+                /** Same-origin differences for any configured request header,
+                 *  with credential-shaped values masked the same way. */
+                headerConflicts: index.headerConflicts.map(conflict => ({
+                  ...conflict,
+                  values: sensitiveHeader(conflict.header)
+                    ? conflict.values.map(() => SENSITIVE_HEADER_MASK)
+                    : conflict.values,
+                })),
                 /** What was found of the plugins that rewrite the same surface. */
                 environment: environmentConflicts,
               },
@@ -2243,6 +2331,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           kind: 'exact',
           path: FINGERPRINT_PATH,
           handler: async (req, res) => {
+            // Verdicts are per-model state the page re-reads: nothing this
+            // route answers belongs in a cache (the NDJSON POST branch used to
+            // set this only for itself; GET/DELETE were cacheable).
+            res.setHeader('cache-control', 'no-store')
             if (!isTrustedRequest(req)) {
               sendJson(res, 403, { ok: false, error: 'forbidden' })
               return
@@ -2431,6 +2523,10 @@ export function apply(ctx: Context, config: Config = {}): void {
                 checkedAt: Date.now(),
                 usedOutputs,
               }
+              // 逐题记账在两种结局下都写：三题全废时，「是哪一题没答、答回来
+              // 多少」正是用户接着要问的那句。它记的是尝试，不是结论，所以不
+              // 跟着 failed 清空。
+              record.challenges = fingerprintChallengesOf(run.outcomes, attribution)
               if (attribution === null) {
                 const firstFailure = run.outcomes.find(outcome => !outcome.ok)
                 record.error =

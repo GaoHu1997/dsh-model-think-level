@@ -31,6 +31,29 @@ export interface FingerprintTopEntry {
 }
 
 /**
+ * 结果卡「逐题」那一行里的一颗药丸：一道题问了多少、答回来多少、算不算数。
+ *
+ * 为什么落盘：`usedOutputs` 只说「三题里算了几题」，说不出是哪一题不算 ——
+ * 而「为什么只回答了部分题目」正是用户看着 `2 / 3 题` 想问的那句话。逐题的
+ * 期望数与解析数都是统计量，不涉及作答文本（design §4.2）。
+ */
+export interface FingerprintChallenge {
+  /** 题号，从 1 开始，与题干发出顺序一致。 */
+  index: number
+  /** 这道题要求几个整数（292–332）。 */
+  expected: number
+  /** 解析出来的整数个数；拒答、报错、被掐断都是 0。 */
+  parsed: number
+  /** 是否达到了计入门槛（`max(80, ceil(expected * 0.55))`）。 */
+  accepted: boolean
+  /**
+   * 两题早停时被主动掐掉的那道题。它没答不是因为答坏了 —— 药丸上要说的
+   * 是「早停跳过」，不是「未计入」，否则用户会去追一个不存在的失败。
+   */
+  skipped?: boolean
+}
+
+/**
  * 一个模型的一次检测结论，也是落盘的那一行。
  *
  * 这个形状放在这里而不是 store 里，是因为**前端画徽章要用它**：store 是
@@ -50,6 +73,8 @@ export interface FingerprintRecord {
   familyPrediction?: string
   familyProbability?: number
   top?: FingerprintTopEntry[]
+  /** 逐题记账：哪几题算进去了、哪题没算。旧记录没有这个字段。 */
+  challenges?: FingerprintChallenge[]
   calibration?: { queries: number; cvAccuracy: number }
   /** 本次检测的耗时画像，检测失败时没有意义，不落盘。 */
   timing?: FingerprintTiming

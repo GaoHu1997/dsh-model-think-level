@@ -143,6 +143,76 @@ describe('parseFingerprintStore', () => {
     expect(document.records['m\u0000empty'].timing).toBeUndefined()
   })
 
+  it('round-trips the per-challenge ledger, even on a failed verdict', () => {
+    // 逐题账本记的是「尝试」而不是「结论」：三题全废时它照样留下来，否则用户
+    // 看着 failed 无从知道是哪一题没答、答回来多少。
+    const ledger = [
+      { index: 1, expected: 312, parsed: 312, accepted: true },
+      { index: 2, expected: 332, parsed: 121, accepted: false },
+      { index: 3, expected: 315, parsed: 0, accepted: false, skipped: true },
+    ]
+    const document = parseFingerprintStore(
+      {
+        version: 1,
+        bankBuiltAt: BANK,
+        records: {
+          'm\u0000kept': record({ challenges: ledger }),
+          'm\u0000failed': record({
+            model: 'gpt-5.4',
+            status: 'failed',
+            error: 'no usable output',
+            challenges: ledger,
+          }),
+        },
+      },
+      BANK,
+    )
+    expect(document.records['m\u0000kept'].challenges).toEqual(ledger)
+    expect(document.records['m\u0000failed'].challenges).toEqual(ledger)
+    // 但结论类字段照旧被剥掉。
+    expect(document.records['m\u0000failed'].probability).toBeUndefined()
+  })
+
+  it('drops a malformed ledger instead of inventing questions', () => {
+    // 不是数组、空数组、整条读不懂 → 没有账本。编一个「0 / 0」比少一行更糟。
+    const document = parseFingerprintStore(
+      {
+        version: 1,
+        bankBuiltAt: BANK,
+        records: {
+          'm\u0000junk': record({ challenges: 'three' as unknown as FingerprintRecord['challenges'] }),
+          'm\u0000partial': record({
+            model: 'gpt-5.4',
+            challenges: [
+              'nope' as unknown as NonNullable<FingerprintRecord['challenges']>[number],
+              { index: 2, expected: -5, parsed: Number.NaN, accepted: 'yes' } as unknown as
+                NonNullable<FingerprintRecord['challenges']>[number],
+            ],
+          }),
+          'm\u0000empty': record({ model: 'claude-sonnet-5', challenges: [] }),
+          'm\u0000capped': record({
+            model: 'claude-opus-5',
+            challenges: Array.from({ length: 5 }, (_, position) => ({
+              index: position + 1,
+              expected: 300,
+              parsed: 300,
+              accepted: true,
+            })),
+          }),
+        },
+      },
+      BANK,
+    )
+    expect(document.records['m\u0000junk'].challenges).toBeUndefined()
+    expect(document.records['m\u0000empty'].challenges).toBeUndefined()
+    // 坏的那条被丢掉，能读的留下；负数与非有限数落到 0，accepted 只认 true。
+    expect(document.records['m\u0000partial'].challenges).toEqual([
+      { index: 2, expected: 0, parsed: 0, accepted: false },
+    ])
+    // 题目只有三道，多出来的账本行不认。
+    expect(document.records['m\u0000capped'].challenges).toHaveLength(3)
+  })
+
   it('strips the timing from a failed verdict alongside the attribution fields', () => {
     const document = parseFingerprintStore(
       {

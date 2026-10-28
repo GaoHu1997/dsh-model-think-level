@@ -110,12 +110,38 @@ export function isSendableUserAgent(value: string): boolean {
 }
 
 /**
+ * Header names that must never ride a configured overlay onto the wire. Node's
+ * `Headers` (unlike the browser) accepts these silently, and undici then fails
+ * the whole request — a configured `transfer-encoding` kills every request the
+ * route makes, and a mismatched `content-length` hangs it with no response and
+ * no error. Refusing them at configuration time turns "the route is down" into
+ * "the header is ignored".
+ */
+const WIRE_FORBIDDEN_HEADERS: ReadonlySet<string> = new Set([
+  'host',
+  'content-length',
+  'transfer-encoding',
+  'connection',
+  'te',
+  'trailer',
+  'upgrade',
+  'expect',
+  'keep-alive',
+  'proxy-connection',
+  'proxy-authenticate',
+  'proxy-authorization',
+])
+
+/**
  * Whether a configured name/value pair can ride a Fetch header. Fetch is the
  * authority for the exact token grammar, so this accepts arbitrary legal names
- * instead of maintaining a brittle allow-list.
+ * instead of maintaining a brittle allow-list — except the wire-forbidden set
+ * above, which `Headers.set()` (an editing API, not a wire validator) happily
+ * accepts and the wire then chokes on.
  */
 export function isSendableHeader(name: string, value: string): boolean {
   if (name.length === 0) return false
+  if (WIRE_FORBIDDEN_HEADERS.has(name.toLowerCase())) return false
   try {
     const headers = new Headers()
     headers.set(name, value)
@@ -243,7 +269,12 @@ export function buildHeaderIndex(
 ): HeaderIndex {
   const index = emptyIndex()
   const claimedUserAgents = new Map<string, { routes: string[]; values: string[] }>()
-  for (const [route, profile] of Object.entries(providers)) {
+  for (const [route, rawProfile] of Object.entries(providers)) {
+    // A half-written settings document can park `null` on a provider slot;
+    // one unguarded read here would throw through refreshHeaders into the
+    // host's settings write path. Skip the slot, keep the plugin alive.
+    if (!isRecord(rawProfile)) continue
+    const profile: Record<string, unknown> = rawProfile
     const baseURL = typeof profile['baseURL'] === 'string' ? profile['baseURL'] : undefined
     const origin = originOf(baseURL)
     if (origin === undefined) continue

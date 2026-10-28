@@ -64,6 +64,75 @@ import {
 /** Registry key on `globalThis`, so a second plugin load shares the one wrapper. */
 const REGISTRY = Symbol.for('dsh-model-think-level.fetch-overrides')
 
+/**
+ * Registry key for the DISPATCH hooks: the seam that can answer a request
+ * without sending it (the image-generation wire dispatch). Kept beside the
+ * header registry, but deliberately separate — a dispatch hook must run for
+ * every request regardless of which routes the header index matches, and its
+ * lifecycle is independent of header entries.
+ */
+const DISPATCH_REGISTRY = Symbol.for('dsh-model-think-level.dispatch-overrides')
+
+/** What a dispatch hook is told about the request it may claim. */
+export interface DispatchContext {
+  /** The request URL, as resolved by the wrapper. */
+  readonly url: string
+  /** The request method, uppercased (GET when neither side named one). */
+  readonly method: string
+  /**
+   * Lazily read the request body as text. Cached; a `Request` input is cloned
+   * (the caller's stream survives), an `init.body` string is taken directly,
+   * and any other shape yields undefined — the hook decides what "unreadable"
+   * means (the image dispatch lets those through rather than mis-claiming).
+   */
+  readonly bodyText: () => Promise<string | undefined>
+  /** The fetch beneath this wrapper, avoiding recursive interception. */
+  readonly send: typeof globalThis.fetch
+}
+
+/** A dispatch candidate: return a Response to fully claim the request (it is never sent); undefined passes it through. */
+export type DispatchHook = (context: DispatchContext) => Promise<Response | undefined>
+
+/** The process-wide dispatch hook list. */
+interface DispatchRegistry {
+  readonly hooks: DispatchHook[]
+}
+
+function dispatchRegistryOf(): DispatchRegistry {
+  const holder = globalThis as unknown as Record<symbol, DispatchRegistry | undefined>
+  let registry = holder[DISPATCH_REGISTRY]
+  if (registry === undefined) {
+    registry = { hooks: [] }
+    holder[DISPATCH_REGISTRY] = registry
+  }
+  return registry
+}
+
+/**
+ * Register one dispatch hook. Order is registration order; the FIRST hook to
+ * return a Response claims the request. @returns the remover (idempotent).
+ */
+export function registerDispatchHook(hook: DispatchHook): () => void {
+  const registry = dispatchRegistryOf()
+  registry.hooks.push(hook)
+  return () => {
+    const at = registry.hooks.indexOf(hook)
+    if (at !== -1) registry.hooks.splice(at, 1)
+  }
+}
+
+/** How many dispatch hooks are live (diagnostics; 0 = the seam costs nothing). */
+export function dispatchHookCount(): number {
+  return dispatchRegistryOf().hooks.length
+}
+
+/** The caller's request method, the way Fetch resolves it. */
+function methodOf(input: RequestInfo | URL, init: RequestInit | undefined): string {
+  if (init?.method !== undefined && init.method.length > 0) return init.method.toUpperCase()
+  if (typeof Request !== 'undefined' && input instanceof Request) return input.method.toUpperCase()
+  return 'GET'
+}
+
 /** What a key resolver is told about the request it must sign. */
 export interface KeyRouteContext {
   /** The provider route whose profile matched the request URL. */
@@ -238,6 +307,30 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
   return async function fetchWithProviderHeaders(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const url = requestUrlOf(input)
     if (url === undefined) return base(input, passthroughInit(input, init))
+    // The dispatch seam runs BEFORE any header matching: a hook that claims
+    // the request answers it without a send (the image-generation wire
+    // dispatch is the user), so a claimed request never reaches the route
+    // logic below. When no hook is registered this is one length check.
+    const hooks = dispatchRegistryOf().hooks
+    if (hooks.length > 0) {
+      const context: DispatchContext = {
+        url,
+        method: methodOf(input, init),
+        bodyText: () => bodyTextOf(input, init),
+        send: base,
+      }
+      for (const hook of hooks) {
+        let claimed: Response | undefined
+        try {
+          claimed = await hook(context)
+        } catch {
+          // A throwing hook must not take the request down: it simply does
+          // not claim anything.
+          claimed = undefined
+        }
+        if (claimed !== undefined) return claimed
+      }
+    }
     // The URL (origin + endpoint path) narrows the route. Only when it leaves
     // several candidates does the request body's `model` have to decide -- so a
     // single-route deployment keeps the zero-read, zero-allocation fast path.

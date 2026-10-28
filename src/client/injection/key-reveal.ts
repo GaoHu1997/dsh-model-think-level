@@ -272,6 +272,10 @@ function createEye(field: HTMLElement): HTMLButtonElement {
     const input = keyInputOf(field)
     const deps = DEPS.get(field)
     if (input === undefined || deps === undefined) return
+    // A fetch is already in flight for this eye: a second click would fire a
+    // second `provider-key` request and race the first. `aria-busy` is the
+    // in-flight marker this function itself sets and clears.
+    if (eye.hasAttribute('aria-busy')) return
     if (input.type !== 'password') {
       // Hiding: give back a value this pass borrowed. A value the user edited
       // after revealing is theirs, and stays.

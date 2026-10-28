@@ -50,7 +50,14 @@ body {
   --bre-accent-line: #4176e640;
   --bre-accent-glow: #4176e61f;
   --bre-ok: var(--dsw-alias-state-success-primary, #22c55e);
+  /* The success family gets the same three steps the accent family has (ink /
+     weak fill), because 「计入」 is a state a pill must paint, not a 1px dot.
+     The ink step stays a literal: the host's success token is a FILL colour and
+     unreadable as 11px text on its own tint. */
+  --bre-ok-ink: #157a43;
+  --bre-ok-weak: #eefaf2;
   --bre-warn: var(--dsw-alias-state-warn-label, #dd8629);
+  --bre-warn-weak: #fdf6ec;
   --bre-danger: var(--dsw-alias-state-error-primary, #ec1313);
   --bre-danger-weak: #fef2f2;
   --bre-r-xs: 4px;
@@ -73,6 +80,13 @@ body[data-ds-dark-theme] {
   --bre-accent-weak: #1e335c;
   --bre-accent-line: #7aaaff40;
   --bre-accent-glow: #7aaaff26;
+  /* Success/warn tints have to be repainted, not inherited: a 10% mint wash on
+     a #353638 card is invisible, and #157a43 as 11px text on a dark card is
+     unreadable. Dark therefore swaps roles — deep fill, light ink — which is
+     exactly how the accent family above behaves. */
+  --bre-ok-ink: #6ad391;
+  --bre-ok-weak: #17301f;
+  --bre-warn-weak: #35281a;
   --bre-danger-weak: #3a1b18;
   --bre-switch-track: #4a4b4d;
   --bre-shadow-pop: 0 2px 5px #00000059, 0 12px 32px -8px #000000a6;
@@ -3911,6 +3925,44 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   font-size: 12px;
   font-weight: 500;
   color: var(--bre-ink);
+}
+/* 逐题那一行：三颗药丸，紧贴「家族 / 相似度」下方（m00136）。
+   Grammar is the badge's — 19px, 5px corner, 11px text, one hairline — so the
+   result card reads as one instrument instead of a second design. Only the
+   state changes colour, and the state is exactly three: counted (success),
+   not counted (warn), early-stopped (muted, dashed, because nothing failed). */
+.bre-fp-chals {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.bre-fp-chal {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.bre-fp-chal.is-counted {
+  background: var(--bre-ok-weak);
+  color: var(--bre-ok-ink);
+}
+.bre-fp-chal.is-rejected {
+  background: var(--bre-warn-weak);
+  color: var(--bre-warn);
+}
+.bre-fp-chal.is-skipped {
+  border-color: var(--bre-line-3);
+  border-style: dashed;
+  background: transparent;
+  color: var(--bre-ink-3);
 }
 .bre-fp-bars {
   display: flex;

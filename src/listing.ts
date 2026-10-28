@@ -13,6 +13,7 @@
  */
 
 import { isRecord } from './shared.js'
+import { isSendableHeader } from './headers-core.js'
 
 /** Stable API version required by Anthropic's model-listing endpoint. */
 export const ANTHROPIC_VERSION = '2023-06-01'
@@ -32,17 +33,45 @@ export const LISTABLE_PROTOCOLS: ReadonlySet<string> = new Set([
 
 /**
  * A URL safe to echo in responses: a baseURL may carry userinfo
- * (https://user:pass@host), and failure messages must never repeat it.
+ * (https://user:pass@host) or a key in its query (?api_key=… — a common relay
+ * spelling), and failure messages must never repeat either. The path is what
+ * identifies the probe; credentials live in the userinfo and the query, both
+ * of which are dropped, along with the fragment. A string that is not a
+ * parseable URL is replaced with a placeholder — echoing the raw input back
+ * would defeat the whole point (the opaque `user:pass@host` spelling parses
+ * as a non-special scheme whose userinfo setters are no-ops).
  */
 export function displayUrl(raw: string): string {
   try {
     const url = new URL(raw)
     url.username = ''
     url.password = ''
+    url.search = ''
+    url.hash = ''
+    // A non-special scheme ('user:pass@host' parses as scheme 'user' with an
+    // opaque path and NO host) keeps its credentials in the path text, where
+    // the setters above are no-ops: refuse to echo such a string at all.
+    if (!url.username && !url.password && url.host === '' && /^[^\s@/]+:[^\s@]+@/.test(raw)) {
+      return '[unparseable URL]'
+    }
     return url.toString()
   } catch {
-    return raw
+    return '[unparseable URL]'
   }
+}
+
+/**
+ * Redact credential-bearing URL shapes from free-form error text: any
+ * `user:password@` authority (with or without a scheme — the opaque spelling
+ * parses as scheme+path and survives URL-level stripping) loses its secret.
+ * Applied to upstream error messages before they reach a response body, since
+ * undici's own texts quote the original URL verbatim.
+ */
+export function redactUrlSecrets(text: string): string {
+  return text.replace(
+    /([a-z][a-z0-9+.-]*:\/\/)?([^\s'"@/]+):([^\s'"@]+)@/gi,
+    (match, scheme: string | undefined) => (scheme === undefined ? '[redacted]@' : `${scheme}[redacted]@`),
+  )
 }
 
 /**
@@ -96,6 +125,9 @@ export function composeProbeHeaders(
   if (isRecord(profileHeaders)) {
     for (const [name, value] of Object.entries(profileHeaders)) {
       if (typeof value !== 'string') continue
+      // The same wire-forbidden rule the header overlay applies: a configured
+      // `transfer-encoding` must be dropped here too, or the probe dies on it.
+      if (!isSendableHeader(name, value)) continue
       try {
         headers.set(name, value)
       } catch {

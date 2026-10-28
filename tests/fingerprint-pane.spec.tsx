@@ -471,6 +471,111 @@ describe('FingerprintPane', () => {
     expect(timing?.textContent).toContain('~437 chars/s')
   })
 
+  it('draws one pill per challenge, right under the family line, saying what each one asked back', async () => {
+    // m00136: `2 / 3 prompts` on the head says HOW MANY counted, never WHICH
+    // one did not. The pills are that missing half — one per question, in order.
+    stubFetch([identified('gpt-5.5', {
+      usedOutputs: 2,
+      challenges: [
+        { index: 1, expected: 312, parsed: 312, accepted: true },
+        { index: 2, expected: 332, parsed: 121, accepted: false },
+        { index: 3, expected: 315, parsed: 315, accepted: true },
+      ],
+    })])
+    const pane = mount()
+    await flush()
+    rowOf(pane.root, 'gpt-5.5').querySelector<HTMLButtonElement>('.bre-fp-fold')?.click()
+    await flush()
+
+    const body = rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-body')
+    const pills = Array.from(body?.querySelectorAll('.bre-fp-chal') ?? []).map((node) => node.textContent)
+    expect(pills).toEqual([
+      'Challenge 1: 312 numbers · counted',
+      'Challenge 2: 121 / 332 numbers · not counted',
+      'Challenge 3: 315 numbers · counted',
+    ])
+    // Under the family line, before anything else in the card.
+    const family = body?.querySelector('.bre-fp-family')
+    expect(family?.nextElementSibling?.className).toBe('bre-fp-chals')
+    // Each outcome owns its own tone, so the row is readable without the words.
+    const tones = Array.from(body?.querySelectorAll('.bre-fp-chal') ?? []).map((node) => node.className)
+    expect(tones).toEqual([
+      'bre-fp-chal is-counted',
+      'bre-fp-chal is-rejected',
+      'bre-fp-chal is-counted',
+    ])
+  })
+
+  it('calls an early-stopped challenge skipped instead of not counted', async () => {
+    // 两题早停掐掉的第三题没有失败 —— 写成「未计入」会让人去追一个不存在的错。
+    stubFetch([identified('gpt-5.5', {
+      usedOutputs: 2,
+      challenges: [
+        { index: 1, expected: 312, parsed: 312, accepted: true },
+        { index: 2, expected: 332, parsed: 330, accepted: true },
+        { index: 3, expected: 315, parsed: 0, accepted: false, skipped: true },
+      ],
+    })])
+    const pane = mount()
+    await flush()
+    rowOf(pane.root, 'gpt-5.5').querySelector<HTMLButtonElement>('.bre-fp-fold')?.click()
+    await flush()
+
+    const third = rowOf(pane.root, 'gpt-5.5').querySelectorAll('.bre-fp-chal')[2]
+    expect(third?.textContent).toBe('Challenge 3: 315 numbers · early stop')
+    expect(third?.className).toBe('bre-fp-chal is-skipped')
+  })
+
+  it('draws no pills at all for a record that predates the per-challenge ledger', async () => {
+    // 旧记录没有逐题账本：宁可少一行，也不编一个「0 / 0」出来。
+    stubFetch([identified('gpt-5.5')])
+    const pane = mount()
+    await flush()
+    rowOf(pane.root, 'gpt-5.5').querySelector<HTMLButtonElement>('.bre-fp-fold')?.click()
+    await flush()
+
+    expect(rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-chals')).toBeNull()
+  })
+
+  it('shows the ledger on a failed row too, where it matters most', async () => {
+    // 三题全废时没有归属结论，但「哪一题没答、答回来多少」恰恰是要看的。
+    stubFetch([identified('gpt-5.5', {
+      status: 'failed',
+      error: 'no usable answer: all three prompts came back short',
+      usedOutputs: 0,
+      challenges: [
+        { index: 1, expected: 312, parsed: 41, accepted: false },
+        { index: 2, expected: 332, parsed: 0, accepted: false },
+        { index: 3, expected: 315, parsed: 87, accepted: false },
+      ],
+    })])
+    const pane = mount()
+    await flush()
+    rowOf(pane.root, 'gpt-5.5').querySelector<HTMLButtonElement>('.bre-fp-fold')?.click()
+    await flush()
+
+    const body = rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-body')
+    expect(body?.querySelector('.bre-fp-error')?.textContent).toContain('no usable answer')
+    const pills = Array.from(body?.querySelectorAll('.bre-fp-chal') ?? []).map((node) => node.textContent)
+    expect(pills).toEqual([
+      'Challenge 1: 41 / 312 numbers · not counted',
+      'Challenge 2: 0 / 332 numbers · not counted',
+      'Challenge 3: 87 / 315 numbers · not counted',
+    ])
+  })
+
+  it('keeps the bare error line for a failed row that has no ledger', async () => {
+    stubFetch([identified('gpt-5.5', { status: 'failed', error: 'the relay answered 401 for every prompt' })])
+    const pane = mount()
+    await flush()
+    rowOf(pane.root, 'gpt-5.5').querySelector<HTMLButtonElement>('.bre-fp-fold')?.click()
+    await flush()
+
+    const body = rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-body')
+    expect(body?.querySelector('.bre-fp-error')?.textContent).toContain('401')
+    expect(body?.querySelector('.bre-fp-chals')).toBeNull()
+  })
+
   it('omits the timing line when the verdict carries no timing picture', async () => {
     // Older records predate the field; a verdict that never measured itself
     // must not render an empty "Timing: —" row.

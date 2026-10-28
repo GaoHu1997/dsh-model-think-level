@@ -157,6 +157,14 @@ export function defaultEffortOf(models: Record<string, unknown>[], modelId: stri
  */
 const PROBE_CACHE_MS = 30_000
 
+/**
+ * Hard ceiling on one probe-route read. The host budgets its own upstream
+ * listing at 6s; this bound exists for the pathological cases — a host that
+ * never answers — because the auto-adapt queue is strictly serial and one
+ * never-settling read used to strand every queued row behind it.
+ */
+const PROBE_FETCH_TIMEOUT_MS = 15_000
+
 interface ProbeCacheEntry {
   at: number
   data: unknown
@@ -178,7 +186,10 @@ async function probeRouteListing(route: string): Promise<unknown | undefined> {
   if (pending !== undefined) return pending
   const request = (async (): Promise<unknown | undefined> => {
     try {
-      const response = await fetch(`${PROBE_PATH}?route=${encodeURIComponent(route)}`, { method: 'GET' })
+      const response = await fetch(`${PROBE_PATH}?route=${encodeURIComponent(route)}`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(PROBE_FETCH_TIMEOUT_MS),
+      })
       if (!response.ok) return undefined
       const body = (await response.json()) as { ok?: boolean; data?: unknown }
       if (!body?.ok) return undefined

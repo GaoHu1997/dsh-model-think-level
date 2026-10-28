@@ -55,16 +55,23 @@ export function buildAutofillPatch(
   for (const route of Object.keys(providers)) {
     if (!routeFilter(route)) continue
     // Read the RAW models array: this builder rebuilds the array verbatim,
-    // so a route carrying a row it cannot represent (non-record) is left
-    // alone — a filtered rebuild would silently DELETE that row.
+    // so a route carrying a row it cannot represent is carried through
+    // row by row (see the loop below) — never silently deleted.
     const profile = providers[route]
     const rawModels = isRecord(profile) && Array.isArray(profile['models']) ? profile['models'] : undefined
     if (rawModels === undefined || rawModels.length === 0) continue
-    if (!rawModels.every(isRecord)) continue
-    const models = rawModels as Record<string, unknown>[]
+    const models = rawModels
     const nextModels: JsonObject[] = []
     let changed = false
-    for (const model of models) {
+    for (const row of models) {
+      // A row this builder cannot represent rides along verbatim: the old
+      // all-or-nothing bail left EVERY undeclared model on the route unfilled
+      // because one stray row existed, with nothing on screen saying why.
+      if (!isRecord(row)) {
+        nextModels.push(row as JsonObject)
+        continue
+      }
+      const model: JsonObject = row
       // Declared parts are untouched — and so are parts the user
       // deliberately unset: the durable markers record those absences as
       // decisions, so auto-fill never reads them back as gaps (the bug this
@@ -105,7 +112,14 @@ export function buildAutofillPatch(
       // Reaching this branch means neither part was declared and no durable
       // unset marker stands on the row -- so there is no stale marker inside
       // `fill` to scrub; the guards above already excluded it.
-      if (!effortsDeclared && fillEfforts) {
+      if (!effortsDeclared && fillEfforts && suggestion.confidence !== 'low') {
+        // `confidence: 'low'` is protocol inference on an id nothing in the
+        // knowledge base names: a ladder written from it is a claim that the
+        // model reasons, and on a self-hosted endpoint it ships a
+        // `reasoning_effort` + `thinking_token_budget` the model never asked
+        // for (llama-3.3-70b, phi-4, an image generator — the P0-3 shape).
+        // The row stays undeclared; the user declares it by hand or via a
+        // confirmed endpoint signal (which carries 'medium' or better).
         touched = true
         fill['reasoningEfforts'] = suggestion.efforts as JsonObject
         // Provenance: the browser flush has to be able to tell this knowledge

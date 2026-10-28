@@ -103,12 +103,18 @@ export function analyzeListingEntry(entry: unknown): EndpointSignal {
     return { ...signalParts(entry), reasoning: entry['reasoning'] as boolean, source: 'reasoning' }
   }
 
-  // A present, meaningful effort field signals support; a null placeholder —
+  // A present, MEANINGFUL effort field signals support; a null placeholder —
   // or an empty string, which some gateways emit as a filler — says nothing
-  // and must stay 'unknown' (tri-state discipline).
+  // and must stay 'unknown' (tri-state discipline). An explicit `false` is a
+  // refusal (the endpoint names the slot to say "no"), and a number such as 0
+  // is no effort value either — neither may read as "supports reasoning" just
+  // because the key exists with a value.
   const effortField = entry['reasoning_effort']
+  if (effortField === false) {
+    return { ...signalParts(entry), reasoning: false, source: 'reasoning_effort' }
+  }
   if (
-    (effortField !== undefined && effortField !== null && !(typeof effortField === 'string' && effortField.trim().length === 0)) ||
+    (typeof effortField === 'string' && effortField.trim().length > 0) ||
     entry['supports_reasoning_effort'] === true
   ) {
     return { ...signalParts(entry), reasoning: true, source: 'reasoning_effort' }

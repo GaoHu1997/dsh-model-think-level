@@ -250,3 +250,14 @@ describe('output-modality disclosure (image-generation kind)', () => {
       .toBeUndefined()
   })
 })
+
+describe('audit-fix regressions (2026-10-28): effort field tri-state (F8/M-7)', () => {
+  it('an explicit reasoning_effort:false is a refusal, not support', () => {
+    expect(analyzeListingEntry({ id: 'm', reasoning_effort: false }))
+      .toEqual({ reasoning: false, source: 'reasoning_effort' })
+  })
+  it('a numeric effort placeholder says nothing', () => {
+    expect(analyzeListingEntry({ id: 'm', reasoning_effort: 0 }))
+      .toEqual({ reasoning: 'unknown', source: null })
+  })
+})

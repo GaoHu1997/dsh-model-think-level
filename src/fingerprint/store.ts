@@ -12,13 +12,20 @@ import { harnessHome } from '../key-index.js'
 // 落盘一侧的引用不必多一个 import。记录形状也在那边：浏览器要拿它画徽章，
 // 而这个模块是 Node-only 的。
 import {
+  type FingerprintChallenge,
   type FingerprintRecord,
   type FingerprintStatus,
   type FingerprintTiming,
   type FingerprintTopEntry,
 } from './verdict.js'
 
-export { type FingerprintRecord, type FingerprintStatus, type FingerprintTiming, type FingerprintTopEntry }
+export {
+  type FingerprintChallenge,
+  type FingerprintRecord,
+  type FingerprintStatus,
+  type FingerprintTiming,
+  type FingerprintTopEntry,
+}
 
 export interface FingerprintDocument {
   version: 1
@@ -64,6 +71,31 @@ function parseTop(raw: unknown): FingerprintTopEntry[] | undefined {
   return out.length === 0 ? undefined : out
 }
 
+/**
+ * Parse the per-question ledger. Never throws and never invents a question:
+ * a malformed entry is dropped, and an array that ends up empty becomes
+ * `undefined` (an old record with no ledger must not render as "no questions
+ * counted"). `expected` and `parsed` are counts, so negatives are clamped to 0.
+ */
+function parseChallenges(raw: unknown): FingerprintChallenge[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: FingerprintChallenge[] = []
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue
+    const entry = item as Record<string, unknown>
+    const parsed: FingerprintChallenge = {
+      index: Math.max(1, Math.trunc(finiteNumber(entry['index'], out.length + 1))),
+      expected: Math.max(0, Math.trunc(finiteNumber(entry['expected'], 0))),
+      parsed: Math.max(0, Math.trunc(finiteNumber(entry['parsed'], 0))),
+      accepted: entry['accepted'] === true,
+    }
+    if (entry['skipped'] === true) parsed.skipped = true
+    out.push(parsed)
+    if (out.length === 3) break
+  }
+  return out.length === 0 ? undefined : out
+}
+
 function parseRecord(provider: string, model: string, raw: unknown): FingerprintRecord | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined
   const record = raw as Record<string, unknown>
@@ -86,6 +118,8 @@ function parseRecord(provider: string, model: string, raw: unknown): Fingerprint
   }
   const top = parseTop(record['top'])
   if (top !== undefined) out.top = top
+  const challenges = parseChallenges(record['challenges'])
+  if (challenges !== undefined) out.challenges = challenges
   const calibration = record['calibration']
   if (typeof calibration === 'object' && calibration !== null) {
     const fields = calibration as Record<string, unknown>

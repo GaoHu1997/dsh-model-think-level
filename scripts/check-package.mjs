@@ -29,7 +29,18 @@ const globPattern = (pattern) => new RegExp('^' + pattern
   .replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$')
 
 // Catch files allowlist entries that silently stopped matching after a refactor.
+// A `!`-prefixed entry is an EXCLUSION (npm pack semantics): it can never name
+// a shipped file, so it is validated only for having removed something —
+// `!lib/**/*.map` is doing its job exactly when no .map ships.
 for (const entry of pkg.files ?? []) {
+  if (entry.startsWith('!')) {
+    const excluded = entry.slice(1)
+    const match = globPattern(excluded)
+    if ([...shipped].some(file => excluded.endsWith('/') ? file.startsWith(excluded) : match.test(file))) {
+      failures.push(`files: ${entry} excluded a file that is still in the package`)
+    }
+    continue
+  }
   const match = globPattern(entry)
   if (![...shipped].some(file => entry.endsWith('/') ? file.startsWith(entry) : match.test(file))) {
     failures.push(`files: ${entry} matches nothing in the package`)

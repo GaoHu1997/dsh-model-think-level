@@ -62,6 +62,12 @@ export interface ProbeOutcome {
   firstTokenMs?: number
   /** Total wall time of the challenge, milliseconds. */
   durationMs?: number
+  /**
+   * Aborted BY the early exit: two confident answers already closed the run, so
+   * this challenge was never needed. Without the bit a caller cannot tell a
+   * deliberate skip from a user cancellation — both come back `cancelled`.
+   */
+  skipped?: boolean
 }
 
 /** Everything one model's fingerprint run learned, ready for the bank. */
@@ -217,7 +223,7 @@ export async function runProbe(options: RunProbeOptions): Promise<ProbeRunResult
           controller.abort()
         }
       }
-      if (suppressed.has(index)) return outcome
+      if (suppressed.has(index)) return { ...outcome, skipped: true }
       options.onOutcome?.(outcome)
       return outcome
     }),

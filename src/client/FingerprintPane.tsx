@@ -355,13 +355,75 @@ function renderRow(row: Row, deps: RowDeps): ReactNode {
       ? null
       : record.status !== 'failed'
         ? renderResult(record, t)
-        : record.error !== undefined
-          ? createElement('div', { className: 'bre-fp-body' }, createElement('p', { className: 'bre-fp-error' }, record.error))
-          : null,
+        : renderFailure(record, t),
   )
 }
 
-/** 结果卡：家族占比、相似度、前三候选、耗时画像、闭集告警。 */
+/**
+ * 逐题那一行：三颗药丸，一颗一道题。
+ *
+ * 它回答的是 `2 / 3 题` 后面那句「哪一题没算、答回来多少」。三种落点各有
+ * 自己的词与色，因为它们要引出三种完全不同的下一步：
+ *  - 计入（success 底色）：答够了，不用管；
+ *  - 未计入（warn 底色）+ `120 / 312`：答回来但被截断/太少，可以重测；
+ *  - 早停（灰底）：两题已经定了，这题根本没发出去 —— 写成「未计入」会让
+ *    用户去追一个不存在的失败。
+ *
+ * 旧记录没有逐题账本（`challenges` 为空），此时整行不画：编不出来的数字比
+ * 少一行更糟。
+ */
+function renderChallenges(
+  challenges: FingerprintRecord['challenges'],
+  t: Translate,
+): ReactNode {
+  if (challenges === undefined || challenges.length === 0) return null
+  return createElement(
+    'div',
+    { className: 'bre-fp-chals', title: t('fpChallengeTitle') },
+    ...challenges.map((challenge) => {
+      const tone = challenge.skipped === true
+        ? ' is-skipped'
+        : challenge.accepted ? ' is-counted' : ' is-rejected'
+      const text = challenge.skipped === true
+        ? t('fpChallengeSkipped', { index: challenge.index, numbers: challenge.expected })
+        : challenge.accepted
+          ? t('fpChallengeCounted', { index: challenge.index, numbers: challenge.expected })
+          : t('fpChallengeRejected', {
+              index: challenge.index,
+              parsed: challenge.parsed,
+              numbers: challenge.expected,
+            })
+      return createElement(
+        'span',
+        { className: `bre-fp-chal${tone}`, key: challenge.index },
+        text,
+      )
+    }),
+  )
+}
+
+/**
+ * 失败行的展开体：上游原文 + 逐题落点。
+ *
+ * 失败时没有归属结论可谈，所以这里不画家族/候选；但逐题那一行**更要画** ——
+ * 「三题全废」正是用户要知道是哪一题、答回来多少的时候。整行账本都没有的旧
+ * 记录才退回只有一句错误原文。
+ */
+function renderFailure(record: FingerprintRecord, t: Translate): ReactNode {
+  const challenges = record.challenges
+  const hasLedger = challenges !== undefined && challenges.length > 0
+  if (record.error === undefined && !hasLedger) return null
+  return createElement(
+    'div',
+    { className: 'bre-fp-body' },
+    record.error === undefined
+      ? null
+      : createElement('p', { className: 'bre-fp-error' }, record.error),
+    renderChallenges(challenges, t),
+  )
+}
+
+/** 结果卡：家族占比、相似度、逐题落点、前三候选、耗时画像、闭集告警。 */
 function renderResult(record: FingerprintRecord, t: Translate): ReactNode {
   const top = record.top ?? []
   const timing = record.timing
@@ -384,6 +446,9 @@ function renderResult(record: FingerprintRecord, t: Translate): ReactNode {
       createElement('span', { className: 'grow' }),
       createElement('span', { className: 'bre-fp-k' }, t('fpCheckedAt', { time: clock(record.checkedAt) })),
     ),
+    // 紧贴家族/相似度下方一行：上面说「是什么」，这一行说「凭什么」——
+    // 三题各自的落点（m00136）。
+    renderChallenges(record.challenges, t),
     timing !== undefined
       ? createElement('p', { className: 'bre-fp-timing' },
           t('fpTiming', {

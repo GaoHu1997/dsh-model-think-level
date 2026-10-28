@@ -9,6 +9,7 @@ import {
   KNOWLEDGE_BASE,
   inferModalitiesFromName,
   inferProtocol,
+  isSelfHostedEndpoint,
   matchKnowledgeBase,
   suggestEfforts,
 } from '../src/knowledge.js'
@@ -750,5 +751,45 @@ describe('image-generation detection (生图)', () => {
     const s = suggestEfforts('qwen3-vl', {})
     expect(s.imageGen).toBeUndefined()
     expect(s.input).toEqual(['text', 'image'])
+  })
+})
+
+describe('audit-fix regressions (2026-10-28)', () => {
+  it('compact stem+digit spellings reach their family entries (F3/K5)', () => {
+    for (const [id, family] of [
+      ['qwen3-max', 'qwen'],
+      ['qwen3-32b', 'qwen'],
+      ['qwen2.5-72b', 'qwen'],
+      ['glm4-plus', 'glm'],
+      ['chatglm3-6b', 'glm'],
+      ['gemini3-pro', 'google-gemini'],
+    ] as const) {
+      const entry = matchKnowledgeBase(id)
+      expect({ id, hit: entry?.id ?? '(generic)', family: entry?.id.startsWith(family) }).toMatchObject({
+        id,
+        family: true,
+      })
+    }
+  })
+  it('dotted spellings still match after the digit-split normalization', () => {
+    expect(matchKnowledgeBase('qwen3.8-max')?.id).toBe('qwen-3-8')
+    expect(matchKnowledgeBase('glm-4-plus')?.id).toBe('glm')
+  })
+  it('a public IPv6 endpoint is not self-hosted (F13/K3)', () => {
+    expect(isSelfHostedEndpoint('http://[2606:4700::1111]:8000/v1')).toBe(false)
+    expect(isSelfHostedEndpoint('http://[::1]:8000/v1')).toBe(true)
+    expect(isSelfHostedEndpoint('http://[fd00::1]:8000/v1')).toBe(true)
+    expect(isSelfHostedEndpoint('http://[fe80::1]:8000/v1')).toBe(true)
+  })
+  it('an efforts:false entry never gains a thinking budget field (F9/K2/M-8)', () => {
+    for (const id of ['mistral-large-2411', 'codestral-latest', 'gpt-4o']) {
+      const s = suggestEfforts(id, { api: 'openai-completions', baseURL: 'http://localhost:8000/v1' })
+      expect({ id, efforts: s.efforts, budget: (s.compat as Record<string, unknown> | undefined)?.['thinkingTokenBudgetField'] })
+        .toMatchObject({ id, efforts: false, budget: undefined })
+    }
+  })
+  it('a reasoning entry on a self-hosted endpoint still gains the budget field', () => {
+    const s = suggestEfforts('deepseek-chat', { api: 'openai-completions', baseURL: 'http://localhost:8000/v1' })
+    expect((s.compat as Record<string, unknown>)?.['thinkingTokenBudgetField']).toBe('thinking_token_budget')
   })
 })

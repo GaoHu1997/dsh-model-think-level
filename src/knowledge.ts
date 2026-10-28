@@ -1598,9 +1598,19 @@ function isAlnum(ch: string | undefined): boolean {
  * Lowercase and collapse every non-alphanumeric run to one space, so id /
  * display-name / pattern separators ('-', '_', '.', spaces) compare equal:
  * pattern 'deepseek-v3' matches display name "DeepSeek V3".
+ *
+ * A letter immediately followed by a generation digit also gains a space
+ * ('qwen3' → 'qwen 3'): both the haystack and the patterns go through this
+ * same normalizer, so dotted spellings ('qwen3.8' ↔ pattern 'qwen3.8') keep
+ * matching while the previously-dead compact forms ('qwen3-max', 'glm4-plus',
+ * 'gemini3-pro') now reach their family entries instead of falling to generic.
  */
 function normalizeLoose(value: string): string {
-  return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, ' ')
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/([a-z])(\d)/g, '$1 $2')
 }
 
 /**
@@ -1697,10 +1707,17 @@ export function isSelfHostedEndpoint(baseURL: string | undefined): boolean {
   } catch {
     return false
   }
-  if (host === 'localhost' || host === '::1' || host.endsWith('.local') || host.endsWith('.internal')) return true
+  // An IPv6 literal arrives bracketed from URL.hostname. Only loopback and
+  // site-local/link-local scopes read as self-hosted; a public v6 address is
+  // someone else's machine exactly as a public v4 would be.
+  if (host.startsWith('[')) {
+    const v6 = host.slice(1, -1)
+    return v6 === '::1' || v6 === '::' || v6.startsWith('fe80:') || v6.startsWith('fc') || v6.startsWith('fd')
+  }
+  if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) return true
   if (/^(127\.|10\.|192\.168\.)/.test(host)) return true
   if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(host)) return true
-  return host.includes(':')
+  return false
 }
 
 /**
@@ -1731,9 +1748,17 @@ function compatForRoute(entry: KnowledgeEntry, route: RouteFacts): CompatSuggest
   if (api === COMPAT_CAPABLE_PROTOCOL) {
     let compat = entry.compat
     if (compat !== undefined) compat = sanitizeCompatForProtocol(compat, api) ?? undefined
-    if (compat === undefined && !isSelfHostedEndpoint(route.baseURL)) return undefined
-    if (compat === undefined) return { thinkingTokenBudgetField: 'thinking_token_budget' }
-    if (compat.thinkingTokenBudgetField === undefined && compat.supportsThinkingTokenBudget !== true && isSelfHostedEndpoint(route.baseURL)) {
+    // A budget field is a claim that the model consumes thinking tokens: an
+    // entry that explicitly declares "does not reason" must never gain one,
+    // whatever the endpoint shape suggests (the mistral-legacy / gpt-4o
+    // self-hosted case).
+    const reasoning = entry.efforts !== false
+    if (compat === undefined) {
+      return reasoning && isSelfHostedEndpoint(route.baseURL)
+        ? { thinkingTokenBudgetField: 'thinking_token_budget' }
+        : undefined
+    }
+    if (reasoning && compat.thinkingTokenBudgetField === undefined && compat.supportsThinkingTokenBudget !== true && isSelfHostedEndpoint(route.baseURL)) {
       return { ...compat, thinkingTokenBudgetField: 'thinking_token_budget' }
     }
     return compat
