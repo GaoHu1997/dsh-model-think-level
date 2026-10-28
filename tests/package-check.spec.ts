@@ -1,9 +1,13 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+
+// Every case spawns the checker in a temp fixture; a full parallel run can
+// starve one spawn past the 5 s default (observed once at 19.4 s for 6 tests).
+vi.setConfig({ testTimeout: 30_000 })
 
 const checker = fileURLToPath(new URL('../scripts/check-package.mjs', import.meta.url))
 const directories: string[] = []

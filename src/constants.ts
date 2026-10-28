@@ -144,5 +144,50 @@ export const AUTOFILL_MARKER = 'reasoningEffortsAutofilled'
  */
 export const DEFAULT_EFFORT_FIELD = 'defaultEffort'
 
+/**
+ * Same-origin host route owning the image-generation config surface: `GET`
+ * answers the derived image-model list merged with the stored overrides,
+ * `POST` saves default model / default params / output dir / per-model rows.
+ * Backing file: `<DSH_HOME>/dsh-model-think-level/image.json` (see
+ * {@link IMAGE_CONFIG_FILE}).
+ */
+export const IMAGE_CONFIG_PATH = '/dsh-model-think-level/image-config'
+
+/**
+ * Same-origin host route that runs one image generation through the shared
+ * core (`src/image/generate.ts`): the explicit entry beside the wire dispatch
+ * and the `/生图` host command — used for scripted calls and for callers that
+ * want the `filePath` back.
+ */
+export const IMAGE_GENERATE_PATH = '/dsh-model-think-level/image-generate'
+
+/**
+ * Same-origin host route owning the image MCP server's install lifecycle:
+ * `{action: "install"|"uninstall"|"status"|"selfcheck"}` over the marker block
+ * in the current profile's `cordis.patch.yml`.
+ */
+export const IMAGE_MCP_PATH = '/dsh-model-think-level/image-mcp'
+
+/** File name of the image-generation config inside the plugin's home dir. */
+export const IMAGE_CONFIG_FILE = 'image.json'
+
+/**
+ * Fixed MCP `serverName` of the image server. Tool names derive as
+ * `mcp__<serverName>__<rawName>`, so this string is part of the public surface:
+ * `mcp__dsh-image__generate_image` must stay stable across HMR reloads.
+ */
+export const IMAGE_MCP_SERVER_NAME = 'dsh-image'
+
+/** The patch-layer id the installed MCP entry carries (see src/image/mcp-install.ts). */
+export const IMAGE_MCP_PATCH_ID = 'dsh-image-mcp'
+
+/**
+ * Marker-block name this plugin uses inside `cordis.patch.yml`. The begin/end
+ * comment lines are `# >>> <name>:begin` / `# <<< <name>:end`; every write
+ * splices exactly that byte range, so third-party marker blocks (the
+ * dsh-skill-mcp-panel precedent) survive untouched.
+ */
+export const IMAGE_MCP_PATCH_MARK = 'dsh-model-think-level:image-mcp'
+
 /** Locale dictionary namespace for the browser half's copy (not a settings namespace). */
 export const STORE_NS = PLUGIN_ID

@@ -79,6 +79,13 @@ import {
   teardownModelOrder,
   type ModelOrderDeps,
 } from './model-order-drag.js'
+import {
+  createConfigButtonSeatState,
+  ensureConfigButtonSeat,
+  findModelsTitleRow,
+  teardownConfigButtonSeats,
+  type ConfigButtonSeatState,
+} from './config-button-seat.js'
 
 /** Dictionary namespace owning the Models page's copy (ui-settings-models). */
 const HOST_MODELS_NS = 'settings.models'
@@ -128,6 +135,12 @@ const HOST_LABEL_KEYS = {
   addModel: ['addModel', 'Add model', '添加模型'],
 } as const satisfies Record<keyof HostLabels, readonly [string, string, ...string[]]>
 
+/** The Models-page title-row seat (the 「配置」 button) needs only copy + open. */
+export interface ConfigSeatDeps {
+  readonly t: Translate
+  readonly onOpen: () => void
+}
+
 /** What the Models-page injection needs from its host. */
 export interface ModelsPageDeps {
   /** The client root context. */
@@ -145,6 +158,8 @@ export interface ModelsPageDeps {
   onIdle: (join?: SettingsJoin) => void
   /** Wrap a subtree so it re-translates on a language switch. */
   refreshed: (children: () => ReactNode) => ReactNode
+  /** Present when the Models-page title row should carry the 「配置」 button. */
+  configSeat?: ConfigSeatDeps
 }
 
 /** The Models-page injection's face. */
@@ -255,6 +270,9 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   // in the document — the create landing is the only thing that may trigger the
   // write, and it is also the proof the write is allowed.
   const addCardState = createAddCardState()
+  // The Models-page title-row seat: one state for the whole page, like the
+  // add-card's hosts — the settled row writes nothing on rescans.
+  const configSeatState: ConfigButtonSeatState = createConfigButtonSeatState()
   const stagedHeadersState = createStagedHeadersState()
   // The same contract for the card's key list: drafts staged against a route
   // the card has not declared yet, landed by the drain below the moment the
@@ -403,6 +421,16 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     reconcileProviderDeleteSeat(root, providerDeleteDeps)
     reconcileProviderDisabledGroup(root, providerDisabledDeps, providerDisabledState)
     reconcileModelOrder(root, modelOrderDeps, modelOrderState)
+    // The title-row 「配置」 seat. Pure DOM (one query + one append), so it
+    // rides this synchronous pass like the decorations above: navigating to
+    // Models paints the button in the same frame as the page itself. A null
+    // anchor (structural drift) renders nothing — never a misplaced button.
+    if (deps.configSeat !== undefined) {
+      const row = findModelsTitleRow(root)
+      if (row !== null) {
+        ensureConfigButtonSeat(row, { t: deps.configSeat.t, onOpen: deps.configSeat.onOpen }, configSeatState)
+      }
+    }
     // The row actions a plugin write's post-apply reload disables: held at full
     // opacity so the list does not blink under the save. It runs in this pass
     // because the disable lands in the same mutation burst the pass answers.
@@ -600,6 +628,9 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // And for the auto-adapt seats: raw DOM this plugin put in the official
     // catalogue head, which a dead fiber must not leave clickable-looking.
     teardownAutoEffortSeats()
+    // And for the title-row 「配置」 seat: same rule as the grips — a raw node
+    // this plugin owns inside the official page must leave with its fiber.
+    teardownConfigButtonSeats(configSeatState)
     // And for the official save line: it is the HOST's own node, and a dead
     // fiber must not leave a provider saved with the page saying nothing.
     teardownSavedNotice()

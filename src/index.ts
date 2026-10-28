@@ -30,6 +30,9 @@ import {
   DIAG_PATH,
   FINGERPRINT_PATH,
   HEADERS_CONFIG_PATH,
+  IMAGE_CONFIG_PATH,
+  IMAGE_GENERATE_PATH,
+  IMAGE_MCP_PATH,
   KEY_INDEX_PATH,
   PI_AI_NS,
   PLUGIN_ID,
@@ -86,6 +89,22 @@ import { buildHeaderIndex, emptyIndex, type UserAgentIndex } from './headers-cor
 import { headerOverlayBypass, headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from './headers-fetch.js'
 import { describePiAiHeaderState, installPiAiHeaderTransforms } from './headers-pi-ai.js'
 import { detectHeaderConflicts, type HeaderConflictReport } from './headers-conflict.js'
+// Image generation (生图): one config file, one generation core behind three
+// entries — the wire dispatch (主通道), the /image-generate route, the /生图
+// host command — plus the MCP install lifecycle over the patch layer.
+import {
+  deriveImageSeeds,
+  emptyImageConfig,
+  readImageConfig,
+  resolveImageModel,
+  syncImageConfig,
+  updateImageConfig,
+  type ImageConfig,
+} from './image/config.js'
+import { generateImage, type GenerateDeps } from './image/generate.js'
+import { registerImagegenCommand, type CommandsServiceLike } from './image/command.js'
+import { installPatch, uninstallPatch, patchStatus, selfcheck, healServerPath, resolvePatchFile, defaultServerPath } from './image/mcp-install.js'
+import { resolveRuntimeNode } from './image/runtime-node.js'
 // The knowledge-base patch builder lives in its own module: the browser half
 // builds the SAME patch from its own idle-time read, so one suggestion can
 // never produce two different documents.
@@ -1005,6 +1024,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (ns === PI_NS) {
       refreshHeaders()
       refreshKeyScopes()
+      // The image side rides the same events: the config file's derived
+      // models[] re-derives from this document (config page, MCP, command).
+      syncImageConfigNow()
       const source = catalogueSource()
       if (source !== catalogueSourceStamp) {
         catalogueSourceStamp = source
@@ -1202,6 +1224,82 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
   const overlay = installHeaderOverlay(overlaySource)
   ctx.effect(() => () => { overlay.dispose() }, 'dsh-model-think-level: fetch header overlay')
+
+  // ---- Image generation (生图): config sync, `/生图` command, MCP ----
+  //
+  // There is NO wire interception any more: a chat model asks for a picture by
+  // CALLING the MCP tool (`mcp__dsh-image__generate_image`), so image models
+  // stay out of the composer's switcher and nothing rewrites an outbound
+  // chat/completions request.
+
+  /**
+   * Re-derive the config file's `models[]` from the settings document, keeping
+   * every stored override. Runs on boot and on every pi-ai document update, so
+   * the config page, the MCP server and the command all read one snapshot.
+   * Skipped while llm-pi-ai has not registered (an empty providers
+   * map at boot must not wipe a config the previous run wrote).
+   */
+  const syncImageConfigNow = (): void => {
+    try {
+      if (piSection() === undefined) return
+      const providers = providersOf()
+      updateImageConfig(document => syncImageConfig(document, providers))
+    } catch {
+      // The config file is best-effort state: a failed sync leaves the last
+      // snapshot on disk, which the next successful sync replaces wholesale.
+    }
+  }
+  syncImageConfigNow()
+
+  /** The generation deps the host serves the core with (credentials via the store). */
+  const imageGenerateDeps: GenerateDeps = {
+    config: () => readImageConfig(),
+    resolveKey: async ref => {
+      try {
+        return await resolveCredential(ctx.get('credentials') as CredentialsService | undefined, ref)
+      } catch {
+        return undefined
+      }
+    },
+    // Beneath the wrapper: the images call composes its own auth from the
+    // model row's reference, exactly like the listing probe above.
+    send: headerOverlayBypass(),
+    persistLastGood: (modelId, params) => {
+      try {
+        updateImageConfig(document => ({
+          ...document,
+          models: document.models.map(model => {
+            if (model.id !== modelId) return model
+            if (params === null) {
+              return { ...model, endpoint: { ...model.endpoint, status: 'unsupported' as const } }
+            }
+            return { ...model, lastGoodParams: params }
+          }),
+        }))
+      } catch {
+        // A diagnostics write must never fail the generation that earned it.
+      }
+    },
+  }
+
+  // The `/生图` host command (and the MCP tool behind the config page). Registered only when the
+  // context carries a commands service (a headless composition may not) —
+  // cordis THROWS on an undeclared service read, so the lookup is fenced.
+  let commandsService: CommandsServiceLike | undefined
+  try {
+    commandsService = (ctx as unknown as { commands?: CommandsServiceLike }).commands
+  } catch {
+    commandsService = undefined
+  }
+  registerImagegenCommand(
+    commandsService,
+    {
+      modelIds: () => readImageConfig().models.map(model => model.id),
+      generate: generateImage,
+      generateDeps: imageGenerateDeps,
+    },
+  )
+
 
   // `?diag=1` on the probe route reports this without touching the wire, so
   // the request-header takeover is observable from the running host.
@@ -2372,6 +2470,318 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         }),
       'dsh-model-think-level: fingerprint route',
+    )
+
+    // Image-generation config: GET answers the derived list merged with the
+    // stored overrides (re-syncing first, so the snapshot is never stale), POST
+    // saves defaults / per-model rows and runs the per-row endpoint test.
+    ctx.effect(
+      () =>
+        webServerCtx.webServer.register({
+          kind: 'exact',
+          path: IMAGE_CONFIG_PATH,
+          handler: async (req, res) => {
+            res.setHeader('cache-control', 'no-store')
+            if (!isTrustedRequest(req)) {
+              sendJson(res, 403, { ok: false, error: 'forbidden' })
+              return
+            }
+            if (req.method !== 'GET' && req.method !== 'POST') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
+              return
+            }
+            if (req.method === 'GET') {
+              // A GET re-syncs first (an expired snapshot must not be served as
+              // fresh); a failed sync leaves the stored document, still useful.
+              syncImageConfigNow()
+              const config = readImageConfig()
+              const mcp = patchStatus()
+              sendJson(res, 200, {
+                ok: true,
+                models: config.models,
+                defaultModel: config.defaultModel,
+                defaults: config.defaults,
+                outputDir: config.outputDir,
+                syncedAt: config.syncedAt,
+                mcp: {
+                  installed: mcp.installed,
+                  serverName: mcp.serverName,
+                  toolName: mcp.toolName,
+                  restartRequired: false,
+                  diagnostics: readImageConfig().mcp.diagnostics,
+                  patchFile: mcp.patchFile,
+                  nodeCommand: mcp.nodeCommand,
+                  malformed: mcp.malformed,
+                },
+              })
+              return
+            }
+            const body = await readJsonBody(req, 65_536)
+            if (!isRecord(body)) {
+              sendJson(res, 400, { ok: false, error: 'a JSON body is required' })
+              return
+            }
+            const op = typeof body['op'] === 'string' ? body['op'] : 'save'
+            // The per-row endpoint test: one real request at the row's smallest
+            // size, then the verdict lands in the row's endpoint status. Success
+            // marks `ok`; an endpoint-shaped failure marks `unsupported`; other
+            // failures leave the previous verdict (they say nothing about the
+            // endpoint itself).
+            if (op === 'test') {
+              const id = typeof body['id'] === 'string' ? body['id'] : ''
+              const config = readImageConfig()
+              const model = resolveImageModel(config, id)
+              if (model === undefined) {
+                sendJson(res, 400, { ok: false, error: `no image model "${id}"` })
+                return
+              }
+              if (model.api !== 'images') {
+                sendJson(res, 200, { ok: true, status: 'unsupported', checkedAt: new Date().toISOString() })
+                return
+              }
+              const smallest = [...model.params.sizes].sort((a, b) => {
+                const area = (size: string): number => size.split('x').reduce((sum, part) => sum * (Number(part) || 0), 1)
+                return area(a) - area(b)
+              })[0] ?? '1024x1024'
+              try {
+                await generateImage(imageGenerateDeps, {
+                  model: model.id,
+                  prompt: 'endpoint test',
+                  size: smallest,
+                  n: 1,
+                })
+                updateImageConfig(document => ({
+                  ...document,
+                  models: document.models.map(entry => entry.id === model.id
+                    ? { ...entry, endpoint: { kind: 'images' as const, status: 'ok' as const, checkedAt: new Date().toISOString() } }
+                    : entry),
+                }))
+                sendJson(res, 200, { ok: true, status: 'ok', checkedAt: new Date().toISOString() })
+              } catch (error) {
+                const kind = error instanceof Error && 'kind' in error ? String((error as { kind?: unknown }).kind) : 'upstream'
+                if (kind === 'endpoint') {
+                  updateImageConfig(document => ({
+                    ...document,
+                    models: document.models.map(entry => entry.id === model.id
+                      ? { ...entry, endpoint: { kind: 'images' as const, status: 'unsupported' as const, checkedAt: new Date().toISOString() } }
+                      : entry),
+                  }))
+                  sendJson(res, 200, { ok: true, status: 'unsupported', checkedAt: new Date().toISOString() })
+                  return
+                }
+                sendJson(res, 200, {
+                  ok: false,
+                  error: error instanceof Error ? error.message : String(error),
+                  status: model.endpoint.status,
+                })
+              }
+              return
+            }
+            // Save: defaults, output dir, default model, per-model row overrides.
+            try {
+              updateImageConfig(document => {
+                let next: ImageConfig = document
+                if (typeof body['defaultModel'] === 'string' && body['defaultModel'].length > 0) {
+                  next = { ...next, defaultModel: body['defaultModel'] }
+                }
+                if (body['defaultModel'] === null) next = { ...next, defaultModel: null }
+                if (typeof body['outputDir'] === 'string' && body['outputDir'].length > 0) {
+                  next = { ...next, outputDir: body['outputDir'] }
+                }
+                if (isRecord(body['defaults'])) {
+                  const raw = body['defaults']
+                  next = {
+                    ...next,
+                    defaults: {
+                      size: typeof raw['size'] === 'string' && raw['size'].length > 0 ? raw['size'] : next.defaults.size,
+                      quality: typeof raw['quality'] === 'string' && raw['quality'].length > 0 ? raw['quality'] : next.defaults.quality,
+                      n: typeof raw['n'] === 'number' && Number.isInteger(raw['n']) && raw['n'] >= 1 ? Math.min(raw['n'], 16) : next.defaults.n,
+                      timeoutMs: typeof raw['timeoutMs'] === 'number' && raw['timeoutMs'] >= 60_000
+                        ? Math.min(raw['timeoutMs'], 3_600_000)
+                        : next.defaults.timeoutMs,
+                    },
+                  }
+                }
+                if (Array.isArray(body['models'])) {
+                  // `null` clears an override (falls back to defaults), a
+                  // concrete value sets it, anything else leaves it stored.
+                  const pickString = (value: unknown, kept: string | undefined): string | undefined =>
+                    value === null ? undefined
+                      : typeof value === 'string' && value.length > 0 ? value : kept
+                  const pickN = (value: unknown, kept: number | undefined): number | undefined =>
+                    value === null ? undefined
+                      : typeof value === 'number' && Number.isInteger(value) && value >= 1 ? Math.min(value, 16) : kept
+                  for (const row of body['models']) {
+                    if (!isRecord(row) || typeof row['id'] !== 'string') continue
+                    next = {
+                      ...next,
+                      models: next.models.map(model => {
+                        if (model.id !== row['id']) return model
+                        return {
+                          ...model,
+                          size: pickString(row['size'], model.size),
+                          quality: pickString(row['quality'], model.quality),
+                          n: pickN(row['n'], model.n),
+                        }
+                      }),
+                    }
+                  }
+                }
+                return next
+              })
+              syncImageConfigNow()
+              sendJson(res, 200, { ok: true })
+            } catch (error) {
+              sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        }),
+      'dsh-model-think-level: image config route',
+    )
+
+    // The explicit generation entry (辅通道): same core as the wire dispatch
+    // and the /生图 command. Answers the filePath so a caller can preview it.
+    ctx.effect(
+      () =>
+        webServerCtx.webServer.register({
+          kind: 'exact',
+          path: IMAGE_GENERATE_PATH,
+          handler: async (req, res) => {
+            res.setHeader('cache-control', 'no-store')
+            if (!isTrustedRequest(req)) {
+              sendJson(res, 403, { ok: false, error: 'forbidden' })
+              return
+            }
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
+              return
+            }
+            const body = await readJsonBody(req, 65_536)
+            if (!isRecord(body) || typeof body['prompt'] !== 'string' || body['prompt'].trim().length === 0) {
+              sendJson(res, 400, { ok: false, error: 'a "prompt" string is required' })
+              return
+            }
+            const referenceImages = Array.isArray(body['referenceImages'])
+              ? body['referenceImages'].filter((entry): entry is string => typeof entry === 'string')
+              : undefined
+            try {
+              const result = await generateImage(imageGenerateDeps, {
+                ...(typeof body['model'] === 'string' ? { model: body['model'] } : {}),
+                prompt: body['prompt'],
+                ...(typeof body['size'] === 'string' ? { size: body['size'] } : {}),
+                ...(typeof body['quality'] === 'string' ? { quality: body['quality'] } : {}),
+                ...(typeof body['n'] === 'number' ? { n: body['n'] } : {}),
+                ...(referenceImages !== undefined && referenceImages.length > 0 ? { referenceImages } : {}),
+              })
+              sendJson(res, 200, {
+                ok: true,
+                filePath: result.filePath,
+                mime: result.mime,
+                model: result.model,
+                paramsUsed: result.paramsUsed,
+                ...(result.revisions.length > 0 ? { warning: `参数回退：${result.revisions.join('、')}` } : {}),
+              })
+            } catch (error) {
+              sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        }),
+      'dsh-model-think-level: image generate route',
+    )
+
+    // The image MCP lifecycle: install / uninstall over the patch file's
+    // marker block, status derived from the file, and the self-check that
+    // proves the resolved `command` can actually start the server.
+    ctx.effect(
+      () =>
+        webServerCtx.webServer.register({
+          kind: 'exact',
+          path: IMAGE_MCP_PATH,
+          handler: async (req, res) => {
+            res.setHeader('cache-control', 'no-store')
+            if (!isTrustedRequest(req)) {
+              sendJson(res, 403, { ok: false, error: 'forbidden' })
+              return
+            }
+            if (req.method !== 'GET' && req.method !== 'POST') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
+              return
+            }
+            const action = req.method === 'GET'
+              ? 'status'
+              : await readJsonBody(req, 4096).then(body => isRecord(body) && typeof body['action'] === 'string' ? body['action'] : 'status')
+            try {
+              if (action === 'install') {
+                // The config file must exist (and carry the derived models)
+                // before the server can serve a call.
+                syncImageConfigNow()
+                const runtime = resolveRuntimeNode()
+                const serverPath = defaultServerPath()
+                installPatch({
+                  nodeCommand: runtime.command,
+                  serverPath,
+                  ...(runtime.env === undefined ? {} : { nodeEnv: runtime.env }),
+                })
+                // Prove the entry starts; the verdict lands in the diagnostics
+                // the status line renders.
+                const check = await selfcheck(runtime.command, serverPath, runtime.env)
+                updateImageConfig(document => ({
+                  ...document,
+                  mcp: {
+                    ...document.mcp,
+                    nodePath: runtime.command,
+                    diagnostics: { lastCheckAt: new Date().toISOString(), ok: check.ok, error: check.error },
+                  },
+                }))
+                sendJson(res, 200, { ok: true, action, selfcheck: check, status: patchStatus() })
+                return
+              }
+              if (action === 'uninstall') {
+                const file = uninstallPatch()
+                sendJson(res, 200, { ok: true, action, ...(file === undefined ? { unchanged: true } : { patchFile: file }) })
+                return
+              }
+              if (action === 'selfcheck') {
+                // Repair the installed block before checking it, so the verdict
+                // describes the code that is actually on disk: an older build
+                // recorded the package root instead of lib/image-mcp.mjs, and
+                // the desktop app re-dumps cordis.yml with a default 80-column
+                // width, which FOLDS a long path scalar into `…\bin\ \node.exe`
+                // (spawn answers ENOENT) — both are rewritten here.
+                const runtime = resolveRuntimeNode()
+                try {
+                  healServerPath({
+                    serverPath: defaultServerPath(),
+                    ...(runtime.command.length > 0 ? { nodeCommand: runtime.command } : {}),
+                    ...(runtime.env === undefined ? {} : { nodeEnv: runtime.env }),
+                  })
+                } catch {
+                  // A read-only patch file keeps the old path: the check below
+                  // then reports what is really installed.
+                }
+                const status = patchStatus()
+                const check = await selfcheck(
+                  status.nodeCommand.length > 0 ? status.nodeCommand : runtime.command,
+                  status.serverPath.length > 0 ? status.serverPath : defaultServerPath(),
+                  runtime.env,
+                )
+                updateImageConfig(document => ({
+                  ...document,
+                  mcp: {
+                    ...document.mcp,
+                    diagnostics: { lastCheckAt: new Date().toISOString(), ok: check.ok, error: check.error },
+                  },
+                }))
+                sendJson(res, 200, { ok: true, action, selfcheck: check })
+                return
+              }
+              sendJson(res, 200, { ok: true, action: 'status', status: patchStatus() })
+            } catch (error) {
+              sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        }),
+      'dsh-model-think-level: image mcp route',
     )
   })
 }

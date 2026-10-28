@@ -654,11 +654,11 @@ describe('ComposerSlider commit', () => {
 })
 
 describe('ComposerSlider image-generation rows and capacity tag', () => {
-  it('offers a 生图-marked model in the columns, the search and the provider count', async () => {
-    // The models page marked wanx-v1 an image generator. It is NOT a chat model,
-    // but hiding it here kept it out of reach of the composer altogether (user
-    // item: 生图模型需要出现在会话框的切换模型列表中）— it is offered like any
-    // other row, with the 生图 badge beside its name.
+  it('keeps image-generation models out of the switcher', async () => {
+    // Generation now goes through the MCP tool, so a marked generator must not
+    // be selectable: it would start a chat turn nobody can serve. The row stays
+    // declared on the Models page; the composer never lists it — not in the
+    // provider count, not in the column, not in the search.
     const facts = fakeFacts({ aliyun: { 'wanx-v1': { imageGen: true } } })
     const { directory } = fixture({
       groups: ([{
@@ -672,37 +672,32 @@ describe('ComposerSlider image-generation rows and capacity tag', () => {
       }] as unknown) as Groups,
     })
     const { root, container } = await mount(directory, facts)
-    const names = modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent)
-    expect(names).toEqual(['Qwen Max', 'Qwen Plus', 'Wanx v1'])
-    // The provider count answers for every offered model.
-    expect(container.querySelector('.bre-provider-count')?.textContent).toBe('3')
-    // The search reaches it, too.
+    const names = (): (string | null | undefined)[] =>
+      modelOptions(container).map(el => el.querySelector('.bre-option-name')?.textContent)
+    expect(names()).toEqual(['Qwen Max', 'Qwen Plus'])
+    expect(container.querySelector('.bre-provider-count')?.textContent).toBe('2')
     await search(container, 'wanx')
-    const hits = modelOptions(container)
-    expect(hits).toHaveLength(1)
-    expect(hits[0]?.querySelector('.bre-option-name')?.textContent).toContain('Wanx v1')
+    expect(modelOptions(container)).toHaveLength(0)
     root.unmount()
   })
 
-  it('badges exactly the 生图-marked rows, and only those', async () => {
-    const facts = fakeFacts({ aliyun: { 'wanx-v1': { imageGen: true } } })
+  it('reflects the hidden generator in a provider that holds nothing else', async () => {
+    // A provider whose only model is a generator has no rows to show, so it
+    // leaves the column entirely instead of opening empty.
+    const facts = fakeFacts({
+      aliyun: { 'wanx-v1': { imageGen: true } },
+      dashscope: {},
+    })
     const { directory } = fixture({
       groups: ([{
         id: 'aliyun',
         name: 'Aliyun',
-        models: [
-          { id: 'qwen-max', name: 'Qwen Max', reasoning: { defaultEffort: 'medium', efforts: LADDER } },
-          { id: 'wanx-v1', name: 'Wanx v1' },
-        ],
+        models: [{ id: 'wanx-v1', name: 'Wanx v1' }],
       }] as unknown) as Groups,
     })
     const { root, container } = await mount(directory, facts)
-    const badge = (name: string): string | null =>
-      optionNamed(modelOptions(container), name)?.querySelector('.bre-tag[title="tagImageGen"]')?.getAttribute('title') ?? null
-    expect(badge('Wanx v1')).toBe('tagImageGen')
-    // A chat row is never guessed into a generator by its name or its id.
-    expect(badge('Qwen Max')).toBeNull()
-    expect(optionNamed(modelOptions(container), 'Wanx v1')?.querySelectorAll('svg.bre-tag-icon')).toHaveLength(1)
+    expect(container.querySelector('.bre-provider-count')).toBeNull()
+    expect(modelOptions(container)).toHaveLength(0)
     root.unmount()
   })
 

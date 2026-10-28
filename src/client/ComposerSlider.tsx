@@ -376,7 +376,7 @@ export function effortRampColor(t: number): string {
  * for image input, the sparkle for a declared ladder, the frame-with-sparkle
  * for a 生图 generator.
  */
-function modelTags(
+export function modelTags(
   model: ModelChoiceLike,
   t: Translator,
   configuredInput?: readonly string[],
@@ -548,16 +548,22 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const factsFor = useCallback((provider: string, id: string): ModelFacts | undefined =>
     inputDeclarations.get(provider)?.get(id), [inputDeclarations])
 
+  // ---- Chat-only catalog ----
+  // Image-generation models are NOT selection candidates: generation goes
+  // through the MCP tool, never through an intercepted chat request, so a
+  // generator in the switcher would only produce a broken chat turn. They stay
+  // declared on the Models page (where the row keeps its 生图 marker) and stay
+  // out of this list entirely.
+  const isImageModel = useCallback((provider: string, choice: ModelChoiceLike): boolean =>
+    isImageGen(choice, factsFor(provider, choice.id)), [factsFor])
+  const chatModels = useCallback((group: DirectoryGroupLike | undefined, provider: string): ModelChoiceLike[] =>
+    modelsOf(group).filter(choice => !isImageModel(provider, choice)), [isImageModel])
+
   // Providers that actually hold models; the one whose models the right column
   // shows follows the current model until the user picks another column entry.
-  //
-  // Every model of a group is offered, 生图 rows included: they used to be
-  // filtered out here because an image generator cannot serve a chat turn, but
-  // that also put them out of reach of the composer entirely. The row now wears
-  // the 生图 badge instead, so the choice stays the user's (生图模型需要出现在
-  // 会话框的切换模型列表中).
   const providerCatalog = state.groups
-    .filter(candidate => modelsOf(candidate).length > 0 && !disabled.includes(candidate.id))
+    .filter(candidate => chatModels(candidate as DirectoryGroupLike, candidate.id).length > 0
+      && !disabled.includes(candidate.id))
     .map(candidate => candidate.id)
   const providerIds = mergeProviderOrder(baseProviderOrder(providerCatalog), preferredOrder)
   const shownProvider = openProvider !== null && providerIds.includes(openProvider)
@@ -575,7 +581,7 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
   const searching = needle !== ''
   const matches: Array<{ provider: string; choice: ModelChoiceLike }> = searching
     ? providerIds.flatMap(provider => orderModelEntries(
-        modelsOf(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike | undefined),
+        chatModels(state.groups.find(candidate => candidate.id === provider) as DirectoryGroupLike | undefined, provider),
         modelOrderByProvider[provider] ?? [],
       )
         .filter(choice => (choice.name ?? choice.id).toLowerCase().includes(needle)
@@ -587,10 +593,12 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
     : (shownProvider === null
       ? []
       : orderModelEntries(
-        modelsOf(state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike | undefined),
+        chatModels(state.groups.find(candidate => candidate.id === shownProvider) as DirectoryGroupLike | undefined, shownProvider),
         modelOrderByProvider[shownProvider] ?? [],
       ).map(choice => ({ provider: shownProvider as string, choice })))
   const activeKey = current === null ? '' : current.provider + '/' + current.model
+  // What an EMPTY column says; a search keeps its own no-match copy.
+  const emptyCopy = t('sliderNoCurrent')
 
   /**
    * Hand focus to the menu before a control this body owns is disabled or
@@ -934,11 +942,11 @@ export function ComposerSlider(props: ComposerSliderProps): ReactNode {
           },
           providerLabelOf(providerGroup),
         ),
-        createElement('span', { className: 'bre-provider-count' }, String(modelsOf(providerGroup).length)),
+        createElement('span', { className: 'bre-provider-count' }, String(chatModels(providerGroup, provider).length)),
       )
     }),
     ...(providerIds.length === 0
-      ? [createElement('div', { key: 'no-providers', className: 'bre-empty' }, t('sliderNoCurrent'))]
+      ? [createElement('div', { key: 'no-providers', className: 'bre-empty' }, emptyCopy)]
       : []),
   )
 

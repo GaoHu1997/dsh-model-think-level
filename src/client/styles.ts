@@ -3967,4 +3967,435 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 @media (prefers-reduced-motion: reduce) {
   .bre-fp-all, .bre-fp-action { transition: none; }
 }
+
+/* ==== Composer library toggle (对话 / 生图) ====
+   Pinned to the model switcher's LEFT by position, not by flow: the shell's
+   trailing control row wraps on narrow composers, so an in-flow sibling landed
+   on the line above the switcher, and moving the shell's trigger into a
+   plugin-owned wrapper made React re-render it on every scan. The host is a
+   fixed-position sibling placed against the trigger's measured rect, so no
+   shell node and no shell style is touched. Two chips in one quiet track: the
+   active one wears the plugin's accent tint, the other stays text-only, so the
+   pair reads as one mode switch, not two buttons. */
+/* ==== Generated-image card: the chrome under a generated-image reply ==== */
+.bre-image-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--bre-line-2);
+  border-radius: var(--bre-r-md);
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+}
+.bre-image-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.bre-image-card-name {
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--bre-ink-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bre-image-card-note {
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bre-image-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.bre-image-card-btn {
+  appearance: none;
+  border: 1px solid var(--bre-line-2);
+  border-radius: var(--bre-r-sm);
+  padding: 3px 9px;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  color: var(--bre-ink-2);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.bre-image-card-btn:hover {
+  color: var(--bre-ink-1);
+  border-color: var(--bre-line-3);
+  background: var(--bre-sunken-2);
+}
+.bre-image-card-btn:focus-visible {
+  outline: 2px solid var(--bre-accent-line);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bre-image-card-btn {
+    transition: none;
+  }
+}
+
+
+/* ==== Image-generation config (生图配置) ====
+   The Models-page title-row button and the floating pane it opens. The pane's
+   z-index clears the settings dialog's own opaque overlay (z-index 1000,
+   styles.ts) — the same arithmetic the drop line above uses, kept at 1010 per
+   the design so any host toast (1200) still lands above it. */
+/* The host's title is a bare h2 (block, full-width); the seat needs a flex
+   line to hold the right edge. Plugin-owned, removed with the seat. */
+.bre-config-title-line {
+  display: flex;
+  align-items: center;
+}
+.bre-config-host {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  flex: none;
+}
+.bre-config-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--bre-line-2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  color: var(--bre-ink-2);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.bre-config-btn:hover {
+  color: var(--bre-ink-1);
+  border-color: var(--bre-line-3);
+}
+.bre-config-btn-icon { flex: none; display: block; }
+
+.bre-config-backdrop {
+  position: fixed;
+  inset: 0;
+  background: #00000066;
+  z-index: 1010;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.bre-config-pane {
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(640px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  border: 1px solid var(--bre-line-2);
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  box-shadow: 0 18px 48px #00000038;
+  overflow: hidden;
+}
+.bre-config-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--bre-line-1);
+}
+.bre-config-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--bre-ink-1);
+}
+.bre-config-close {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--bre-ink-3);
+  font-size: 13px;
+  cursor: pointer;
+}
+.bre-config-close:hover { background: var(--bre-accent-weak); color: var(--bre-ink-1); }
+.bre-config-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+.bre-config-foot {
+  padding: 8px 16px 12px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+}
+.bre-config-loading {
+  padding: 18px 4px;
+  font-size: 12.5px;
+  color: var(--bre-ink-3);
+}
+/* The first paint of the pane: real structure, grey rows, no spinner wobble. */
+.bre-config-loading-text {
+  margin-bottom: 12px;
+}
+.bre-config-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bre-config-skeleton-row {
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--bre-line-1);
+  background: linear-gradient(90deg, var(--bre-sunken-2) 0%, var(--bre-sunken-1) 50%, var(--bre-sunken-2) 100%);
+  background-size: 200% 100%;
+  animation: bre-config-shimmer 1.4s linear infinite;
+}
+@keyframes bre-config-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bre-config-skeleton-row { animation: none; }
+}
+
+.bre-config-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.bre-config-card-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--bre-ink-1);
+}
+.bre-config-card-sub {
+  font-size: 11.5px;
+  color: var(--bre-ink-3);
+}
+.bre-config-notice {
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--bre-accent-line);
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
+  font-size: 12px;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+}
+
+.bre-config-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: var(--bre-r-pill);
+  border: 1px solid var(--bre-line-2);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+  white-space: nowrap;
+}
+.bre-config-badge-ok { color: #1c7c3c; border-color: #1c7c3c33; background: #1c7c3c0f; }
+.bre-config-badge-bad { color: #b3261e; border-color: #b3261e33; background: #b3261e0f; }
+.bre-config-badge-unknown { color: var(--bre-ink-3); }
+.bre-config-badge-default { color: var(--bre-accent); border-color: var(--bre-accent-line); background: var(--bre-accent-weak); }
+
+.bre-config-defaults {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--bre-ink-3);
+}
+.bre-config-select {
+  border: 1px solid var(--bre-line-2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  color: var(--bre-ink-1);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  max-width: 128px;
+}
+
+/* The timeout cell of the defaults row: a select over five minute steps
+   (5/10/15/30/60), milliseconds in defaults.timeoutMs. */
+.bre-config-timeout {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 2px;
+}
+.bre-config-timeout .bre-config-select {
+  max-width: none;
+}
+
+.bre-config-rows {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--bre-line-1);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.bre-config-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+}
+.bre-config-row + .bre-config-row { border-top: 1px solid var(--bre-line-1); }
+.bre-config-radio { flex: none; accent-color: var(--bre-accent); }
+.bre-config-name { min-width: 0; flex: 1 1 auto; }
+.bre-config-name-main {
+  font-size: 12.5px;
+  color: var(--bre-ink-1);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.bre-config-name-sub {
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--bre-ink-3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.bre-config-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.bre-config-btn-ghost {
+  border: 1px solid var(--bre-line-2);
+  border-radius: 6px;
+  background: none;
+  color: var(--bre-ink-2);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 17px;
+  padding: 3px 9px;
+  cursor: pointer;
+  flex: none;
+}
+.bre-config-btn-ghost:hover { color: var(--bre-ink-1); border-color: var(--bre-line-3); }
+.bre-config-btn-ghost:disabled { opacity: 0.55; cursor: default; }
+.bre-config-btn-primary {
+  border: none;
+  border-radius: 6px;
+  background: var(--dsw-alias-label-primary, #17181a);
+  color: var(--dsw-alias-bg-elevated, #ffffff);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 5px 12px;
+  cursor: pointer;
+  flex: none;
+}
+.bre-config-btn-primary:disabled { opacity: 0.6; cursor: default; }
+
+.bre-config-empty {
+  border: 1px dashed var(--bre-line-3);
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.bre-config-empty-text { font-size: 12.5px; color: var(--bre-ink-2); }
+.bre-config-empty-hint { font-size: 11.5px; color: var(--bre-ink-3); line-height: 16px; }
+.bre-config-suspects {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.bre-config-suspect {
+  border: 1px solid var(--bre-line-2);
+  border-radius: var(--bre-r-pill);
+  padding: 2px 9px;
+  font-size: 11.5px;
+  color: var(--bre-ink-2);
+}
+
+.bre-config-mcp {
+  margin-top: 14px;
+  border-top: 1px solid var(--bre-line-1);
+  padding-top: 12px;
+}
+.bre-config-mcp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--bre-ink-1);
+}
+.bre-config-mcp-status {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+  overflow-wrap: anywhere;
+}
+.bre-config-mcp-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.bre-config-mcp-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+}
+
+.bre-config-switch {
+  margin-left: auto;
+  width: 34px;
+  height: 20px;
+  border-radius: var(--bre-r-pill);
+  border: 1px solid var(--bre-line-3);
+  background: var(--bre-line-1);
+  position: relative;
+  cursor: pointer;
+  padding: 0;
+  flex: none;
+}
+.bre-config-switch.on { background: var(--bre-accent); border-color: var(--bre-accent); }
+.bre-config-switch:disabled { opacity: 0.6; cursor: default; }
+.bre-config-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px #00000033;
+  transition: left 120ms ease;
+}
+.bre-config-switch.on .bre-config-switch-knob { left: 16px; }
+
 `
