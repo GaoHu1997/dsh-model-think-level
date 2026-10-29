@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-think-level",
-  "version": "2.0.3",
+  "version": "2.1.0",
   "description": "DSH 的第三方模型补齐思考等级：在官方 Models 页每个模型行注入 Thinking 开关和强度/模态编辑器，在输入框模型菜单加供应商→模型选择器、视觉徽章与等级行，并带搜索、拖拽排序、供应商启用开关；以及按路由接管请求头与 user-agent。",
   "license": "MIT",
   "author": "GaoHu1997 <gaohu9712@163.com>",
@@ -64,13 +64,12 @@
     }
   },
   "scripts": {
-    "build": "npm run build:clean && npm run build:host && npm run build:client && npm run build:image-mcp && npm run build:types",
+    "build": "npm run build:clean && npm run build:host && npm run build:client && npm run build:types",
     "build:clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",
     "check:styles": "node scripts/check-styles.mjs",
     "check:package": "npm pack --dry-run --ignore-scripts --json > .tmp-pack-manifest.json && node scripts/check-package.mjs .tmp-pack-manifest.json",
     "docs:models": "node scripts/generate-models-doc.mjs",
     "build:client": "npm run check:styles && node scripts/build-client.mjs",
-    "build:image-mcp": "node scripts/build-image-mcp.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepare": "npm run build",
