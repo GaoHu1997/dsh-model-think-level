@@ -87,18 +87,19 @@ describe('generations request construction', () => {
     const headers = new Headers(captured[0]!.init.headers)
     expect(headers.get('authorization')).toBe(`Bearer ${KEY}`)
     // The file landed under the configured outputDir, and the result names it.
-    expect(existsSync(result.filePath)).toBe(true)
-    expect(result.filePath.startsWith(join(home, 'dsh-model-think-level'))).toBe(true)
+    const first = result.images[0]!
+    expect(existsSync(first.filePath)).toBe(true)
+    expect(first.filePath.startsWith(join(home, 'dsh-model-think-level'))).toBe(true)
     expect(result.mime).toBe('image/png')
     expect(result.model).toBe('openai/gpt-image-1')
-    expect(result.data).toBe(PNG_B64)
+    expect(first.data).toBe(PNG_B64)
   })
 
   it('keeps the file bytes equal to the decoded b64', async () => {
     writeImageConfig(syncImageConfig(emptyImageConfig(), PROVIDERS), file)
     const deps = depsWith({ send: jsonSend(200, { data: [{ b64_json: PNG_B64 }] }) })
     const result = await generateImage(deps, { prompt: 'a red apple' })
-    expect(readFileSync(result.filePath).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe(true)
+    expect(readFileSync(result.images[0]!.filePath).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe(true)
   })
 
   it('follows a url answer when the relay sends links instead of b64', async () => {
@@ -111,7 +112,7 @@ describe('generations request construction', () => {
     }) as typeof fetch
     const result = await generateImage(depsWith({ send }), { prompt: 'x' })
     expect(calls[1]).toBe('https://cdn.example/img.png')
-    expect(readFileSync(result.filePath).equals(Buffer.from([1, 2, 3]))).toBe(true)
+    expect(readFileSync(result.images[0]!.filePath).equals(Buffer.from([1, 2, 3]))).toBe(true)
   })
 })
 
@@ -241,10 +242,12 @@ describe('file naming', () => {
     })
     const first = await generateImage(deps, { prompt: 'same prompt' })
     const second = await generateImage(deps, { prompt: 'same prompt' })
-    expect(first.filePath).not.toBe(second.filePath)
-    expect(existsSync(first.filePath)).toBe(true)
-    expect(existsSync(second.filePath)).toBe(true)
-    expect(second.filePath).toBe(first.filePath.replace(/\.png$/, '-2.png'))
+    const firstPath = first.images[0]!.filePath
+    const secondPath = second.images[0]!.filePath
+    expect(firstPath).not.toBe(secondPath)
+    expect(existsSync(firstPath)).toBe(true)
+    expect(existsSync(secondPath)).toBe(true)
+    expect(secondPath).toBe(firstPath.replace(/\.png$/, '-2.png'))
     void stamp
   })
 
@@ -311,17 +314,17 @@ describe('error taxonomy and sanitization', () => {
   })
 })
 
-describe('outputPath (the MCP tool\'s `path` argument)', () => {
+describe('outputPath (the tool path argument)', () => {
   it('a .png path is honored exactly, and an existing one gains -2 (never overwritten)', async () => {
     writeImageConfig(syncImageConfig(emptyImageConfig(), PROVIDERS), file)
     const target = join(home, 'custom', 'picture.png')
     const deps = depsWith({ send: jsonSend(200, { data: [{ b64_json: PNG_B64 }] }), now: () => 1 })
     const first = await generateImage(deps, { prompt: 'x', outputPath: target })
-    expect(first.filePath).toBe(target)
+    expect(first.images[0]!.filePath).toBe(target)
     const second = await generateImage(deps, { prompt: 'x', outputPath: target })
-    expect(second.filePath).toBe(join(home, 'custom', 'picture-2.png'))
+    expect(second.images[0]!.filePath).toBe(join(home, 'custom', 'picture-2.png'))
     expect(existsSync(target)).toBe(true)
-    expect(existsSync(second.filePath)).toBe(true)
+    expect(existsSync(second.images[0]!.filePath)).toBe(true)
   })
 
   it('an existing directory (or any non-.png spelling) receives the slug-timestamp naming', async () => {
@@ -329,24 +332,24 @@ describe('outputPath (the MCP tool\'s `path` argument)', () => {
     const dir = join(home, 'albums')
     const deps = depsWith({ send: jsonSend(200, { data: [{ b64_json: PNG_B64 }] }) })
     const result = await generateImage(deps, { prompt: '一只橘猫', outputPath: dir })
-    expect(dirname(result.filePath)).toBe(dir)
-    expect(result.filePath).toMatch(/一只橘猫-\d+\.png$/)
+    expect(dirname(result.images[0]!.filePath)).toBe(dir)
+    expect(result.images[0]!.filePath).toMatch(/一只橘猫-\d+\.png$/)
     // A non-png name is a DIRECTORY per the contract (png bytes never masquerade
     // under another extension), and the file lands inside it.
     const odd = join(home, 'weird-name')
     const oddResult = await generateImage(deps, { prompt: 'x', outputPath: odd })
-    expect(dirname(oddResult.filePath)).toBe(odd)
+    expect(dirname(oddResult.images[0]!.filePath)).toBe(odd)
     // A trailing separator also reads as a directory, even when absent.
     const trailing = join(home, 'made', 'up') + (process.platform === 'win32' ? '\\' : '/')
     const trailingResult = await generateImage(deps, { prompt: 'x', outputPath: trailing })
-    expect(dirname(trailingResult.filePath)).toBe(join(home, 'made', 'up'))
+    expect(dirname(trailingResult.images[0]!.filePath)).toBe(join(home, 'made', 'up'))
   })
 
   it('absent outputPath keeps the config outputDir behavior', async () => {
     writeImageConfig(syncImageConfig(emptyImageConfig(), PROVIDERS), file)
     const deps = depsWith({ send: jsonSend(200, { data: [{ b64_json: PNG_B64 }] }) })
     const result = await generateImage(deps, { prompt: 'x' })
-    expect(result.filePath.startsWith(join(home, 'dsh-model-think-level', 'generated-images'))).toBe(true)
+    expect(result.images[0]!.filePath.startsWith(join(home, 'dsh-model-think-level', 'generated-images'))).toBe(true)
   })
 })
 
@@ -383,6 +386,62 @@ describe('caller cancellation (the user pressed stop)', () => {
     const error = await generateImage(deps, { prompt: 'a red apple', signal: controller.signal }).catch((caught: unknown) => caught)
     expect((error as GenerateError).kind).toBe('aborted')
     expect(captured).toHaveLength(0)
+  })
+})
+
+describe('multi-image (every answered entry lands)', () => {
+  it('writes one file per returned image, in order, with advancing suffixes', async () => {
+    writeImageConfig(syncImageConfig(emptyImageConfig(), PROVIDERS), file)
+    const deps = depsWith({
+      send: jsonSend(200, { data: [{ b64_json: PNG_B64 }, { b64_json: PNG_B64 }, { b64_json: PNG_B64 }] }),
+      now: () => 1,
+    })
+    const result = await generateImage(deps, { prompt: 'a cat row', n: 3 })
+    expect(result.images).toHaveLength(3)
+    for (const image of result.images) expect(existsSync(image.filePath)).toBe(true)
+    expect(new Set(result.images.map(image => image.filePath)).size).toBe(3)
+    // One slug, one stamp: the never-overwrite rule advances -2, -3 in order.
+    const first = result.images[0]!.filePath
+    expect(result.images[1]!.filePath).toBe(first.replace(/\.png$/, '-2.png'))
+    expect(result.images[2]!.filePath).toBe(first.replace(/\.png$/, '-3.png'))
+  })
+
+  it('a relay answering fewer images than n yields exactly what arrived', async () => {
+    writeImageConfig(syncImageConfig(emptyImageConfig(), PROVIDERS), file)
+    const deps = depsWith({ send: jsonSend(200, { data: [{ b64_json: PNG_B64 }] }) })
+    const result = await generateImage(deps, { prompt: 'x', n: 4 })
+    expect(result.images).toHaveLength(1)
+    expect(result.paramsUsed.n).toBe(4)
+  })
+})
+
+describe('referenceFiles (the attachment-backed reference channel)', () => {
+  it('rides the edits endpoint beside local paths, with its own filename and mime', async () => {
+    writeImageConfig(syncImageConfig(emptyImageConfig(), PROVIDERS), file)
+    const reference = join(home, 'ref.png')
+    writeFileSync(reference, Buffer.from([1, 2, 3, 4]), 'utf8')
+    const captured: Captured[] = []
+    const deps = depsWith({ send: jsonSend(200, { data: [{ b64_json: PNG_B64 }] }, captured) })
+    await generateImage(deps, {
+      prompt: 'combine',
+      referenceImages: [reference],
+      referenceFiles: [{ name: 'from-chat.png', mime: 'image/jpeg', bytes: Uint8Array.from([5, 6, 7]) }],
+    })
+    expect(captured[0]!.url).toBe('https://api.example/v1/images/edits')
+    const body = Buffer.from(captured[0]!.init.body as Uint8Array).toString('latin1')
+    expect(body).toContain('filename="ref.png"')
+    expect(body).toContain('filename="from-chat.png"')
+    expect(body).toContain('Content-Type: image/jpeg')
+    expect(body).toContain('')
+  })
+
+  it('referenceFiles alone switch to the edits endpoint', async () => {
+    writeImageConfig(syncImageConfig(emptyImageConfig(), PROVIDERS), file)
+    const captured: Captured[] = []
+    const deps = depsWith({ send: jsonSend(200, { data: [{ b64_json: PNG_B64 }] }, captured) })
+    await generateImage(deps, { prompt: 'x', referenceFiles: [{ name: 'a.png', mime: 'image/png', bytes: Uint8Array.from([1]) }] })
+    expect(captured).toHaveLength(1)
+    expect(captured[0]!.url).toBe('https://api.example/v1/images/edits')
   })
 })
 

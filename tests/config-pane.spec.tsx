@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 /**
- * The config pane (配置页浮层): the derived model list, the default-model
- * radio, per-row endpoint badges and params, the empty state's one-click
- * marking (through the settings write channel, never a raw file edit), the MCP
- * switch driven by the derived install state, and the close paths + z-index
- * fence.
+ * The config pane (配置页浮层): the params row, the default-model select under
+ * it, the derived model list with per-row endpoint badges and params, the empty
+ * state's one-click marking (through the settings write channel, never a raw
+ * file edit), the built-in-tool status card driven by the host-reported
+ * registration state, and the close paths + z-index fence.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,7 +14,7 @@ import { act } from 'react'
 import { ConfigPane } from '../src/client/ConfigPane.js'
 import { clearImageConfigCache } from '../src/client/image-config-client.js'
 import { STYLES } from '../src/client/styles.js'
-import { IMAGE_CONFIG_PATH, IMAGE_GENERATE_PATH, IMAGE_MCP_PATH } from '../src/constants.js'
+import { IMAGE_CONFIG_PATH, IMAGE_GENERATE_PATH } from '../src/constants.js'
 import type { RemoteApi } from '../src/client/types.js'
 
 /** The config the host answers a GET with. */
@@ -39,10 +39,7 @@ const CONFIG_VIEW = {
   defaultModel: 'openai/gpt-image-1',
   defaults: { size: '1024x1024', quality: 'high', n: 1, timeoutMs: 300000 },
   outputDir: 'generated-images',
-  mcp: {
-    installed: false, serverName: 'dsh-image', toolName: 'mcp__dsh-image__generate_image',
-    restartRequired: false, diagnostics: { lastCheckAt: null, ok: false, error: null },
-  },
+  tool: { registered: true, name: 'generate_image' },
 }
 
 /** The settings Remote face the marking write goes through. */
@@ -144,14 +141,53 @@ describe('ConfigPane', () => {
     expect(subs[0]).toBe('OpenAI 官方')
   })
 
-  it('marks the default model with the radio and the 「默认」 badge', async () => {
+  it('shows the default model in the second-row select and marks the row with the 「默认」 badge', async () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
-    const radios = [...document.querySelectorAll<HTMLInputElement>('.bre-config-radio')]
-    expect(radios[0]!.checked).toBe(true)
-    expect(radios[1]!.checked).toBe(false)
+    const select = document.querySelector<HTMLSelectElement>('.bre-config-default-select')!
+    expect(select.value).toBe('openai/gpt-image-1')
+    expect([...select.options].map(option => option.text)).toEqual(['GPT-Image-1', 'CogView-3-Plus'])
     expect(document.body.textContent).toContain('imagegenDefaultBadge')
+  })
+
+  it('the params row comes first and the default-model select sits under it', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const children = [...document.querySelector('.bre-config-card')!.children]
+    const paramsAt = children.findIndex(node => node.classList.contains('bre-config-defaults'))
+    const defaultAt = children.findIndex(node => node.classList.contains('bre-config-default-row'))
+    const rowsAt = children.findIndex(node => node.classList.contains('bre-config-rows'))
+    expect(paramsAt).toBeGreaterThanOrEqual(0)
+    expect(defaultAt).toBe(paramsAt + 1)
+    expect(rowsAt).toBeGreaterThan(defaultAt)
+    // The params themselves (size / quality / n / timeout) stay in row one.
+    expect(children[paramsAt]!.querySelectorAll('select')).toHaveLength(4)
+  })
+
+  it('shows the 「未设置」 placeholder when no default model is picked yet', async () => {
+    handleFetch = () => new Response(JSON.stringify({ ...CONFIG_VIEW, defaultModel: null }), { status: 200 })
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const select = document.querySelector<HTMLSelectElement>('.bre-config-default-select')!
+    expect(select.value).toBe('')
+    expect(select.options[0]!.text).toBe('imagegenDefaultModelNone')
+    expect(select.options[0]!.disabled).toBe(true)
+    // The models are still one pick away; the empty placeholder is not selectable.
+    expect([...select.options].map(option => option.value)).toEqual(['', 'openai/gpt-image-1', 'zhipu/cogview-3-plus'])
+  })
+
+  it('disambiguates two routes carrying the same model label', async () => {
+    const twin = { ...CONFIG_VIEW.models[1]!, id: 'openai/cogview-3-plus', route: 'openai', providerLabel: 'OpenAI' }
+    handleFetch = () => new Response(JSON.stringify({ ...CONFIG_VIEW, models: [CONFIG_VIEW.models[1]!, twin] }), { status: 200 })
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const optionTexts = [...document.querySelector('.bre-config-default-select')!.querySelectorAll('option')]
+      .map(option => option.textContent)
+    expect(optionTexts).toEqual(['CogView-3-Plus · zhipu', 'CogView-3-Plus · OpenAI'])
   })
 
   it('picking another default saves through the route and re-renders', async () => {
@@ -166,35 +202,25 @@ describe('ConfigPane', () => {
     }
     mountPane(api, () => {})
     await flush()
-    const radios = [...document.querySelectorAll<HTMLInputElement>('.bre-config-radio')]
-    await act(async () => { radios[1]!.click() })
+    const select = document.querySelector<HTMLSelectElement>('.bre-config-default-select')!
+    await act(async () => {
+      select.value = 'zhipu/cogview-3-plus'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
     await flush()
     expect(posts).toHaveLength(1)
     expect(posts[0]!.body).toMatchObject({ op: 'save', defaultModel: 'zhipu/cogview-3-plus' })
   })
 
-  it('the per-row size select offers the 1K/2K/4K ladder and saves a pixel override', async () => {
+  it('a model row carries only its own actions — no per-row param selects', async () => {
     const { api } = fakeApi({})
-    const posts: unknown[] = []
-    handleFetch = (url, init) => {
-      if (init?.method === 'POST' && url === IMAGE_CONFIG_PATH) {
-        posts.push(JSON.parse(String(init.body)))
-        return new Response(JSON.stringify({ ok: true }), { status: 200 })
-      }
-      return new Response(JSON.stringify(CONFIG_VIEW), { status: 200 })
-    }
     mountPane(api, () => {})
     await flush()
-    const selects = [...document.querySelectorAll<HTMLSelectElement>('.bre-config-row select')]
-    expect([...selects[0]!.options].map(option => option.text)).toEqual(['1K', '2K', '4K'])
-    // The stored 1536x1024 legacy size reads as the nearest tier (1K here).
-    expect(selects[0]!.value).toBe('1024x1024')
-    await act(async () => {
-      selects[0]!.value = '2048x2048'
-      selects[0]!.dispatchEvent(new Event('change', { bubbles: true }))
-    })
-    await flush()
-    expect(posts[0]).toMatchObject({ op: 'save', models: [{ id: 'openai/gpt-image-1', size: '2048x2048' }] })
+    // The params live in one row above; a model row must not repeat them.
+    expect(document.querySelectorAll('.bre-config-row select')).toHaveLength(0)
+    const firstRow = document.querySelector('.bre-config-row')!
+    expect([...firstRow.querySelectorAll('button')].map(button => button.textContent))
+      .toEqual(['imagegenTestEndpoint', 'imagegenProbe'])
   })
 
   it('the defaults size select offers the same ladder and saves the pixel value', async () => {
@@ -269,89 +295,68 @@ describe('ConfigPane', () => {
       .toEqual(['120000', '300000'])
   })
 
-  it('the MCP switch installs through the route and reflects the derived state', async () => {
+  it('the built-in tool card reports the registered tool name from the host', async () => {
     const { api } = fakeApi({})
-    let installed = false
+    mountPane(api, () => {})
+    await flush()
+    expect(document.body.textContent).toContain('imagegenToolTitle')
+    expect(document.body.textContent).toContain('generate_image')
+    expect(document.body.textContent).toContain('imagegenToolRegistered')
+    // The test button is enabled with a default model present.
+    const test = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenToolTest')!
+    expect(test.disabled).toBe(false)
+  })
+
+  it('the tool card says unregistered when the host carries no tools service', async () => {
+    const { api } = fakeApi({})
+    handleFetch = () => new Response(JSON.stringify({ ...CONFIG_VIEW, tool: { registered: false, name: null } }), { status: 200 })
+    mountPane(api, () => {})
+    await flush()
+    expect(document.body.textContent).toContain('imagegenToolUnregistered')
+    // The test button still works: it exercises the shared core through the
+    // route, which exists even where the tools service does not.
+    const test = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenToolTest')!
+    expect(test.disabled).toBe(false)
+  })
+
+  it("the tool card's test button runs one real generation through the shared core", async () => {
+    const { api } = fakeApi({})
+    const posts: { url: string; body: Record<string, unknown> }[] = []
     handleFetch = (url, init) => {
-      if (init?.method === 'POST' && url === IMAGE_MCP_PATH) {
-        expect(JSON.parse(String(init.body))).toMatchObject({ action: 'install' })
-        installed = true
-        return new Response(JSON.stringify({ ok: true, selfcheck: { ok: true, error: null } }), { status: 200 })
+      if (init?.method === 'POST' && url === IMAGE_GENERATE_PATH) {
+        posts.push({ url, body: JSON.parse(String(init.body)) })
+        return new Response(JSON.stringify({ ok: true, images: ['/out/a.png'], model: 'openai/gpt-image-1', paramsUsed: { size: '1024x1024', quality: 'high', n: 1 } }), { status: 200 })
       }
-      return new Response(JSON.stringify({ ...CONFIG_VIEW, mcp: { ...CONFIG_VIEW.mcp, installed } }), { status: 200 })
+      return new Response(JSON.stringify(CONFIG_VIEW), { status: 200 })
     }
     mountPane(api, () => {})
     await flush()
-    const toggle = document.querySelector<HTMLButtonElement>('.bre-config-switch')!
-    expect(toggle.classList.contains('on')).toBe(false)
-    await act(async () => { toggle.click() })
+    const test = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenToolTest')!
+    await act(async () => { test.click() })
     await flush()
-    expect(document.querySelector<HTMLButtonElement>('.bre-config-switch')!.classList.contains('on')).toBe(true)
-    expect(document.body.textContent).toContain('mcp__dsh-image__generate_image')
+    // The defaults apply: no model/size/quality/n in the body.
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.body).toEqual({ prompt: 'a red apple on a white table' })
+    expect(document.body.textContent).toContain('imagegenProbeDone')
+    expect(document.body.textContent).toContain('/out/a.png')
   })
 
-  it('install shows 「热加载中」 and clears it once the poll observes the derived state', async () => {
+  it('a multi-image test generation names the count and every path', async () => {
     const { api } = fakeApi({})
-    let installed = false
-    let reads = 0
     handleFetch = (url, init) => {
-      if (init?.method === 'POST' && url === IMAGE_MCP_PATH) {
-        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      if (init?.method === 'POST' && url === IMAGE_GENERATE_PATH) {
+        return new Response(JSON.stringify({ ok: true, images: ['/out/a.png', '/out/a-2.png'], model: 'openai/gpt-image-1', paramsUsed: { size: '1024x1024', quality: 'high', n: 2 } }), { status: 200 })
       }
-      reads += 1
-      // The first post-action read still shows the old state (HMR in flight);
-      // the derived state moves only from the next read on.
-      const visible = reads >= 3
-      void installed
-      return new Response(JSON.stringify({ ...CONFIG_VIEW, mcp: { ...CONFIG_VIEW.mcp, installed: visible } }), { status: 200 })
+      return new Response(JSON.stringify(CONFIG_VIEW), { status: 200 })
     }
-    vi.useFakeTimers()
-    try {
-      mountPane(api, () => {})
-      await flush()
-      const toggle = document.querySelector<HTMLButtonElement>('.bre-config-switch')!
-      await act(async () => { toggle.click() })
-      await flush()
-      // Mid-flight: the submitted line is up, the poll is waiting for HMR.
-      expect(document.body.textContent).toContain('mcpHotReload')
-      await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
-      // The poll's second read sees the state moved: notice cleared, switch on.
-      expect(document.body.textContent).not.toContain('mcpHotReload')
-      expect(document.body.textContent).not.toContain('mcpRestartHint')
-      expect(document.querySelector<HTMLButtonElement>('.bre-config-switch')!.classList.contains('on')).toBe(true)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a poll that exhausts without the state moving lands the conservative restart hint', async () => {
-    const { api } = fakeApi({})
-    let installed = false
-    let installs = 0
-    handleFetch = (url, init) => {
-      if (init?.method === 'POST' && url === IMAGE_MCP_PATH) {
-        installs += 1
-        return new Response(JSON.stringify({ ok: true }), { status: 200 })
-      }
-      // installed stays false forever: the hot reload never lands here.
-      return new Response(JSON.stringify({ ...CONFIG_VIEW, mcp: { ...CONFIG_VIEW.mcp, installed } }), { status: 200 })
-    }
-    vi.useFakeTimers()
-    try {
-      mountPane(api, () => {})
-      await flush()
-      const toggle = document.querySelector<HTMLButtonElement>('.bre-config-switch')!
-      await act(async () => { toggle.click() })
-      await flush()
-      expect(document.body.textContent).toContain('mcpHotReload')
-      // Burn the whole poll window (5 attempts × 1s): the hint replaces it.
-      await act(async () => { await vi.advanceTimersByTimeAsync(6000) })
-      expect(document.body.textContent).toContain('mcpRestartHint')
-      expect(installs).toBe(1) // the poll reads, never re-installs
-      void installed
-    } finally {
-      vi.useRealTimers()
-    }
+    mountPane(api, () => {})
+    await flush()
+    const test = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenToolTest')!
+    await act(async () => { test.click() })
+    await flush()
+    expect(document.body.textContent).toContain('imagegenProbeDoneMulti')
+    expect(document.body.textContent).toContain('/out/a.png')
+    expect(document.body.textContent).toContain('/out/a-2.png')
   })
 
   it('the empty state offers one-click marking through the settings write channel', async () => {
@@ -384,7 +389,7 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({})
     handleFetch = (url, init) => {
       if (init?.method === 'POST' && url === IMAGE_GENERATE_PATH) {
-        return new Response(JSON.stringify({ ok: true, filePath: '/out/x.png', mime: 'image/png', model: 'openai/gpt-image-1', paramsUsed: { size: '1024x1024', quality: 'high', n: 1 } }), { status: 200 })
+        return new Response(JSON.stringify({ ok: true, images: ['/out/x.png'], model: 'openai/gpt-image-1', paramsUsed: { size: '1024x1024', quality: 'high', n: 1 } }), { status: 200 })
       }
       return new Response(JSON.stringify(CONFIG_VIEW), { status: 200 })
     }

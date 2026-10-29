@@ -72,7 +72,7 @@ describe('registerImagegenCompletion', () => {
         { id: 'zhipu/cogview-3-plus', label: 'CogView', route: 'zhipu', modelId: 'cogview-3-plus', api: 'images', baseURL: '', endpoint: { kind: 'images', status: 'unverified', checkedAt: null }, params: { sizes: [], qualities: [], maxN: 4, responseFormat: 'b64_json' }, lastGoodParams: null },
       ],
       defaultModel: 'openai/gpt-image-1',
-      defaults: {}, outputDir: '', mcp: { installed: false, serverName: '', toolName: '', restartRequired: false, diagnostics: { lastCheckAt: null, ok: false, error: null } },
+      defaults: {}, outputDir: '', tool: { registered: true, name: 'generate_image' },
     }), { status: 200 })) as unknown as typeof globalThis.fetch)
     const sources: Record<string, unknown>[] = []
     const ctx = {
@@ -114,7 +114,7 @@ describe('registerImagegenCompletion', () => {
     let payload = { models: [{ id: 'a/x', label: 'A' }], defaultModel: null }
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       ok: true, ...payload, defaults: {}, outputDir: '',
-      mcp: { installed: false, serverName: '', toolName: '', restartRequired: false, diagnostics: { lastCheckAt: null, ok: false, error: null } },
+      tool: { registered: false, name: null },
     }), { status: 200 })) as unknown as typeof globalThis.fetch)
     const sources: Record<string, unknown>[] = []
     registerImagegenCompletion({ inputTriggers: { registerSource: (s: Record<string, unknown>) => { sources.push(s) } } } as never)

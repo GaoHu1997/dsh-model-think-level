@@ -19,13 +19,12 @@ import type { GenerateDeps, GenerateResult } from '../src/image/generate.js'
 import { GenerateError } from '../src/image/generate.js'
 
 const generate = vi.fn(async (): Promise<GenerateResult> => ({
-  filePath: '/out/a-cat-1.png',
+  images: [{ filePath: '/out/a-cat-1.png', data: 'aGk=' }],
   mime: 'image/png',
   model: 'openai/gpt-image-1',
   prompt: 'a cat',
   paramsUsed: { size: '1024x1024', quality: 'high', n: 1 },
   revisions: [],
-  data: 'aGk=',
 }))
 
 const deps: ImagegenDeps = {
@@ -111,9 +110,9 @@ describe('handler', () => {
       { ...deps, echo },
     )
     const handler = registered[0]!['handler'] as (invocation: unknown) => Promise<unknown>
-    const answer = await handler({ args: 'openai/gpt-image-1 --size 1024x1024 a cat' }) as { ok: boolean; filePath?: string; model?: string }
+    const answer = await handler({ args: 'openai/gpt-image-1 --size 1024x1024 a cat' }) as { ok: boolean; filePaths?: readonly string[]; model?: string }
     expect(answer.ok).toBe(true)
-    expect(answer.filePath).toBe('/out/a-cat-1.png')
+    expect(answer.filePaths).toEqual(['/out/a-cat-1.png'])
     expect(answer.model).toBe('openai/gpt-image-1')
     expect(generate).toHaveBeenCalledWith(
       deps.generateDeps,

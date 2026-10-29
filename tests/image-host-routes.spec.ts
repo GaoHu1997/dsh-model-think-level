@@ -1,7 +1,9 @@
 /**
- * apply()-level integration for the image routes: the three same-origin paths
- * register, the config file syncs from the settings document, and a generation
- * through the route lands on disk — over a fake host shaped like the real one.
+ * apply()-level integration for the image wiring: the same-origin paths
+ * register, the config file syncs from the settings document, a generation
+ * through the route lands on disk, and the native `generate_image` tool
+ * registers when the host carries the tools/attachments services — over a
+ * fake host shaped like the real one.
  */
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -11,7 +13,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { imageConfigFilePath, readImageConfig } from '../src/image/config.js'
 import { emptyIndex } from '../src/headers-core.js'
-import { IMAGE_CONFIG_PATH, IMAGE_GENERATE_PATH, IMAGE_MCP_PATH } from '../src/constants.js'
+import { IMAGE_CONFIG_PATH, IMAGE_GENERATE_PATH } from '../src/constants.js'
 
 type HostCtx = Parameters<typeof import('../src/index.js').apply>[0]
 
@@ -43,11 +45,48 @@ const PROVIDERS = () => ({
   },
 })
 
-/** A minimal cordis context face capturing what apply() touches. */
-function fakeHost(settings: { describe(): unknown[] }) {
+/**
+ * A minimal cordis context face capturing what apply() touches. The inject
+ * callback fires ONLY when every requested service can be provided (cordis
+ * waits otherwise), and `withToolServices` decides whether the tools,
+ * attachments and systemPrompt services exist in this fake host.
+ */
+function fakeHost(settings: { describe(): unknown[] }, options: { withToolServices?: boolean } = {}) {
   const listeners: Array<(ns: unknown) => void> = []
   const routes = new Map<string, (req: unknown, res: unknown) => Promise<void>>()
   const disposers: Array<() => void> = []
+  const systemPromptNames: string[] = []
+  const effect = (setup: () => () => void): void => {
+    const disposer = setup()
+    if (typeof disposer === 'function') {
+      hostCleanups.push(disposer)
+      disposers.push(disposer)
+    }
+  }
+  // The tools registry the deferred injection registers into.
+  const toolsRegistry = new Map<string, unknown>()
+  const tools = {
+    register(definition: { name: string } & Record<string, unknown>): () => void {
+      if (toolsRegistry.has(definition.name)) throw new Error(`tool "${definition.name}" is already registered`)
+      toolsRegistry.set(definition.name, definition)
+      return () => { toolsRegistry.delete(definition.name) }
+    },
+  }
+  const attachments = {
+    async saveImage(input: { data: Uint8Array; mediaType: string; name?: string }) {
+      return { attachmentId: `att-${input.data.length}`, mediaType: input.mediaType, bytes: input.data.length, width: 1, height: 1, ...(input.name === undefined ? {} : { name: input.name }) }
+    },
+    async readImage(ref: { attachmentId: string }) {
+      void ref
+      return { data: Uint8Array.from([9, 8, 7]), ref: { name: 'from-chat.png', mediaType: 'image/png' } }
+    },
+  }
+  const systemPrompt = {
+    context(contribution: { name: string }): () => void {
+      systemPromptNames.push(contribution.name)
+      return () => {}
+    },
+  }
   const ctx = {
     settings,
     inject(deps: string[], cb: (injected: Record<string, unknown>) => void): void {
@@ -61,15 +100,18 @@ function fakeHost(settings: { describe(): unknown[] }) {
           },
         }
       }
+      if (options.withToolServices === true) {
+        if (deps.includes('tools')) injected['tools'] = tools
+        if (deps.includes('attachments')) injected['attachments'] = attachments
+        if (deps.includes('systemPrompt')) injected['systemPrompt'] = systemPrompt
+      }
+      // Cordis waits for EVERY dep; a missing one means the callback never runs.
+      if (Object.keys(injected).length < deps.length) return
+      // The injected value is a Context: it carries effect.
+      injected['effect'] = effect
       cb(injected)
     },
-    effect(setup: () => () => void): void {
-      const disposer = setup()
-      if (typeof disposer === 'function') {
-        hostCleanups.push(disposer)
-        disposers.push(disposer)
-      }
-    },
+    effect,
     on(event: string, cb: (ns: unknown) => void): void {
       if (event === 'settings/document-updated') listeners.push(cb)
     },
@@ -87,6 +129,8 @@ function fakeHost(settings: { describe(): unknown[] }) {
   return {
     ctx,
     routes,
+    toolsRegistry,
+    systemPromptNames,
     emitUpdated: (ns: unknown) => { for (const listener of listeners) listener(ns) },
   }
 }
@@ -172,7 +216,7 @@ describe('apply() image wiring', () => {
     }
   })
 
-  it('GET image-config answers the derived list plus the MCP status block', async () => {
+  it('GET image-config answers the derived list plus the native-tool status block', async () => {
     upstreamUrl = await startUpstream()
     const settings = fakeSettings()
     const { ctx, routes } = fakeHost(settings)
@@ -186,7 +230,46 @@ describe('apply() image wiring', () => {
     const body = JSON.parse(res.body) as Record<string, unknown>
     expect(body['ok']).toBe(true)
     expect((body['models'] as { id: string }[])[0]!.id).toBe('openai/gpt-image-1')
-    expect(body['mcp']).toMatchObject({ installed: false, serverName: 'dsh-image', toolName: 'mcp__dsh-image__generate_image' })
+    // The tool block reports the native registration: this fake host carries
+    // no tools service, so the deferred injection never ran and it reads
+    // unregistered with a null name.
+    expect(body['tool']).toMatchObject({ registered: false, name: null })
+  })
+
+  it('with tool services present, the native tool registers and the status follows it', async () => {
+    upstreamUrl = await startUpstream()
+    const settings = fakeSettings()
+    const { ctx, routes, toolsRegistry, systemPromptNames } = fakeHost(settings, { withToolServices: true })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    // The tool sits in the registry under its primary name, with the output
+    // contract and the execute body the registry requires.
+    expect([...toolsRegistry.keys()]).toEqual(['generate_image'])
+    const definition = toolsRegistry.get('generate_image') as { output?: { schema?: unknown }; execute?: unknown; presentResult?: unknown }
+    expect(typeof definition.execute).toBe('function')
+    expect((definition.output as { schema?: unknown }).schema).toBeDefined()
+    // The system-prompt hint registered beside it.
+    expect(systemPromptNames).toContain('dsh-model-think-level:image-tool')
+    // The status route reports the live registration.
+    const handler = routes.get(IMAGE_CONFIG_PATH)!
+    const { req, res } = reqRes('GET')
+    await handler(req, res)
+    const body = JSON.parse(res.body) as { tool?: { registered: boolean; name: string | null } }
+    expect(body.tool).toMatchObject({ registered: true, name: 'generate_image' })
+  })
+
+  it('disposing the tool unregisters it and the status flips back', async () => {
+    upstreamUrl = await startUpstream()
+    const settings = fakeSettings()
+    const { ctx, routes, toolsRegistry } = fakeHost(settings, { withToolServices: true })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    expect(toolsRegistry.size).toBe(1)
+    // Drain every disposer apply() handed out (the afterEach does the same).
+    for (const cleanup of hostCleanups.splice(0)) cleanup()
+    expect(toolsRegistry.size).toBe(0)
+    const handler = routes.get(IMAGE_CONFIG_PATH)
+    expect(handler).toBeUndefined() // the route went with it (same effect drain)
   })
 
   it('POST image-generate runs the shared core and lands the file (辅通道)', async () => {
@@ -199,31 +282,17 @@ describe('apply() image wiring', () => {
     const { req, res } = reqRes('POST', { prompt: 'a red apple' })
     await handler(req, res)
     expect(res.statusCode).toBe(200)
-    const body = JSON.parse(res.body) as { ok: boolean; filePath?: string; model?: string; error?: string }
+    const body = JSON.parse(res.body) as { ok: boolean; images?: readonly string[]; model?: string; error?: string }
     expect(body.ok).toBe(true)
     expect(body.model).toBe('openai/gpt-image-1')
-    expect(existsSync(body.filePath!)).toBe(true)
+    expect(body.images).toHaveLength(1)
+    expect(existsSync(body.images![0]!)).toBe(true)
     // The config file's lastGoodParams stays untouched (no fallback ran).
     expect(readImageConfig(imageConfigFilePath(home)).models[0]!.lastGoodParams).toBeNull()
   })
-
-  it('POST image-mcp status derives from the (uninstalled) patch file', async () => {
-    upstreamUrl = await startUpstream()
-    const settings = fakeSettings()
-    const { ctx, routes } = fakeHost(settings)
-    const { apply } = await import('../src/index.js')
-    apply(ctx)
-    const handler = routes.get(IMAGE_MCP_PATH)!
-    const { req, res } = reqRes('POST', { action: 'status' })
-    await handler(req, res)
-    const body = JSON.parse(res.body) as { ok: boolean; status?: { installed: boolean; patchFile: string } }
-    expect(body.ok).toBe(true)
-    expect(body.status!.installed).toBe(false)
-    expect(body.status!.patchFile.startsWith(home)).toBe(true)
-    // Nothing was written by a status read.
-    expect(existsSync(body.status!.patchFile)).toBe(false)
-    void readFileSync
-    void writeFileSync
-    void realFs
-  })
 })
+
+void readFileSync
+void writeFileSync
+void realFs
+void emptyIndex

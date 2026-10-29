@@ -655,7 +655,7 @@ describe('ComposerSlider commit', () => {
 
 describe('ComposerSlider image-generation rows and capacity tag', () => {
   it('keeps image-generation models out of the switcher', async () => {
-    // Generation now goes through the MCP tool, so a marked generator must not
+    // Generation now goes through the native generate_image tool, so a marked generator must not
     // be selectable: it would start a chat turn nobody can serve. The row stays
     // declared on the Models page; the composer never lists it — not in the
     // provider count, not in the column, not in the search.

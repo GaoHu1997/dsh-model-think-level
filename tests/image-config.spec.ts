@@ -90,6 +90,7 @@ describe('parseImageConfig', () => {
       defaultModel: 'openai/gpt-image-1',
       outputDir: '',
       defaults: { size: 'huge', quality: 'high', n: 0, timeoutMs: 1 },
+      // A leftover mcp block from the retired stdio server: unknown key, dropped.
       mcp: { serverName: '', nodePath: 42, diagnostics: { ok: 'yes' } },
       models: [
         { id: 'openai/gpt-image-1', route: 'openai', modelId: 'gpt-image-1', api: 'images', providerLabel: 'OpenAI' },
@@ -103,12 +104,11 @@ describe('parseImageConfig', () => {
     expect(config.defaultModel).toBe('openai/gpt-image-1')
     // size "huge" fails the pattern → default; n=0 → default; timeoutMs 1 → default.
     expect(config.defaults).toEqual(emptyImageConfig().defaults)
-    expect(config.mcp.serverName).toBe('dsh-image')
-    expect(config.mcp.nodePath).toBe('')
-    expect(config.mcp.diagnostics.ok).toBe(false)
+    // The stale mcp block never surfaces: the parsed document has no such key.
+    expect('mcp' in config).toBe(false)
     // Duplicates: the FIRST occurrence wins, malformed rows are dropped.
     expect(config.models).toHaveLength(1)
-    expect(config.models[0]!.size).toBeUndefined()
+    expect((config.models[0] as { size?: string }).size).toBeUndefined()
   })
 
   it('keeps an unknown model row (the next sync may re-derive it)', () => {
@@ -202,12 +202,14 @@ describe('syncImageConfig', () => {
     const synced = syncImageConfig(stored, PROVIDERS)
     expect(synced.syncedAt >= stored.syncedAt).toBe(true)
     const kept = synced.models.find(model => model.id === 'openai/gpt-image-1')!
-    // The override survived: endpoint verdict, narrowed params, size pick. The
-    // re-derived baseURL (the settings document wins) updated.
+    // The override survived: endpoint verdict, narrowed params. The re-derived
+    // baseURL (the settings document wins) updated.
     expect(kept.endpoint.status).toBe('ok')
     expect(kept.params.sizes).toEqual(['512x512'])
-    expect(kept.size).toBe('512x512')
     expect(kept.baseURL).toBe('https://api.openai.com/v1')
+    // The old per-row size pick is NOT carried forward: the pane's params row
+    // is the one place it is chosen now.
+    expect((kept as { size?: string }).size).toBeUndefined()
     // And the other two providers' rows appeared.
     expect(synced.models.map(model => model.id)).toHaveLength(3)
   })
@@ -265,16 +267,20 @@ describe('effectiveParams', () => {
   const model = {
     ...emptyImageConfig().models[0]!,
     params: { sizes: ['1024x1024'], qualities: ['low'], maxN: 2, responseFormat: 'b64_json' as const },
-    size: '512x512',
-    quality: 'low',
-    n: 2,
   }
 
-  it('merges in order: request > model row > defaults', () => {
-    expect(effectiveParams(config, model, {})).toEqual({ size: '512x512', quality: 'low', n: 2 })
-    expect(effectiveParams(config, model, { size: '1536x1024' })).toEqual({ size: '1536x1024', quality: 'low', n: 2 })
+  it('merges in order: request > defaults', () => {
+    expect(effectiveParams(config, model, {})).toEqual({ size: '1024x1024', quality: 'high', n: 1 })
+    expect(effectiveParams(config, model, { size: '1536x1024' })).toEqual({ size: '1536x1024', quality: 'high', n: 1 })
     expect(effectiveParams(config, undefined, { quality: 'auto' })).toEqual({ size: '1024x1024', quality: 'auto', n: 1 })
     expect(effectiveParams(config, undefined, {})).toEqual({ size: '1024x1024', quality: 'high', n: 1 })
+  })
+
+  it('a leftover per-row pick from an older build no longer outranks the defaults', () => {
+    // The pane's params row is the single place these are chosen now; an old
+    // image.json may still carry size/quality/n on the row.
+    const stale = { ...model, size: '512x512', quality: 'low', n: 2 } as typeof model
+    expect(effectiveParams(config, stale, {})).toEqual({ size: '1024x1024', quality: 'high', n: 1 })
   })
 
   it('clamps n to the model ability table (never more requests than maxN)', () => {

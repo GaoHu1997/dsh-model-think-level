@@ -73,6 +73,7 @@ import {
   MODEL_ORDER_KEY, parseModelOrders, subscribeModelOrders, syncModelOrders,
 } from './model-order.js'
 import { STYLES } from './styles.ts'
+import { SETTINGS_CHANGED_EVENT } from './events.js'
 import { createComposerMenu } from './injection/composer-menu.js'
 import { createConfiguredInputs } from './configured-inputs.js'
 import { createConfiguredEfforts } from './injection/configured-efforts.js'
@@ -84,9 +85,11 @@ import { modelMenuOf, modelTriggerOf } from './injection/model-menu.js'
 import { registerProviderCardSlot } from './injection/provider-card-slot.js'
 import { registerSliderToggleSlot } from './injection/slider-toggle-slot.js'
 // Image generation (生图): the Models-page title-row button opens the config
-// pane; the `/生图` completion source rides the host input-trigger pipeline.
+// pane; the `/生图` completion source rides the host input-trigger pipeline;
+// the generated-image card renders tool results through the official gallery.
 import { mountConfigPane } from './ConfigPane.tsx'
 import { registerImagegenCompletion, invalidateImagegenModels } from './injection/imagegen-entry.js'
+import { registerImageCard } from './injection/image-card.js'
 
 /** Stable plugin id, matching the cordis.patch.yml row and the bundle id. */
 export const name = PLUGIN_ID
@@ -286,7 +289,13 @@ export function apply(ctx: ClientContext): void {
     const scheduler = createRefreshScheduler(refresh, REFRESH_MIN_INTERVAL_MS)
     const disposers = [
       ctx.remote.$on('settings/document-updated', (ns: unknown) => {
-        if (ns === PI_AI_NS) scheduler.schedule()
+        if (ns === PI_AI_NS) {
+          scheduler.schedule()
+          // The key panels are mounts of their own: tell them the document
+          // moved, so a save re-reads the list (and follows the host's silent
+          // post-save scope probe) without waiting for a remount.
+          document.dispatchEvent(new CustomEvent(SETTINGS_CHANGED_EVENT, { detail: { ns } }))
+        }
       }),
       ctx.on('connection/reset', scheduler.schedule),
     ]
@@ -341,6 +350,11 @@ export function apply(ctx: ClientContext): void {
   // The `/生图` completion source: model-level candidates after the command
   // word, registered only when the host exposes the input-trigger service.
   ctx.effect(() => registerImagegenCompletion(ctx), 'dsh-model-think-level: imagegen completion source')
+
+  // The generated-image card: a keyed tool.call.toolview entry under the tool
+  // name the host reports, rendering results through the official
+  // tool.call.images gallery. Without it the generic tool row shows only text.
+  ctx.effect(() => registerImageCard(ctx, t), 'dsh-model-think-level: image tool card')
 }
 
 export type { BreKey }

@@ -26,9 +26,19 @@ export interface KeyEntry {
   /**
    * The user's model assignment. Absent means a catch-all; an empty array is a
    * concrete empty assignment. Nothing but the user's explicit choice may
-   * change this field.
+   * change this field — except a scope the host's own post-save probe wrote
+   * (marked by {@link KeyEntry.auto}, and re-written by that probe on every
+   * later pass until the user claims the scope with a manual edit).
    */
   readonly models?: readonly string[]
+  /**
+   * Whether the model scope is the probe's assignment rather than the user's.
+   * The host rewrites an auto scope whenever it re-probes the route; a manual
+   * scope edit clears the mark, and a manually claimed scope is never touched
+   * by the probe again. Absent means the scope (or the catch-all) is the
+   * user's, or has never been assigned at all.
+   */
+  readonly auto?: boolean
   /**
    * The wire protocol this key must speak, when it is pinned to one.
    * Absent means AUTOMATIC: each request speaks the wire the model's own family
@@ -116,6 +126,18 @@ export function normalizeKeyDisabled(value: unknown): boolean | undefined {
 }
 
 /**
+ * A stored probe-maintained mark, or undefined when the scope is not the
+ * probe's. Only a literal `true` counts — the same rule as
+ * {@link normalizeKeyDisabled} — so a hand-edited index file cannot half-claim
+ * the mark, and an entry never carries a redundant `auto: false`.
+ * @param value - whatever arrived (the probe's write, or a hand-edited file).
+ * @returns `true` when the scope is the probe's assignment, else undefined.
+ */
+export function normalizeKeyAuto(value: unknown): boolean | undefined {
+  return value === true ? true : undefined
+}
+
+/**
  * The base URLs one provider route can hold, one per endpoint family: an
  * OpenAI-family endpoint and an Anthropic-family endpoint.
  * A key pinned to a protocol uses the matching one; an automatic key (no pin)
@@ -155,6 +177,23 @@ export function normalizeRouteEndpoints(value: unknown): RouteEndpoints | undefi
   return out.openai === undefined && out.anthropic === undefined
     ? undefined
     : out
+}
+
+/**
+ * A stored balance endpoint, or undefined when the value carries nothing usable.
+ *
+ * This is the one URL a provider may add beside its base addresses: the host
+ * queries it (with that route's enabled key) and the Models page shows the
+ * amount in front of the provider's enable switch. It is not a request endpoint
+ * and never takes part in routing, so it is kept outside {@link RouteEndpoints}
+ * — a route may configure a balance URL without configuring either family
+ * address, and vice versa. Blank and non-http(s) values are dropped rather than
+ * stored, so "no balance endpoint" stays distinguishable from an empty string.
+ * @param value - whatever arrived (the card's balance field, or a hand-edited file).
+ * @returns the trimmed URL, or undefined when there is none.
+ */
+export function normalizeBalanceEndpoint(value: unknown): string | undefined {
+  return isEndpointUrl(value) ? value.trim() : undefined
 }
 
 /**

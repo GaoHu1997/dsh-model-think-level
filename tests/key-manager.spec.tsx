@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { KeyManager, type KeyManagerProps } from '../src/client/KeyManager.js'
 import type { KeyAnswer, KeyManagerClient, KeyRow, KeyState } from '../src/client/key-manager-client.js'
+import { SETTINGS_CHANGED_EVENT } from '../src/client/events.js'
 import { mountReact, unmountReact, type ForeignMount } from '../src/client/injection/mount.js'
 
 /** The English copy the component is handed, keyed as the locales are. */
@@ -46,6 +47,7 @@ const COPY: Record<string, string> = {
   keysScopeSaved: 'Models saved.',
   keysScopePlaceholder: 'Model ids, comma separated',
   keysScopeHint: 'Only the ticked models use this key.',
+  keysScopeAutoHint: 'This scope was ticked by the post-save probe; saving an edit here claims it by hand.',
   keysScopeEmpty: 'No models discovered yet.',
   keysDiscover: 'Detect models',
   keysDiscoverHint: 'Probe each key for the models it can reach.',
@@ -75,6 +77,9 @@ const t = (key: string, params?: Record<string, string | number>): string => {
   if (params === undefined) return text
   return Object.entries(params).reduce((carried, [name, value]) => carried.replace(`{${name}}`, String(value)), text)
 }
+
+/** The panel's own debounce between save-driven re-reads (KeyManager constant). */
+const SETTINGS_REFRESH_DEBOUNCE_MS = 300
 
 function state(over: Partial<KeyState> = {}): KeyState {
   return { ok: true, route: 'ofox', entries: [], endpoints: { openai: null, anthropic: null }, ...over }
@@ -405,6 +410,137 @@ describe('the scope chips', () => {
 
     const chips = Array.from(panel.root.querySelectorAll('.bre-keys-chip')).map(chip => chip.textContent?.trim())
     expect(chips).toEqual(['glm-4-air', 'qwen-max'])
+  })
+
+  it('tells the user when a scope is the probe’s, and that saving it claims the scope by hand', async () => {
+    const { client } = recorder({
+      list: async () =>
+        state({
+          entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1', models: ['glm-4-air'], auto: true })],
+          models: ['qwen-max', 'glm-4-air'],
+        }),
+    })
+    const panel = mount({ client })
+    await flush()
+
+    buttonByText(rowOf(panel.root, 'a'), '1 models').click()
+    await flush()
+
+    // The chips show the probe's checks, and the form says whose they are:
+    // a scope the user never ticked must not read as one they did.
+    expect(panel.root.querySelector('.bre-keys-chip.is-selected')?.textContent).toBe('glm-4-air')
+    expect(panel.root.textContent).toContain(COPY.keysScopeAutoHint)
+  })
+})
+
+describe('the probe follow-up', () => {
+  it('shows nothing while the host probes; the checked chips are the only trace', async () => {
+    vi.useFakeTimers()
+    try {
+      const probing = state({
+        probing: true,
+        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
+        models: ['glm-4-air'],
+      })
+      const settled = state({
+        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1', models: ['glm-4-air'], auto: true })],
+        models: ['glm-4-air'],
+      })
+      // The probe takes two rounds to finish: the panel must keep following
+      // while the host keeps saying it is probing, not stop after one.
+      let round = 0
+      const { client, calls } = recorder({ list: async () => (round++ < 2 ? probing : settled) })
+      const panel = mount({ client })
+      await vi.advanceTimersByTimeAsync(0)
+
+      // The probe is deliberately invisible: no progress line, no status, no
+      // busy state — the rows read exactly as they did before it started.
+      expect(panel.root.querySelector('.bre-keys-probing')).toBeNull()
+      expect(panel.root.textContent).not.toContain(COPY.keysScopeAutoHint)
+      await vi.advanceTimersByTimeAsync(2_000)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls.filter((call) => call.op === 'list')).toHaveLength(2)
+      expect(panel.root.querySelector('.bre-keys-probing')).toBeNull()
+      await vi.advanceTimersByTimeAsync(2_000)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls.filter((call) => call.op === 'list')).toHaveLength(3)
+      // The one visible change is the result itself: the scope chips now
+      // carry the probe's check.
+      expect(buttonByText(panel.root, '1 models')).toBeDefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-reads when a save lands and silently lands the probe’s assignments', async () => {
+    vi.useFakeTimers()
+    try {
+      const before = state({
+        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
+        models: ['glm-4-air'],
+      })
+      const probing = state({
+        probing: true,
+        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
+        models: ['glm-4-air'],
+      })
+      const settled = state({
+        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1', models: ['glm-4-air'], auto: true })],
+        models: ['glm-4-air'],
+      })
+      const script = [before, probing, settled]
+      let round = 0
+      const { client, calls } = recorder({ list: async () => script[Math.min(round++, script.length - 1)]! })
+      const panel = mount({ client })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(buttonByText(panel.root, 'All models')).toBeDefined()
+
+      // The user saves; the page hears the document update, and the open
+      // panel re-reads — the host has already scheduled the probe, so this
+      // read reports it and the quiet follow-up takes over from there.
+      document.dispatchEvent(new CustomEvent(SETTINGS_CHANGED_EVENT))
+      await vi.advanceTimersByTimeAsync(SETTINGS_REFRESH_DEBOUNCE_MS)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls.filter((call) => call.op === 'list')).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(2_000)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls.filter((call) => call.op === 'list')).toHaveLength(3)
+      expect(buttonByText(panel.root, '1 models')).toBeDefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops following when a poll round fails, without blaming the painted list', async () => {
+    vi.useFakeTimers()
+    try {
+      let round = 0
+      const { client, calls } = recorder({
+        list: async () => {
+          round += 1
+          if (round === 1) {
+            return state({
+              probing: true,
+              entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
+              models: ['glm-4-air'],
+            })
+          }
+          return { ok: false, error: 'down' }
+        },
+      })
+      const panel = mount({ client })
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(2_000)
+      await vi.advanceTimersByTimeAsync(0)
+      // The failed round ends the follow-up (one poll, no loop), and the row
+      // the cache painted stays on screen: a failed refresh behind a painted
+      // list must not overwrite it with an error nobody earned.
+      expect(calls.filter((call) => call.op === 'list')).toHaveLength(2)
+      expect(rowOf(panel.root, 'sk-a...a1')).toBeDefined()
+      expect(panel.root.textContent).not.toContain('down')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

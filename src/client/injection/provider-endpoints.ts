@@ -31,7 +31,7 @@
 
 import { endpointFamilyOf, ENDPOINT_FAMILIES, type EndpointFamily as Family, type RouteProtocol } from '../../key-refs.js'
 import { setHidden } from './dom.js'
-import { ENDPOINTS_CHANGED_EVENT } from '../events.js'
+import { ENDPOINTS_CHANGED_EVENT, BALANCE_CHANGED_EVENT } from '../events.js'
 import { httpKeyManagerClient, type KeyManagerClient } from '../key-manager-client.js'
 
 /** The card-field label anchors this module needs, as the host spells them. */
@@ -67,6 +67,15 @@ interface StoredEndpoints {
 const EXTRA_ROWS_ATTR = 'data-bre-endpoint-rows'
 /** Marks one injected extra address row; the value is the family it serves. */
 const SECOND_ROW_ATTR = 'data-bre-endpoint-row'
+/**
+ * Marks the balance row inside the same fold as the extra address rows.
+ *
+ * Deliberately NOT a {@link SECOND_ROW_ATTR}: that attribute keys a row to a
+ * protocol family, and the balance URL serves no wire. Keeping it apart lets the
+ * family logic above forget the balance row exists while the row still lives,
+ * folds and hydrates with the rest.
+ */
+const BALANCE_ROW_ATTR = 'data-bre-balance-row'
 /** Marks the family tag span. */
 const FAMILY_ATTR = 'data-bre-endpoint-family'
 /**
@@ -502,7 +511,9 @@ function syncEndpointTally(
   button: HTMLElement,
   deps: EndpointDeps,
 ): void {
-  const count = rows === null ? 0 : rows.querySelectorAll(`[${SECOND_ROW_ATTR}]`).length
+  const count = rows === null
+    ? 0
+    : rows.querySelectorAll(`[${SECOND_ROW_ATTR}], [${BALANCE_ROW_ATTR}]`).length
   const text = count === 0 ? '' : deps.t('keysEndpointsCount', { count })
   if (text.length === 0) {
     if (button.hasAttribute('title')) button.removeAttribute('title')
@@ -625,6 +636,17 @@ function announceEndpoints(route: string, endpoints: { openai: string | null; an
   )
 }
 
+/** Tell every listener the route's balance endpoint just moved. */
+function announceBalance(route: string, endpoint: string): void {
+  // The provider row's chip reads this URL through the host; a write must not
+  // wait out the chip's refresh window to disappear or appear.
+  endpointsEpoch += 1
+  if (typeof CustomEvent !== 'function') return
+  document.dispatchEvent(
+    new CustomEvent(BALANCE_CHANGED_EVENT, { detail: { route, endpoint } }),
+  )
+}
+
 /** The family one extra row serves, from the attribute that keys it. */
 function familyOfRow(row: HTMLElement): Family | undefined {
   const value = row.getAttribute(SECOND_ROW_ATTR)
@@ -633,7 +655,7 @@ function familyOfRow(row: HTMLElement): Family | undefined {
 
 /** Hydrate every extra row of a card, one stored pair per read. */
 async function hydrateRows(rows: HTMLElement, route: string, deps: EndpointDeps, card: HTMLElement, labels: EndpointLabels): Promise<void> {
-  for (const row of Array.from(rows.querySelectorAll<HTMLElement>(`[${SECOND_ROW_ATTR}]`))) {
+  for (const row of Array.from(rows.querySelectorAll<HTMLElement>(`[${SECOND_ROW_ATTR}], [${BALANCE_ROW_ATTR}]`))) {
     await hydrate(row, route, deps, card, labels)
   }
 }
@@ -647,6 +669,9 @@ async function hydrateRows(rows: HTMLElement, route: string, deps: EndpointDeps,
  * therefore re-read after the host answers, and a row whose label moved waits
  * for its own newer pass. The same reason makes a late answer harmful, so only
  * the LATEST pass may write.
+ *
+ * The balance row shares this pass but not the store: its URL answers the
+ * route's `balances` entry, and no family re-key can move it.
  */
 async function hydrate(
   row: HTMLElement,
@@ -656,8 +681,13 @@ async function hydrate(
   labels: EndpointLabels,
 ): Promise<void> {
   const input = row.querySelector<HTMLInputElement>('.bre-endpoint-url')
+  if (input === null) return
+  if (row.hasAttribute(BALANCE_ROW_ATTR)) {
+    await hydrateBalance(row, input, route, deps)
+    return
+  }
   const family = familyOfRow(row)
-  if (input === null || family === undefined) return
+  if (family === undefined) return
   const ticket = (hydrateTickets.get(row) ?? 0) + 1
   hydrateTickets.set(row, ticket)
   hydrateReads.set(row, { at: Date.now(), epoch: endpointsEpoch })
@@ -673,6 +703,33 @@ async function hydrate(
   const value = stored[family]
   if (input.value !== value) input.value = value
   const tag = row.querySelector<HTMLElement>(`.bre-endpoint-family`)
+  if (tag !== null) markFilled(tag, value.length > 0)
+}
+
+/**
+ * Fill the balance row's input from the route's `balances` entry.
+ *
+ * Same ticket discipline as the family rows: a slow answer must not overwrite
+ * the value a newer pass — or the user's typing — has just put there.
+ */
+async function hydrateBalance(
+  row: HTMLElement,
+  input: HTMLInputElement,
+  route: string,
+  deps: EndpointDeps,
+): Promise<void> {
+  const ticket = (hydrateTickets.get(row) ?? 0) + 1
+  hydrateTickets.set(row, ticket)
+  hydrateReads.set(row, { at: Date.now(), epoch: endpointsEpoch })
+  const client = deps.client ?? httpKeyManagerClient
+  if (client.balanceEndpoint === undefined) return
+  const answer = await client.balanceEndpoint(route)
+  if (!answer.ok) return
+  if (hydrateTickets.get(row) !== ticket) return
+  if (document.activeElement === input) return
+  const value = answer.endpoint ?? ''
+  if (input.value !== value) input.value = value
+  const tag = row.querySelector<HTMLElement>('.bre-endpoint-family')
   if (tag !== null) markFilled(tag, value.length > 0)
 }
 
@@ -881,6 +938,92 @@ function createExtraRow(
 }
 
 /**
+ * The balance endpoint row: one more row in the same fold as the extra address
+ * rows, labelled 余额. It is not a request endpoint and names no protocol
+ * family, so it never takes part in the address swap; it only carries the URL
+ * the host queries for this provider's remaining balance.
+ *
+ * The row is omitted entirely while the card has no route yet (the add card):
+ * the URL is stored per route, so a field there could not be filed anywhere.
+ * Once the route exists the row joins the fold, so a provider without a balance
+ * endpoint simply leaves it empty and shows no balance on its row.
+ */
+function decorateBalanceRow(card: HTMLElement, labels: EndpointLabels, deps: EndpointDeps): void {
+  const rows = card.querySelector<HTMLElement>(`[${EXTRA_ROWS_ATTR}]`)
+  const existing = card.querySelector<HTMLElement>(`[${BALANCE_ROW_ATTR}]`)
+  const route = routeOf(card, labels)
+  if (rows === null || route.length === 0) {
+    existing?.remove()
+    return
+  }
+  let row = existing
+  if (row === null) row = createBalanceRow(card, labels, deps)
+  // The balance row closes the fold. A protocol switch re-appends the family
+  // rows, which would push this one up; re-seat it only when it is not last, so
+  // the steady state stays mutation-free (see decorateExtraRows).
+  if (rows.lastElementChild !== row) rows.appendChild(row)
+  // The folded tally now counts this row too; keep the link's tooltip honest
+  // without waiting for the next disclosure click.
+  const toggle = card.querySelector<HTMLElement>(`[${TOGGLE_ATTR}]`)
+  if (toggle !== null) syncEndpointTally(rows, toggle, deps)
+  const last = hydrateReads.get(row)
+  if (last === undefined || last.epoch !== endpointsEpoch || Date.now() - last.at >= HYDRATE_MIN_INTERVAL_MS) {
+    const input = row.querySelector<HTMLInputElement>('.bre-endpoint-url')
+    if (input !== null) void hydrateBalance(row, input, route, deps)
+  }
+}
+
+/**
+ * One balance row: the 余额 tag, the URL input, and the change handler that
+ * stores the URL under the route this card edits. Every other side of the
+ * index — keys, addresses, aliases — carries over untouched.
+ */
+function createBalanceRow(
+  card: HTMLElement,
+  labels: EndpointLabels,
+  deps: EndpointDeps,
+): HTMLElement {
+  const row = document.createElement('div')
+  row.setAttribute(BALANCE_ROW_ATTR, '1')
+  row.className = 'bre-endpoint-row bre-balance-row'
+  const tag = document.createElement('span')
+  tag.className = 'bre-endpoint-family'
+  tag.textContent = deps.t('keysEndpointBalance')
+  markFilled(tag, false)
+  const input = document.createElement('input')
+  input.type = 'url'
+  input.className = 'bre-text-input bre-endpoint-url'
+  input.spellcheck = false
+  input.placeholder = 'https://…'
+  input.setAttribute('aria-label', deps.t('keysEndpointBalance'))
+  input.title = deps.t('keysEndpointBalanceHint')
+  const client = deps.client ?? httpKeyManagerClient
+  const write = client.setBalanceEndpoint
+  input.addEventListener('change', () => {
+    const route = routeOf(card, labels)
+    if (route.length === 0) return
+    const value = input.value.trim()
+    // The host stores only http(s) URLs; refusing anything else here keeps the
+    // field from showing an address the store never took.
+    if (value.length > 0 && !/^https?:\/\//i.test(value)) {
+      input.setAttribute('aria-invalid', 'true')
+      input.title = deps.t('keysEndpointInvalid')
+      return
+    }
+    if (input.hasAttribute('aria-invalid')) input.removeAttribute('aria-invalid')
+    input.title = deps.t('keysEndpointBalanceHint')
+    markFilled(tag, value.length > 0)
+    if (write === undefined) return
+    void (async () => {
+      const answer = await write.call(client, route, value)
+      if (answer.ok) announceBalance(route, value)
+    })()
+  })
+  row.append(tag, input)
+  return row
+}
+
+/**
  * Swap the address the card presents when the protocol crosses families.
  *
  * The host keeps ONE base URL per route, so the field cannot show several
@@ -958,7 +1101,10 @@ async function updateEndpoints(
     if (stored === undefined) return undefined
     const next = merge(stored)
     if (next === undefined) return undefined
-    const answer = await client.setEndpoints(route, next.openai, next.anthropic)
+    // A test double (or an older host transport) may not implement the write.
+    const write = client.setEndpoints
+    if (typeof write !== 'function') return undefined
+    const answer = await write.call(client, route, next.openai, next.anthropic)
     if (!answer.ok) return undefined
     const result = {
       openai: answer.endpoints.openai ?? '',
@@ -1022,6 +1168,7 @@ function followProtocolFamily(card: HTMLElement, labels: EndpointLabels, deps: E
   // Repaint first: the swap below waits on the host.
   decorateAddressLabel(card, labels, deps.t)
   decorateExtraRows(card, labels, deps)
+  decorateBalanceRow(card, labels, deps)
   if (urlGroup === undefined || previous === undefined || next === undefined) return
   if (previous === next) return
   if (previous !== 'openai' && previous !== 'anthropic') return
@@ -1041,6 +1188,7 @@ export function decorateProviderCard(card: HTMLElement, labels: EndpointLabels, 
   decorateAddressLabel(card, labels, deps.t)
   decorateToggle(card, labels, deps)
   decorateExtraRows(card, labels, deps)
+  decorateBalanceRow(card, labels, deps)
   // The address block follows the protocol as soon as it changes, whoever changed
   // it: our cards dispatch a change on the host's select, and so does the host.
   const select = controlByLabel(card, labels.apiProtocol)
@@ -1092,7 +1240,7 @@ export function forgetEndpointCache(): void {
 export function teardownProviderEndpoints(): void {
   forgetEndpointCache()
   for (const node of Array.from(document.querySelectorAll<HTMLElement>(
-    `[${EXTRA_ROWS_ATTR}], [${SECOND_ROW_ATTR}], [${TOGGLE_ATTR}], [${COUNT_ATTR}], [${PROTOCOL_CARDS_ATTR}], [${FAMILY_ATTR}]`,
+    `[${EXTRA_ROWS_ATTR}], [${SECOND_ROW_ATTR}], [${BALANCE_ROW_ATTR}], [${TOGGLE_ATTR}], [${COUNT_ATTR}], [${PROTOCOL_CARDS_ATTR}], [${FAMILY_ATTR}]`,
   ))) {
     node.remove()
   }

@@ -161,8 +161,47 @@ export const CONFIG_HOST_CLASS = 'bre-config-host'
  * centring), so the seat sits at the line's right end via `margin-left:auto`
  * even when the host gives the heading no wrapper of its own. Plugin-owned and
  * removed with the seat.
+ *
+ * The same two declarations are ALSO written inline by
+ * {@link ensureConfigButtonSeat}: the host is React, and its next render of the
+ * heading sets `className` back to the hashed title class, silently dropping
+ * this class. Inline styles are not part of the host's vdom, so they survive
+ * that render — without them the seat keeps existing while the line stops being
+ * a flex row, and the button slides back next to the 「模型」 text until the
+ * seat happens to be rebuilt.
  */
 export const CONFIG_TITLE_LINE_CLASS = 'bre-config-title-line'
+
+/** The inline declarations the seat owns on the title line. */
+const LINE_STYLE = { display: 'flex', alignItems: 'center' } as const
+
+/** Inline values the line carried before the seat took it over (restored on
+ * teardown, so a host that ever styles the heading itself is not clobbered). */
+const previousLineStyle = new WeakMap<HTMLElement, { display: string; alignItems: string }>()
+
+/** Put the line mechanics on the row, remembering what was there before. */
+function takeTitleLine(row: HTMLElement): void {
+  row.classList.add(CONFIG_TITLE_LINE_CLASS)
+  if (!previousLineStyle.has(row)) {
+    previousLineStyle.set(row, { display: row.style.display, alignItems: row.style.alignItems })
+  }
+  row.style.display = LINE_STYLE.display
+  row.style.alignItems = LINE_STYLE.alignItems
+}
+
+/** Whether the line still carries the mechanics (the settled fast path). */
+function hasTitleLine(row: HTMLElement): boolean {
+  return row.classList.contains(CONFIG_TITLE_LINE_CLASS) && row.style.display === LINE_STYLE.display
+}
+
+/** Take the line mechanics back off, restoring the host's own declarations. */
+function releaseTitleLine(row: HTMLElement): void {
+  row.classList.remove(CONFIG_TITLE_LINE_CLASS)
+  const previous = previousLineStyle.get(row)
+  previousLineStyle.delete(row)
+  row.style.display = previous?.display ?? ''
+  row.style.alignItems = previous?.alignItems ?? ''
+}
 
 /** What the seat needs. `onOpen` opens the config pane. */
 export interface ConfigButtonSeatDeps {
@@ -182,9 +221,11 @@ export function createConfigButtonSeatState(): ConfigButtonSeatState {
 }
 
 /**
- * Ensure the title line carries the button. Idempotent: the settled case (the
- * line already hosts this module's seat) writes nothing — not even the flex
- * class, which the same settled seat implies.
+ * Ensure the title line carries the button — and, just as important, still
+ * LOOKS like a line. Idempotent in the settled case, with one re-assertion:
+ * when the host re-rendered the heading and reset `className` (dropping the
+ * flex class but leaving our seat in place), the line mechanics are put back
+ * instead of trusting the class.
  */
 export function ensureConfigButtonSeat(
   row: HTMLElement,
@@ -193,14 +234,18 @@ export function ensureConfigButtonSeat(
 ): void {
   const known = state.mounts.get(row)
   const existing = row.querySelector<HTMLElement>(`:scope > .${CONFIG_HOST_CLASS}`)
-  if (existing !== null && known !== undefined && known.wrapper === existing) return
+  if (existing !== null && known !== undefined && known.wrapper === existing) {
+    if (!hasTitleLine(row)) takeTitleLine(row)
+    return
+  }
   // A re-rendered row left a stray seat behind: take both down, remount fresh.
   dropSeat(row, state)
   existing?.remove()
   // The host gives a bare `h2` no wrapper to append beside, so the plugin
-  // supplies the missing line mechanics: flex + vertical centring. The seat's
+  // supplies the missing line mechanics: flex + vertical centring (class AND
+  // inline, see CONFIG_TITLE_LINE_CLASS). The seat's
   // `.bre-config-host { margin-left: auto }` then holds the right edge.
-  row.classList.add(CONFIG_TITLE_LINE_CLASS)
+  takeTitleLine(row)
   const host = row.ownerDocument.createElement('div')
   host.className = CONFIG_HOST_CLASS
   row.appendChild(host)
@@ -212,7 +257,7 @@ export function ensureConfigButtonSeat(
 
 /** Take one line's seat down (restoring the host's own line styling). */
 export function dropSeat(row: HTMLElement, state: ConfigButtonSeatState): void {
-  row.classList.remove(CONFIG_TITLE_LINE_CLASS)
+  releaseTitleLine(row)
   const known = state.mounts.get(row)
   if (known === undefined) return
   state.mounts.delete(row)
@@ -223,7 +268,8 @@ export function dropSeat(row: HTMLElement, state: ConfigButtonSeatState): void {
 export function teardownConfigButtonSeats(state: ConfigButtonSeatState): void {
   for (const row of Array.from(state.mounts.keys())) dropSeat(row, state)
   for (const host of Array.from(document.querySelectorAll<HTMLElement>(`.${CONFIG_HOST_CLASS}`))) {
-    host.parentElement?.classList.remove(CONFIG_TITLE_LINE_CLASS)
+    const line = host.parentElement
+    if (line !== null) releaseTitleLine(line)
     host.remove()
   }
 }
@@ -231,24 +277,25 @@ export function teardownConfigButtonSeats(state: ConfigButtonSeatState): void {
 /**
  * The service icon: a picture frame with a sun and a mountain line — the
  * 「生图服务」 button opens the image-generation service, so the gear that used
- * to stand for "settings" is replaced by the thing being configured (14px,
- * the plugin's shared stroke style).
+ * to stand for "settings" is replaced by the thing being configured (16px on a
+ * 24px grid, the plugin's shared stroke style). Decorative here: the button
+ * carries the only label, so the glyph would otherwise be announced twice.
  */
-function imageServiceIcon(label: string): ReturnType<typeof createElement> {
+function imageServiceIcon(): ReturnType<typeof createElement> {
   return createElement(
     'svg',
     {
       className: 'bre-config-btn-icon',
-      width: 14,
-      height: 14,
+      width: 16,
+      height: 16,
       viewBox: '0 0 24 24',
       fill: 'none',
       stroke: 'currentColor',
       strokeWidth: 2,
       strokeLinecap: 'round',
       strokeLinejoin: 'round',
-      role: 'img',
-      'aria-label': label,
+      'aria-hidden': 'true',
+      focusable: 'false',
     },
     createElement('rect', { x: 3, y: 4, width: 18, height: 16, rx: 2.5 }),
     createElement('circle', { cx: 8.5, cy: 9.5, r: 1.6 }),
@@ -256,7 +303,14 @@ function imageServiceIcon(label: string): ReturnType<typeof createElement> {
   )
 }
 
-/** The 「生图服务」 button: icon and text on one midline (inline-flex). */
+/**
+ * The 「生图服务」 button: a round icon-only seat. The copy lives only in the
+ * button's attributes (`title` tooltip + `aria-label`), never as a text node —
+ * the Models page heading line is tight, and a labelled pill there competed
+ * with the host's own title. The circle keeps the same hit area as the pills
+ * beside it (28px) while the label stays available on hover and to assistive
+ * tech.
+ */
 export function ConfigButton(props: { t: (key: string) => string; onOpen: () => void }): ReturnType<typeof createElement> {
   // The button only exists while the Models page is on screen, which is exactly
   // the moment the user is a click away from the pane: warm the config snapshot
@@ -267,10 +321,12 @@ export function ConfigButton(props: { t: (key: string) => string; onOpen: () => 
     {
       className: 'bre-config-btn',
       type: 'button',
+      // The short name is the accessible label; the descriptive copy stays the
+      // hover tooltip, so the button never loses either half of its old text.
       title: props.t('configButtonHint'),
+      'aria-label': props.t('configButton'),
       onClick: () => props.onOpen(),
     },
-    imageServiceIcon(props.t('configButtonHint')),
-    props.t('configButton'),
+    imageServiceIcon(),
   )
 }

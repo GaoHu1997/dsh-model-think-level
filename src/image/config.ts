@@ -66,10 +66,6 @@ export interface ImageModel {
   readonly endpoint: { readonly kind: 'images'; readonly status: EndpointStatus; readonly checkedAt: string | null }
   readonly params: ImageParams
   readonly lastGoodParams: ImageParams | null
-  /** Per-model overrides; absent fields fall through to `defaults`. */
-  readonly size?: string
-  readonly quality?: string
-  readonly n?: number
 }
 
 /** The defaults every model row inherits when it does not override. */
@@ -78,13 +74,6 @@ export interface ImageDefaults {
   readonly quality: string
   readonly n: number
   readonly timeoutMs: number
-}
-
-/** The MCP block: static install facts + the last handshake's diagnostics. */
-export interface ImageMcpState {
-  readonly serverName: string
-  readonly nodePath: string
-  readonly diagnostics: { readonly lastCheckAt: string | null; readonly ok: boolean; readonly error: string | null }
 }
 
 /** The whole config document, exactly as it sits on disk. */
@@ -96,7 +85,6 @@ export interface ImageConfig {
   readonly defaultModel: string | null
   readonly defaults: ImageDefaults
   readonly outputDir: string
-  readonly mcp: ImageMcpState
   readonly models: readonly ImageModel[]
 }
 
@@ -126,11 +114,6 @@ export function emptyImageConfig(now: () => Date = () => new Date()): ImageConfi
     defaultModel: null,
     defaults: { size: '1024x1024', quality: 'high', n: 1, timeoutMs: 300_000 },
     outputDir: 'generated-images',
-    mcp: {
-      serverName: 'dsh-image',
-      nodePath: '',
-      diagnostics: { lastCheckAt: null, ok: false, error: null },
-    },
     models: [],
   }
 }
@@ -191,19 +174,9 @@ export function parseImageConfig(raw: unknown, now: () => Date = () => new Date(
       ? Math.min(defaultsRaw['timeoutMs'], 3_600_000)
       : base.defaults.timeoutMs,
   }
-  const mcpRaw = isRecord(raw['mcp']) ? raw['mcp'] : {}
-  const diagRaw = isRecord(mcpRaw['diagnostics']) ? mcpRaw['diagnostics'] : {}
-  const mcp: ImageMcpState = {
-    serverName: typeof mcpRaw['serverName'] === 'string' && mcpRaw['serverName'].length > 0
-      ? mcpRaw['serverName']
-      : base.mcp.serverName,
-    nodePath: typeof mcpRaw['nodePath'] === 'string' ? mcpRaw['nodePath'] : '',
-    diagnostics: {
-      lastCheckAt: typeof diagRaw['lastCheckAt'] === 'string' ? diagRaw['lastCheckAt'] : null,
-      ok: diagRaw['ok'] === true,
-      error: typeof diagRaw['error'] === 'string' ? diagRaw['error'] : null,
-    },
-  }
+  // A leftover `mcp` block from the retired stdio server is dropped by the
+  // field-by-field parse: only known keys are read, so the stale state on
+  // disk costs nothing and is rewritten away on the next save.
   const models: ImageModel[] = []
   const seen = new Set<string>()
   if (Array.isArray(raw['models'])) {
@@ -221,7 +194,6 @@ export function parseImageConfig(raw: unknown, now: () => Date = () => new Date(
     defaultModel: typeof raw['defaultModel'] === 'string' && raw['defaultModel'].length > 0 ? raw['defaultModel'] : null,
     defaults,
     outputDir: typeof raw['outputDir'] === 'string' && raw['outputDir'].length > 0 ? raw['outputDir'] : base.outputDir,
-    mcp,
     models,
   }
 }
@@ -253,9 +225,6 @@ function parseImageModel(raw: Record<string, unknown>): ImageModel | undefined {
     },
     params,
     lastGoodParams: parseParams(raw['lastGoodParams']) ?? null,
-    ...(isSize(raw['size']) ? { size: raw['size'] } : {}),
-    ...(typeof raw['quality'] === 'string' && raw['quality'].length > 0 ? { quality: raw['quality'] } : {}),
-    ...(typeof raw['n'] === 'number' && Number.isInteger(raw['n']) && raw['n'] >= 1 ? { n: Math.min(raw['n'], 16) } : {}),
   }
 }
 
@@ -342,9 +311,13 @@ export function deriveImageSeeds(providers: Record<string, Record<string, unknow
  * Re-derive `models[]` from the settings document while keeping every stored
  * override keyed by model id. A derived row starts from the conservative
  * ability table; a stored row of the same id hands its overrides (endpoint
- * verdict, params, picked size/quality/n, lastGoodParams) forward. Rows the
- * settings document no longer declares are dropped; defaultModel that points
- * at a dropped model is cleared.
+ * verdict, params, lastGoodParams) forward. Rows the settings document no
+ * longer declares are dropped; defaultModel that points at a dropped model is
+ * cleared.
+ *
+ * The old per-row size/quality/n picks are gone on purpose: the pane's params
+ * row is the single place those are chosen, so a leftover pick from an older
+ * build must not quietly outrank it. They are simply not carried forward.
  */
 export function syncImageConfig(
   stored: ImageConfig,
@@ -361,9 +334,6 @@ export function syncImageConfig(
       endpoint: kept?.endpoint ?? { kind: 'images' as const, status: 'unverified' as const, checkedAt: null },
       params,
       lastGoodParams: kept?.lastGoodParams ?? null,
-      ...(kept?.size === undefined ? {} : { size: kept.size }),
-      ...(kept?.quality === undefined ? {} : { quality: kept.quality }),
-      ...(kept?.n === undefined ? {} : { n: kept.n }),
     }
   })
   const ids = new Set(models.map(model => model.id))
@@ -403,20 +373,19 @@ export function resolveImageModel(
 
 /**
  * The params one generation uses: the call's explicit values win, then the
- * model row's overrides, then the config defaults, then the conservative
- * fallback table. `n` is additionally clamped to the model's ability table
- * (a row that says maxN 2 never fires 8 requests). `referenceImages` never
- * comes from config — it is per-call.
+ * config defaults (the pane's params row). `n` is additionally clamped to the
+ * model's ability table (a row that says maxN 2 never fires 8 requests).
+ * `referenceImages` never comes from config — it is per-call.
  */
 export function effectiveParams(
   config: ImageConfig,
   model: ImageModel | undefined,
   request: { size?: string; quality?: string; n?: number },
 ): { size: string; quality: string; n: number } {
-  const n = Math.max(1, Math.min(16, request.n ?? model?.n ?? config.defaults.n))
+  const n = Math.max(1, Math.min(16, request.n ?? config.defaults.n))
   return {
-    size: request.size ?? model?.size ?? config.defaults.size,
-    quality: request.quality ?? model?.quality ?? config.defaults.quality,
+    size: request.size ?? config.defaults.size,
+    quality: request.quality ?? config.defaults.quality,
     n: model === undefined ? n : Math.min(n, model.params.maxN),
   }
 }

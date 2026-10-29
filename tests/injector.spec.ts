@@ -2291,6 +2291,48 @@ describe('the auto-adapt seat', () => {
     expect(deps.mutate).not.toHaveBeenCalled()
   })
 
+  it("reflects the modality on a create card's row the plugin already took over", async () => {
+    // The reported bug: add a provider, click 自动获取思考等级, expand the row —
+    // the 支持模态 pills came back with nothing selected although the levels
+    // were filled. The cause was never the pills: the walk used to hand the
+    // modality verdict to the official input-types checkbox and drop it from its
+    // own write. That checkbox is a control this plugin stands DOWN on every row
+    // it mounts an editor in (the editor's own 支持模态 row is the surface), so
+    // the click went onto a hidden box and the document — which is what the
+    // pills, the composer badge and every later read consult — never learned the
+    // verdict. The mirror is a courtesy now, never a handover.
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildCreateDom('acme-gateway')
+    root.querySelector('.modelEntry input[aria-label="Model ID"]')!.setAttribute('value', 'gpt-4o-mini')
+    // The row is OPEN, exactly as the user leaves it while filling the card, and
+    // it carries the host's own input-types fieldset.
+    root.querySelector('.modelAdvanced')!.insertAdjacentHTML('beforeend', `
+      <fieldset class="modelInputTypes">
+        <label><input type="checkbox" checked /><span>Text</span></label>
+        <label><input type="checkbox" /><span>Image</span></label>
+      </fieldset>`)
+    await settle(() => reconcile(root, deps, state), state)
+
+    const container = root.querySelector<HTMLElement>('.modelAdvanced')!
+    // The takeover really happened: the editor mounted AND the official
+    // fieldset is stood down, which is why a tick on it can reach nobody.
+    const types = container.querySelector<HTMLElement>('.modelInputTypes')!
+    expect(types.style.display).toBe('none')
+    expect(types.getAttribute('data-bre-capacity-hidden')).toBe('1')
+
+    const report = await adaptEveryModel(state, deps, 'acme-gateway', [
+      { id: 'gpt-4o-mini', name: 'Draft Vision', row: root.querySelector<HTMLElement>('.modelEntry')! },
+    ])
+
+    // The declaration the editor reads on its next mount carries the image
+    // verdict: that staging is what the card's own Save turns into the document.
+    expect(report).toEqual({ held: 1, unsuggested: 0 })
+    const staged = state.pending.get('acme-gateway')?.get('gpt-4o-mini')
+    expect(staged?.efforts).toBeDefined()
+    expect(staged?.input).toEqual(['text', 'image'])
+  })
+
   it("ticks a collapsed row's image box through a visit that puts the fold back", async () => {
     // The two reports at once: the official input-types checkbox renders the
     // card's DRAFT, so a document write of the plugin's can never tick it before
@@ -2344,12 +2386,13 @@ describe('the auto-adapt seat', () => {
     // The tick the user was missing, held by the card's draft for its own Save.
     expect(boxes).toHaveLength(1)
     expect(boxes[0]!.checked).toBe(true)
-    // The official control owns the modality, so the write states nothing about
-    // it: this route is the card's typed id, so the write STAGES and the ladder
-    // lands with the card's own Save.
+    // The tick is a MIRROR, not a handover: the modality still travels the
+    // write, because the plugin's 支持模态 pills and the composer's vision badge
+    // read the settings document, never the card's draft. This route is the
+    // card's typed id, so the write STAGES and lands with the card's own Save.
     const staged = state.pending.get('acme-gateway')?.get('gpt-4o-mini')
     expect(staged?.efforts).toBeDefined()
-    expect(staged?.input).toBeUndefined()
+    expect(staged?.input).toEqual(['text', 'image'])
     expect(report).toEqual({ held: 1, unsuggested: 0 })
   })
 
@@ -2770,7 +2813,9 @@ describe('provider adaptation frame waits', () => {
     expect(opened).toBe(false)
     expect(row.querySelector('.modelAdvanced')).toBeNull()
     expect(state.adapting.size).toBe(0)
-    expect(state.pending.get('acme-gateway')?.get('gpt-4o-mini')?.input).toBeUndefined()
+    // The mirror reached the card's draft, and the write still carries the
+    // verdict (see the same rule in the visit tests above).
+    expect(state.pending.get('acme-gateway')?.get('gpt-4o-mini')?.input).toEqual(['text', 'image'])
     expect(cancel).toHaveBeenCalledWith(42)
     expect(callbacks.size).toBe(0)
     const fallback = timeout.mock.calls.findIndex(([, delay]) => delay === 100)

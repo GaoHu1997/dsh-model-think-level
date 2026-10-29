@@ -23,6 +23,9 @@ const COPY: Record<string, string> = {
   keysProtocolShortAnthropic: 'Anthropic',
   keysMoreEndpoints: 'More endpoints',
   keysEndpointsCount: '{count} more',
+  keysEndpointBalance: 'Balance',
+  keysEndpointBalanceHint: 'balance endpoint',
+  keysEndpointInvalid: 'The address must start with http:// or https://',
 }
 
 const t = (key: string, params?: Record<string, string | number>): string => {
@@ -262,12 +265,13 @@ describe('the reshaped provider card', () => {
     // The label text and the link, and nothing between them to take up room.
     expect(folded.children).toBe(1)
     expect(folded.text).toBe('Base URLMore endpoints')
-    // The count still reaches the user, out of the line's flow.
-    expect(toggle.getAttribute('title')).toBe('1 more')
+    // The count still reaches the user, out of the line's flow. Two: the other
+    // family's address and the balance endpoint share this fold.
+    expect(toggle.getAttribute('title')).toBe('2 more')
 
     toggle.click()
     expect({ children: title.children.length, text: title.textContent }).toEqual(folded)
-    expect(toggle.getAttribute('title')).toBe('1 more')
+    expect(toggle.getAttribute('title')).toBe('2 more')
   })
 
   it('keeps the extra address rows out of the way until they are asked for', () => {
@@ -812,6 +816,7 @@ describe('teardown', () => {
     expect(card.querySelector('[data-bre-endpoint-family]')).not.toBeNull()
     expect(card.querySelector('[data-bre-endpoint-toggle]')).not.toBeNull()
     expect(card.querySelector('[data-bre-endpoint-row]')).not.toBeNull()
+    expect(card.querySelector('[data-bre-balance-row]')).not.toBeNull()
     expect(card.hasAttribute('data-bre-field-order')).toBe(true)
 
     teardownProviderEndpoints()
@@ -823,6 +828,82 @@ describe('teardown', () => {
     expect(card.querySelector('[data-bre-endpoint-family]')).toBeNull()
     expect(card.querySelector('[data-bre-endpoint-toggle]')).toBeNull()
     expect(card.querySelector('[data-bre-endpoint-row]')).toBeNull()
+    expect(card.querySelector('[data-bre-balance-row]')).toBeNull()
     expect(card.hasAttribute('data-bre-field-order')).toBe(false)
+  })
+})
+
+describe('the balance endpoint row', () => {
+  it('joins the 更多端点 fold, labelled 余额, and hides the add card', () => {
+    const card = buildCard({ route: 'acme', protocol: 'openai-completions' })
+    decorateProviderCard(card, LABELS, { t })
+    const rows = card.querySelector<HTMLElement>('[data-bre-endpoint-rows]')
+    const row = card.querySelector<HTMLElement>('[data-bre-balance-row]')
+    expect(row).not.toBeNull()
+    // It lives in the same fold as the extra address rows, LAST: the fold is
+    // the "more endpoints" surface, and the balance URL is one of them.
+    expect(row?.parentElement).toBe(rows)
+    expect(rows?.lastElementChild).toBe(row)
+    expect(row?.querySelector('.bre-endpoint-family')?.textContent).toBe('Balance')
+
+    // The add card has no route yet — a URL typed there could not be filed.
+    const addCard = buildCard({ displayName: false, route: '', protocol: 'openai-completions' })
+    decorateProviderCard(addCard, LABELS, { t })
+    expect(addCard.querySelector('[data-bre-balance-row]')).toBeNull()
+  })
+
+  it('hydrates and stores the URL under the route, apart from the addresses', async () => {
+    const stored = { openai: null as string | null, anthropic: null as string | null }
+    const endpoints = vi.fn(async () => ({ ok: true, endpoints: stored }))
+    const balanceEndpoint = vi.fn(async () => ({ ok: true, endpoint: 'https://billing.example/balance' }))
+    const setBalanceEndpoint = vi.fn(async (): Promise<KeyAnswer> => ({
+      ok: true, route: 'acme-balance', entries: [], models: [], endpoints: stored,
+    }))
+    const setEndpoints = vi.fn(async (): Promise<KeyAnswer> => ({
+      ok: true, route: 'acme-balance', entries: [], models: [], endpoints: stored,
+    }))
+    const client = {
+      list: vi.fn(), endpoints, balanceEndpoint, setBalanceEndpoint, setEndpoints,
+    } as unknown as KeyManagerClient
+    const card = buildCard({ route: 'acme-balance', protocol: 'openai-completions' })
+    decorateProviderCard(card, LABELS, { t, client })
+
+    const input = card.querySelector<HTMLInputElement>('[data-bre-balance-row] .bre-endpoint-url')
+    if (input === null) throw new Error('no balance input')
+    await vi.waitFor(() => { expect(input.value).toBe('https://billing.example/balance') })
+
+    input.value = 'https://billing.example/usage'
+    input.dispatchEvent(new Event('change'))
+    await vi.waitFor(() => {
+      expect(setBalanceEndpoint).toHaveBeenCalledWith('acme-balance', 'https://billing.example/usage')
+    })
+    // The address pair is not touched by a balance write; the row's own dot
+    // turns solid because the URL is stored.
+    expect(
+      card.querySelector('[data-bre-balance-row] .bre-endpoint-family')?.getAttribute('data-bre-endpoint-filled'),
+    ).toBe('1')
+  })
+
+  it('refuses a non-http address without writing it', () => {
+    const setBalanceEndpoint = vi.fn()
+    const balanceEndpoint = vi.fn(async () => ({ ok: true, endpoint: 'https://billing.example/balance' }))
+    const client = {
+      list: vi.fn(),
+      endpoints: vi.fn(async () => ({ ok: true })),
+      balanceEndpoint,
+      setBalanceEndpoint,
+      setEndpoints: vi.fn(async (): Promise<KeyAnswer> => ({
+        ok: true, route: 'acme', entries: [], models: [], endpoints: { openai: null, anthropic: null },
+      })),
+    } as unknown as KeyManagerClient
+    const card = buildCard({ route: 'acme', protocol: 'openai-completions' })
+    decorateProviderCard(card, LABELS, { t, client })
+    const input = card.querySelector<HTMLInputElement>('[data-bre-balance-row] .bre-endpoint-url')
+    if (input === null) throw new Error('no balance input')
+    input.value = 'billing.example/balance'
+    input.dispatchEvent(new Event('change'))
+    expect(setBalanceEndpoint).not.toHaveBeenCalled()
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(input.getAttribute('title')).toBe('The address must start with http:// or https://')
   })
 })

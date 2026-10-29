@@ -21,10 +21,12 @@ import {
   readKeyIndex,
   updateKeyIndex,
   withKeyAlias,
+  withKeyAutoScope,
   withKeyDisabled,
   withKeyEntry,
   withKeyModels,
   withKeyProtocol,
+  withRouteBalance,
   withRouteEndpoints,
   withoutKeyEntry,
   writeKeyIndex,
@@ -195,6 +197,36 @@ describe('parseKeyIndex', () => {
     expect(document.endpoints?.['ofox']).toEqual({ anthropic: 'https://a.example' })
   })
 
+  it('round-trips a balance endpoint apart from the address pair', () => {
+    let document = withRouteBalance(emptyKeyIndex(), 'ofox', ' https://billing.example/balance ')
+    document = withRouteEndpoints(document, 'ofox', { openai: 'https://gw.example/v1' })
+    document = withKeyEntry(document, 'ofox', 'A')
+    // The two maps are independent: writing addresses keeps the balance URL,
+    // and writing a balance URL keeps the addresses.
+    expect(document.balances?.['ofox']).toBe('https://billing.example/balance')
+    expect(document.endpoints?.['ofox']).toEqual({ openai: 'https://gw.example/v1' })
+    // And the reverse: a later balance write carries the addresses forward.
+    document = withRouteBalance(document, 'ofox', 'https://billing.example/second')
+    expect(document.endpoints?.['ofox']).toEqual({ openai: 'https://gw.example/v1' })
+    expect(document.balances?.['ofox']).toBe('https://billing.example/second')
+
+    writeKeyIndex(document, fileOf())
+    expect(readKeyIndex(fileOf())).toEqual(document)
+
+    const cleared = withRouteBalance(document, 'ofox', '   ')
+    expect(cleared.balances).toBeUndefined()
+    expect(cleared.endpoints?.['ofox']).toEqual({ openai: 'https://gw.example/v1' })
+  })
+
+  it('drops a non-http balance endpoint on parse', () => {
+    const parsed = parseKeyIndex({
+      version: 1,
+      providers: { ofox: [{ ref: 'A' }] },
+      balances: { ofox: 'ftp://billing.example', acme: 'https://ok.example/balance', empty: '' },
+    })
+    expect(parsed.balances).toEqual({ acme: 'https://ok.example/balance' })
+  })
+
   it('round-trips a switched-off key, and stores nothing for an in-use one', () => {
     const parsed = parseKeyIndex({
       version: 1,
@@ -323,6 +355,47 @@ describe('withoutKeyEntry', () => {
     const document = withoutKeyEntry(withKeyEntry(emptyKeyIndex(), 'ofox', 'A'), 'ofox', 'A')
     expect(document.providers['ofox']).toBeUndefined()
     expect(hasKeyEntry(document, 'ofox', 'A')).toBe(false)
+  })
+})
+
+describe('the probe-maintained scope mark', () => {
+  it('round-trips a marked scope, and stores nothing for an unmarked one', () => {
+    const parsed = parseKeyIndex({
+      version: 1,
+      providers: { ofox: [{ ref: 'A', models: ['glm-4'], auto: true }, { ref: 'B', models: ['glm-4'] }] },
+    })
+    expect(keyEntriesOf(parsed, 'ofox')).toEqual([
+      { ref: 'A', models: ['glm-4'], auto: true },
+      { ref: 'B', models: ['glm-4'] },
+    ])
+    writeKeyIndex(parsed, fileOf())
+    expect(readKeyIndex(fileOf())).toEqual(parsed)
+  })
+
+  it('writes a marked catch-all without inventing a models list', () => {
+    const document = withKeyAutoScope(withKeyEntry(emptyKeyIndex(), 'ofox', 'A'), 'ofox', 'A', undefined)
+    expect(keyEntriesOf(document, 'ofox')).toEqual([{ ref: 'A', auto: true }])
+  })
+
+  it('carries the mark through the writers that touch everything but the scope', () => {
+    const scoped = withKeyAutoScope(withKeyEntry(emptyKeyIndex(), 'ofox', 'A', 'main'), 'ofox', 'A', ['glm-4'])
+    const relabelled = withKeyAlias(scoped, 'ofox', 'A', 'spare')
+    const pinned = withKeyProtocol(relabelled, 'ofox', 'A', 'anthropic-messages')
+    const paused = withKeyDisabled(pinned, 'ofox', 'A', true)
+    expect(keyEntriesOf(paused, 'ofox')).toEqual([
+      { ref: 'A', alias: 'spare', models: ['glm-4'], protocol: 'anthropic-messages', disabled: true, auto: true },
+    ])
+    // Re-adding the key (the add op reusing a listed reference) is not a
+    // claim on the scope either.
+    expect(keyEntriesOf(withKeyEntry(paused, 'ofox', 'A', 'again'), 'ofox')[0]?.auto).toBe(true)
+  })
+
+  it('clears the mark when the user saves a scope by hand', () => {
+    const scoped = withKeyAutoScope(withKeyEntry(emptyKeyIndex(), 'ofox', 'A'), 'ofox', 'A', ['glm-4'])
+    const manual = withKeyModels(scoped, 'ofox', 'A', ['glm-4-air'])
+    expect(keyEntriesOf(manual, 'ofox')).toEqual([{ ref: 'A', models: ['glm-4-air'] }])
+    // Clearing the assignment by hand is a claim too: unscoped, unmarked.
+    expect(keyEntriesOf(withKeyModels(manual, 'ofox', 'A', undefined), 'ofox')).toEqual([{ ref: 'A' }])
   })
 })
 

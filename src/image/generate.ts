@@ -1,10 +1,9 @@
 /**
  * The image-generation core: ONE implementation of the OpenAI-compatible
- * images API call + disk write, behind three entries (the wire dispatch, the
- * `/image-generate` route, the `/生图` host command) and the MCP subprocess
- * (a build of the same logic — see `lib/image-mcp.mjs`). Anything about
- * request construction, param fallback, sanitization or file naming lives here
- * and nowhere else.
+ * images API call + disk write, behind three entries (the `generate_image`
+ * native tool, the `/image-generate` route, the `/生图` host command).
+ * Anything about request construction, param fallback, sanitization or file
+ * naming lives here and nowhere else.
  *
  * Endpoint choice: no reference images → `POST {baseURL}/images/generations`
  * (JSON); with reference images → `POST {baseURL}/images/edits` with a
@@ -50,6 +49,18 @@ export interface GenerateRequest {
   /** Local file paths; any non-empty list switches to the edits endpoint. */
   readonly referenceImages?: readonly string[]
   /**
+   * Reference images as already-decoded bytes — the attachment-backed channel:
+   * the native tool resolves conversation image IDs through the attachment
+   * store and hands the bytes over, so no temp file ever hits the disk. Any
+   * entry here (alone or beside `referenceImages`) switches to the edits
+   * endpoint.
+   */
+  readonly referenceFiles?: readonly {
+    readonly name: string
+    readonly mime: string
+    readonly bytes: Uint8Array
+  }[]
+  /**
    * Where to land the file: a path ending in `.png` is honored EXACTLY (an
    * existing one gains a `-2` suffix — never overwritten), anything else is
    * created as a directory and receives the slug-timestamp naming. Absent
@@ -58,9 +69,20 @@ export interface GenerateRequest {
   readonly outputPath?: string
 }
 
+/** One generated image: the b64 payload the wire returned + where it landed. */
+export interface GeneratedImage {
+  readonly filePath: string
+  readonly data: string
+}
+
 /** What a successful generation reports. */
 export interface GenerateResult {
-  readonly filePath: string
+  /**
+   * Every image the wire returned, in order, each already written to disk.
+   * The upstream is asked for `paramsUsed.n` images; a relay that answers
+   * fewer yields fewer entries — the result never invents one.
+   */
+  readonly images: readonly GeneratedImage[]
   readonly mime: string
   readonly model: string
   /** The prompt this run answered (the reply's markdown alt text derives from it). */
@@ -71,8 +93,6 @@ export interface GenerateResult {
    * text carries. Empty when the first attempt went through untouched.
    */
   readonly revisions: readonly string[]
-  /** The b64 payload the wire returned (the MCP tool turns it into an image block). */
-  readonly data: string
 }
 
 /** The classified failure `generateImage` throws (as `GenerateError`). */
@@ -300,31 +320,38 @@ export function resolveDestination(
   }
 }
 
-/** The b64 payload of a successful images answer, from whichever field carried it. */
-async function dataOfAnswer(answer: unknown, send: typeof globalThis.fetch): Promise<string> {
+/** The b64 payloads of a successful images answer, in the order the wire returned them. */
+async function imagesOfAnswer(answer: unknown, send: typeof globalThis.fetch): Promise<string[]> {
   if (typeof answer !== 'object' || answer === null) throw new GenerateError('upstream', '上游返回了无法识别的应答结构')
   const data = (answer as Record<string, unknown>)['data']
   if (!Array.isArray(data) || data.length === 0) {
     // Some relays wrap the answer one level deeper; try the common shapes once.
     for (const key of ['images', 'output', 'result'] as const) {
       const nested = (answer as Record<string, unknown>)[key]
-      if (Array.isArray(nested) && nested.length > 0) return dataOfAnswer({ data: nested }, send)
+      if (Array.isArray(nested) && nested.length > 0) return imagesOfAnswer({ data: nested }, send)
     }
     throw new GenerateError('upstream', '上游应答缺少 data 数组')
   }
-  const first = data[0]
-  if (typeof first !== 'object' || first === null) throw new GenerateError('upstream', '上游应答的 data[0] 不是对象')
-  const record = first as Record<string, unknown>
-  if (typeof record['b64_json'] === 'string' && record['b64_json'].length > 0) return record['b64_json']
-  if (typeof record['url'] === 'string' && record['url'].length > 0) {
-    const response = await send(record['url'], { redirect: 'follow' })
-    if (!response.ok) throw new GenerateError('upstream', `下载上游图片失败（${response.status}）`)
-    const bytes = new Uint8Array(await response.arrayBuffer())
-    let binary = ''
-    for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]!)
-    return btoa(binary)
+  const images: string[] = []
+  for (const entry of data) {
+    if (typeof entry !== 'object' || entry === null) throw new GenerateError('upstream', '上游应答的 data 数组里有非对象项')
+    const record = entry as Record<string, unknown>
+    if (typeof record['b64_json'] === 'string' && record['b64_json'].length > 0) {
+      images.push(record['b64_json'])
+      continue
+    }
+    if (typeof record['url'] === 'string' && record['url'].length > 0) {
+      const response = await send(record['url'], { redirect: 'follow' })
+      if (!response.ok) throw new GenerateError('upstream', `下载上游图片失败（${response.status}）`)
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      let binary = ''
+      for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]!)
+      images.push(btoa(binary))
+      continue
+    }
+    throw new GenerateError('upstream', '上游应答既无 b64_json 也无 url')
   }
-  throw new GenerateError('upstream', '上游应答既无 b64_json 也无 url')
+  return images
 }
 
 /**
@@ -365,6 +392,21 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
 
   const base = model.baseURL.replace(/\/+$/, '')
   const now = deps.now ?? (() => Date.now())
+  // Reference images never change across the fallback loop: both channels are
+  // read once, before the first attempt (a missing file fails the call up
+  // front instead of after a paid round-trip).
+  const referenceReads: { name: string; bytes: Uint8Array; mime: string }[] = [
+    ...(request.referenceFiles ?? []).map(file => ({ name: file.name, bytes: file.bytes, mime: file.mime })),
+    ...(request.referenceImages ?? []).map(path => {
+      const absolute = resolve(path)
+      if (!existsSync(absolute)) throw new GenerateError('reference', `参考图不存在或不可读：${path}`)
+      try {
+        return { name: absolute.split(/[\\/]/).pop() ?? 'image', bytes: readFileSync(absolute), mime: mimeOfPath(absolute) }
+      } catch {
+        throw new GenerateError('reference', `参考图不存在或不可读：${path}`)
+      }
+    }),
+  ]
   // One fallback pass, in the design's order: drop response_format → lower
   // quality → reset size → n=1. Each revision is recorded for the reply text.
   const revisions: string[] = []
@@ -376,15 +418,6 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if (callerAborted(request.signal)) throw new GenerateError('aborted', '生成已取消')
-    const referenceReads = request.referenceImages === undefined ? [] : request.referenceImages.map(path => {
-      const absolute = resolve(path)
-      if (!existsSync(absolute)) throw new GenerateError('reference', `参考图不存在或不可读：${path}`)
-      try {
-        return { name: absolute.split(/[\\/]/).pop() ?? 'image', bytes: readFileSync(absolute), mime: mimeOfPath(absolute) }
-      } catch {
-        throw new GenerateError('reference', `参考图不存在或不可读：${path}`)
-      }
-    })
     const timeoutMs = deps.timeoutMs ?? config.defaults.timeoutMs
     // The per-attempt deadline and the caller's stop are one signal: a user
     // stop aborts the paid request instead of letting it finish unwatched.
@@ -448,10 +481,17 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
       } catch {
         throw new GenerateError('upstream', '上游应答不是合法 JSON')
       }
-      const data = await dataOfAnswer(answer, deps.send)
-      const filePath = resolveDestination(request.outputPath, outputDirOf(deps, config), promptSlug(prompt), now)
-      const bytes = Uint8Array.from(atob(data), ch => ch.charCodeAt(0))
-      writeFileSync(filePath, bytes)
+      const payloads = await imagesOfAnswer(answer, deps.send)
+      // One file per returned image. Each destination is resolved only after
+      // the previous file is on disk, so the never-overwrite suffixes advance
+      // (`a.png`, `a-2.png`, …) whatever spelling the caller chose.
+      const images: GeneratedImage[] = []
+      for (const data of payloads) {
+        const filePath = resolveDestination(request.outputPath, outputDirOf(deps, config), promptSlug(prompt), now)
+        const bytes = Uint8Array.from(atob(data), ch => ch.charCodeAt(0))
+        writeFileSync(filePath, bytes)
+        images.push({ filePath, data })
+      }
       if (revisions.length > 0 && deps.persistLastGood !== undefined) {
         deps.persistLastGood(model.id, {
           ...model.params,
@@ -462,13 +502,12 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
         })
       }
       return {
-        filePath,
+        images,
         mime: 'image/png',
         model: model.id,
         prompt,
         paramsUsed: { size, quality, n: count },
         revisions: [...revisions],
-        data,
       }
     }
 

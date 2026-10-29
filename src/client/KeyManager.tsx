@@ -54,7 +54,7 @@ import {
   normalizeKeyProtocol,
   type RouteProtocol,
 } from '../key-refs.js'
-import { ENDPOINTS_CHANGED_EVENT, type EndpointsChangedDetail } from './events.js'
+import { ENDPOINTS_CHANGED_EVENT, SETTINGS_CHANGED_EVENT, type EndpointsChangedDetail } from './events.js'
 import { ProtocolMenu, type ProtocolOption } from './ProtocolMenu.js'
 import {
   httpKeyManagerClient,
@@ -159,6 +159,15 @@ const PROTOCOL_CHOICES: readonly RouteProtocol[] = ['openai-completions', 'opena
 
 /** The addresses nothing is known about yet. */
 const NO_ENDPOINTS: KeyEndpoints = { openai: null, anthropic: null }
+
+/** How often the panel quietly asks whether the host's scope probe has finished. */
+const PROBE_POLL_MS = 2_000
+
+/** Poll ceiling: a probe that outlives these rounds stops being followed. */
+const PROBE_POLL_MAX = 150
+
+/** Floor between two save-driven re-reads of the same list. */
+const SETTINGS_REFRESH_DEBOUNCE_MS = 300
 
 /**
  * How the provider's added model ids read in the scope chips. `numeric` keeps
@@ -266,6 +275,14 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   const [protocolMenu, setProtocolMenu] = useState<{ ref: string; anchor: HTMLElement } | undefined>(undefined)
   /** Which family addresses this route has, so the picker only offers those. */
   const [endpoints, setEndpoints] = useState<KeyEndpoints>(() => client.cached?.(route)?.endpoints ?? NO_ENDPOINTS)
+  /**
+   * Whether the host is probing this route's keys in the background (the
+   * post-save scope check). While it runs the panel says so and quietly
+   * re-reads, because the probe writes scope assignments to the index and the
+   * list is how those reach the screen.
+   */
+  const [probing, setProbing] = useState(false)
+  const probePolls = useRef(0)
 
   /**
    * Adopt whatever the host just answered. A refusal keeps the list that is
@@ -281,6 +298,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
       setRows(answer.entries)
       setRouteModels(answer.models ?? [])
       setEndpoints(answer.endpoints)
+      setProbing(answer.probing === true)
       setNotice(okText === undefined ? undefined : { kind: 'status', text: okText })
     },
     [t],
@@ -297,16 +315,85 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     liveRouteRef.current = route
   }, [route])
 
+  /**
+   * Re-read the route's list, silently when a list is already painted.
+   *
+   * A revalidation behind a painted list must not overwrite a working list
+   * with an error the user did nothing to earn — the painted rows are the best
+   * known answer, and the next revalidate (or mutation) re-reads anyway.
+   */
+  const revalidate = useCallback(
+    async (atRoute: string): Promise<void> => {
+      const painted = client.cached?.(atRoute) !== undefined
+      const answer = await client.list(atRoute)
+      if (liveRouteRef.current !== atRoute) return
+      if (painted && !answer.ok) return
+      adopt(answer, undefined)
+    },
+    [adopt, client],
+  )
+
   useEffect(() => {
+    void revalidate(route)
+  }, [revalidate, route])
+
+  // A save anywhere moved the settings document, and the host may now be
+  // probing this route's keys in the background (the post-save scope check).
+  // The probe is deliberately INVISIBLE — no progress, no status line — so the
+  // one thing this panel does about it is re-read when the save lands and
+  // follow the probe quietly (below) until its assignments are on the rows.
+  // The push that reaches this page is dispatched after the host has already
+  // scheduled the probe, so this read sees `probing` and the poll takes over.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const onChanged = (): void => {
+      // A write burst lands as several pushes; one re-read per burst is enough.
+      if (timer !== undefined) return
+      timer = setTimeout(() => {
+        timer = undefined
+        void revalidate(route)
+      }, SETTINGS_REFRESH_DEBOUNCE_MS)
+    }
+    document.addEventListener(SETTINGS_CHANGED_EVENT, onChanged)
+    return () => {
+      document.removeEventListener(SETTINGS_CHANGED_EVENT, onChanged)
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [revalidate, route])
+
+  // The post-save scope probe writes its assignments to the host's index while
+  // this panel may be open, and shows nothing while it runs. While the host
+  // reports a probe, follow it with this quiet poll: each round re-adopts the
+  // list, and the one visible change is the checked scope chips moving as the
+  // probe writes them. A bounded number of rounds keeps a host that never
+  // answers from spinning here for ever; a failed read simply ends the
+  // follow-up.
+  useEffect(() => {
+    if (!probing) {
+      probePolls.current = 0
+      return
+    }
     let live = true
-    void (async () => {
-      const answer = await client.list(route)
-      if (live) adopt(answer, undefined)
-    })()
+    const timer = setInterval(() => {
+      probePolls.current += 1
+      if (probePolls.current > PROBE_POLL_MAX) {
+        // The follow-up gives up rather than saying "probing" for ever; the
+        // next mount (or mutation) re-reads and tells the truth again.
+        setProbing(false)
+        return
+      }
+      void (async () => {
+        const answer = await client.list(route)
+        if (!live || liveRouteRef.current !== route) return
+        if (answer.ok) adopt(answer, undefined)
+        else setProbing(false)
+      })()
+    }, PROBE_POLL_MS)
     return () => {
       live = false
+      clearInterval(timer)
     }
-  }, [adopt, client, route])
+  }, [adopt, client, probing, route])
 
   // The provider card above owns the two base URLs, and which protocols this list
   // may offer depends on them (user item 3). When that card changes an address it
@@ -475,6 +562,12 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     const observed = kind === 'scope' && editing?.ref !== undefined
       ? rows?.find(row => row.ref === editing.ref)?.observed ?? []
       : []
+    // Whether the scope being edited is the probe's assignment: the user
+    // should know the checked chips were checked for them, and that saving
+    // this form claims the scope by hand.
+    const autoScope = kind === 'scope' && editing?.ref !== undefined
+      ? rows?.find(row => row.ref === editing.ref)?.auto === true
+      : false
     const observedChips = chipModels.filter(model => observed.includes(model))
     const illegal = wantsValue && valueDraft.length > 0 && !isLegalKeyValue(valueDraft)
     return (
@@ -555,6 +648,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
         ) : null}
         {kind === 'add' ? <p className="bre-keys-hint">{t('keysProtocolCreateHint')}</p> : null}
         {wantsScope ? <p className="bre-keys-hint">{t('keysScopeHint')}</p> : null}
+        {wantsScope && autoScope ? <p className="bre-keys-hint">{t('keysScopeAutoHint')}</p> : null}
         {observedChips.length > 0 && observedChips.length < chipModels.length ? (
           <p className="bre-keys-hint">{t('keysScopeObservedHint', { count: observedChips.length, total: chipModels.length })}</p>
         ) : null}

@@ -119,13 +119,11 @@ export interface ImagegenDeps {
   readonly generateDeps: GenerateDeps
   /** Best-effort session echo (guarded; never throws into the command). */
   readonly echo?: (invocation: unknown, text: string, filePath: string) => void
-}
-
-/** Run one parsed invocation through the shared core and shape the result. */
+}/** Run one parsed invocation through the shared core and shape the result. */
 export async function executeImagegen(
   deps: ImagegenDeps,
   parsed: ImagegenArgs,
-): Promise<{ ok: true; filePath: string; mime: string; model: string; paramsUsed: GenerateResult['paramsUsed']; text: string; warning?: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; filePaths: readonly string[]; mime: string; model: string; paramsUsed: GenerateResult['paramsUsed']; text: string; warning?: string } | { ok: false; error: string }> {
   try {
     const result = await deps.generate(deps.generateDeps, {
       ...(parsed.model === undefined ? {} : { model: parsed.model }),
@@ -135,14 +133,15 @@ export async function executeImagegen(
       ...(parsed.n === undefined ? {} : { n: parsed.n }),
       ...(parsed.referenceImages.length > 0 ? { referenceImages: parsed.referenceImages } : {}),
     })
+    const filePaths = result.images.map(image => image.filePath)
     const text = [
-      `已生成：${result.filePath}`,
+      filePaths.length === 1 ? `已生成：${filePaths[0]}` : `已生成 ${filePaths.length} 张：\n${filePaths.map(path => `- ${path}`).join('\n')}`,
       `模型 ${result.model} · size ${result.paramsUsed.size} · quality ${result.paramsUsed.quality} · n ${result.paramsUsed.n}`,
       result.revisions.length > 0 ? `参数回退：${result.revisions.join('、')}` : '',
     ].filter(line => line.length > 0).join('\n')
     return {
       ok: true,
-      filePath: result.filePath,
+      filePaths,
       mime: result.mime,
       model: result.model,
       paramsUsed: result.paramsUsed,
@@ -194,7 +193,7 @@ export function registerImagegenCommand(
         if (answer.ok) {
           // Best-effort in-session echo; the return value stays authoritative.
           try {
-            deps.echo?.(invocation, answer.text, answer.filePath)
+            deps.echo?.(invocation, answer.text, answer.filePaths[0] ?? '')
           } catch {
             // An echo face that throws must never fail a finished generation.
           }

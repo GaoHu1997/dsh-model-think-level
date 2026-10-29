@@ -75,6 +75,12 @@ export interface KeyRow {
    */
   readonly protocol?: RouteProtocol
   /**
+   * Whether the key's model scope is the host's post-save probe assignment
+   * rather than a manual one — the panel shows it so a scope edit knows the
+   * checked chips will keep being rewritten until the user saves one by hand.
+   */
+  readonly auto?: boolean
+  /**
    * The key's cooldown, when it is resting after a failure: how long until it
    * is a normal candidate again, and how many consecutive failures produced
    * the period. Absent means the key is a normal candidate right now — the
@@ -110,6 +116,13 @@ export interface KeyState {
   readonly models?: readonly string[]
   /** The provider's two base URLs, keyed by protocol family. */
   readonly endpoints: KeyEndpoints
+  /**
+   * Whether the host is probing this route's keys in the background (the
+   * post-save scope check). The panel follows it with a quiet poll until it
+   * clears, so the assignments the probe writes land on screen without a
+   * reopen.
+   */
+  readonly probing?: boolean
 }
 
 /** A refused answer, carrying the host's own words when it sent any. */
@@ -127,6 +140,14 @@ export interface RouteEndpointsAnswer {
   readonly endpoints?: { readonly openai: string | null; readonly anthropic: string | null }
 }
 
+/** A route's balance endpoint, as the index file stores it (null when unset). */
+export interface RouteBalanceAnswer {
+  readonly ok: boolean
+  readonly endpoint?: string | null
+  /** The host's wording when the read was refused. */
+  readonly error?: string
+}
+
 /** The manager's transport, injectable so the panel can be tested without one. */
 export interface KeyManagerClient {
   /** Read the provider's whole key list. */
@@ -141,6 +162,15 @@ export interface KeyManagerClient {
    * an older host) can keep answering from `list`.
    */
   endpoints?(route: string): Promise<RouteEndpointsAnswer>
+  /**
+   * Read the route's configured balance endpoint.
+   *
+   * The provider card's balance row hydrates from this without touching the
+   * settings document or the credential store: it is one key-index read. A
+   * successful answer with `null`/no endpoint means "not configured", which is
+   * what keeps the provider row's balance chip absent.
+   */
+  balanceEndpoint?(route: string): Promise<RouteBalanceAnswer>
   /** The last successful masked list, for an immediate re-open paint. */
   cached?(route: string): KeyState | undefined
   /** Store a new key and list it, returning the list it produced. */
@@ -163,6 +193,14 @@ export interface KeyManagerClient {
    * so callers merge with what the store holds first.
    */
   setEndpoints(route: string, openai: string | undefined, anthropic: string | undefined): Promise<KeyAnswer>
+  /**
+   * Set (or clear, when blank) the route's balance endpoint.
+   *
+   * Kept apart from {@link setEndpoints}: the balance URL is display-only and
+   * must survive an address write from another card, just as the addresses must
+   * survive a balance edit.
+   */
+  setBalanceEndpoint?(route: string, endpoint: string): Promise<KeyAnswer>
   /** The stored value of one listed reference, or undefined. */
   reveal(route: string, ref: string): Promise<string | undefined>
 }
@@ -197,6 +235,7 @@ function rowOf(value: unknown): KeyRow | undefined {
   const models = modelsOf(value['models'])
   const observed = modelsOf(value['observed'])
   const protocol = value['protocol']
+  const auto = value['auto']
   const rest = value['rest']
   const remainingMs = isRecord(rest) && typeof rest['remainingMs'] === 'number' ? rest['remainingMs'] : undefined
   const failures = isRecord(rest) && typeof rest['failures'] === 'number' ? rest['failures'] : undefined
@@ -209,6 +248,7 @@ function rowOf(value: unknown): KeyRow | undefined {
     ...(models === undefined ? {} : { models }),
     ...(observed === undefined || observed.length === 0 ? {} : { observed }),
     ...(isRouteProtocol(protocol) ? { protocol } : {}),
+    ...(auto === true ? { auto: true } : {}),
     ...(remainingMs !== undefined && remainingMs >= 0 && failures !== undefined
       ? { rest: { remainingMs, failures } }
       : {}),
@@ -236,6 +276,7 @@ function stateOf(body: Record<string, unknown>): KeyState | undefined {
     entries: rows,
     ...(typeof addedRef === 'string' && rows.some(row => row.ref === addedRef) ? { addedRef } : {}),
     ...(routeModels === undefined ? {} : { models: routeModels }),
+    ...(body['probing'] === true ? { probing: true } : {}),
     endpoints: { openai, anthropic },
   }
 }
@@ -293,7 +334,6 @@ interface KeyListCache {
 
 /** Only normalised, masked list answers live here; revealed values never do. */
 const KEY_LISTS = new Map<string, KeyListCache>()
-const KEY_LIST_CACHE_MS = 60_000
 const KEY_LIST_CACHE_LIMIT = 64
 
 function listCache(route: string): KeyListCache {
@@ -308,9 +348,17 @@ function listCache(route: string): KeyListCache {
   return fresh
 }
 
+/**
+ * The last successful list, whatever its age.
+ *
+ * The panel paints this on mount and revalidates in the background, so a
+ * re-opened card never waits on a fresh read to show something. Age is
+ * deliberately not consulted: a 60-second gate here is what left an expansion
+ * past it staring at the loading line for as long as the fresh read took, when
+ * the list it painted a minute ago is still the best available answer.
+ */
 function cachedList(route: string): KeyState | undefined {
-  const cached = KEY_LISTS.get(route)
-  return cached !== undefined && Date.now() - cached.updatedAt < KEY_LIST_CACHE_MS ? cached.state : undefined
+  return KEY_LISTS.get(route)?.state
 }
 
 function listKeys(route: string): Promise<KeyAnswer> {
@@ -376,10 +424,35 @@ async function routeEndpoints(route: string): Promise<RouteEndpointsAnswer> {
   }
 }
 
+/**
+ * Ask the host for one route's balance endpoint and nothing else.
+ *
+ * One index-file read and no credential work, so the provider card can hydrate
+ * its balance row on the same throttle as the address rows.
+ */
+async function routeBalance(route: string): Promise<RouteBalanceAnswer> {
+  try {
+    const response = await fetch(
+      `${KEY_INDEX_PATH}?route=${encodeURIComponent(route)}&op=balance`,
+      { method: 'GET', cache: 'no-store', credentials: 'same-origin' },
+    )
+    const body: unknown = await response.json().catch(() => undefined)
+    if (!isRecord(body) || body['ok'] !== true) {
+      const error = isRecord(body) ? messageOf(body) : undefined
+      return error === undefined ? { ok: false } : { ok: false, error }
+    }
+    const endpoint = body['endpoint']
+    return { ok: true, endpoint: typeof endpoint === 'string' && endpoint.length > 0 ? endpoint : null }
+  } catch {
+    return { ok: false }
+  }
+}
+
 /** The live client: same-origin fetch against the host's route. */
 export const httpKeyManagerClient: KeyManagerClient = {
   list: listKeys,
   endpoints: routeEndpoints,
+  balanceEndpoint: routeBalance,
   cached: cachedList,
   add: (route, value, alias) => changeKeys(route, { op: 'add', value, ...(alias === undefined ? {} : { alias }) }),
   rename: (route, ref, alias) => changeKeys(route, { op: 'rename', ref, ...(alias === undefined ? {} : { alias }) }),
@@ -392,6 +465,7 @@ export const httpKeyManagerClient: KeyManagerClient = {
     changeKeys(route, { op: 'protocol', ref, ...(protocol === undefined ? {} : { protocol }) }),
   setEndpoints: (route, openai, anthropic) =>
     changeKeys(route, { op: 'endpoints', openai: openai ?? '', anthropic: anthropic ?? '' }),
+  setBalanceEndpoint: (route, endpoint) => changeKeys(route, { op: 'balance', endpoint }),
   async reveal(route, ref) {
     try {
       const response = await fetch(

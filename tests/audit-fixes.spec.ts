@@ -78,6 +78,13 @@ function fakeHost(providers: unknown, options?: { credentials?: unknown; fetchMo
     mutate: async () => {},
     update: async () => {},
   }
+  // The fake effect, shared by ctx.effect and the injected Context's own
+  // effect member (the deferred tool registration runs on the injected value).
+  const effect = (setup: () => () => void): void => {
+    // The disposer is deliberately dropped: routes must stay registered for
+    // the assertions below (the test process tears down with the suite).
+    setup()
+  }
   const ctx = {
     settings,
     inject(deps: string[], cb: (injected: Record<string, unknown>) => void): void {
@@ -91,13 +98,13 @@ function fakeHost(providers: unknown, options?: { credentials?: unknown; fetchMo
           },
         }
       }
+      // Cordis waits for EVERY dep; a missing one means the callback never
+      // runs (the image tool registration defers on tools + attachments).
+      if (Object.keys(injected).length < deps.length) return
+      injected['effect'] = effect
       cb(injected)
     },
-    effect(setup: () => () => void): void {
-      // The disposer is deliberately dropped: routes must stay registered for
-      // the assertions below (the test process tears down with the suite).
-      setup()
-    },
+    effect,
     on(): void {},
     get(name: string): unknown {
       return name === 'credentials' ? options?.credentials : undefined

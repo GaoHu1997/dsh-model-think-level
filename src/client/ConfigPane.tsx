@@ -4,11 +4,12 @@
  * Models-page title-row button.
  *
  * One card today, 「生图」, per the design's card-list shape with room for
- * more: the derived image-model list (radio = default model, per-row endpoint
- * badge + params + test), the empty state with one-click marking of suspected
+ * more: the params row, the default-model select under it, the derived
+ * image-model list (per-row endpoint badge + test/probe actions), the empty
+ * state with one-click marking of suspected
  * image models (written through the SAME settings channel the Models page
- * editor uses — never a raw file edit), and the MCP enable switch whose state
- * is DERIVED from the cordis.patch.yml marker block the host reports.
+ * editor uses — never a raw file edit), and the built-in-tool status card
+ * whose state the host reports from its live tools/attachments registration.
  *
  * Esc / backdrop / ✕ close it; the wrapper unmounts and the page keeps
  * whatever the pane saved.
@@ -26,13 +27,10 @@ import { EffortBoundary, mountReact, unmountReact } from './injection/mount.js'
 import {
   cachedImageConfigView,
   generateImageDirect,
-  imageMcpAction,
-  pollMcpStatus,
   readImageConfigView,
   saveImageConfig,
   testImageEndpoint,
   type ImageConfigView,
-  type ImageMcpView,
 } from './image-config-client.js'
 import { describeNamespace, imageGenOf, providersOf, writeModelRows } from './ops.js'
 import type { RemoteApi } from './types.js'
@@ -81,7 +79,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
   const [busyId, setBusyId] = useState<string | undefined>(undefined)
   const [notice, setNotice] = useState<string | undefined>(undefined)
   const [suspects, setSuspects] = useState<readonly SuspectModel[] | undefined>(undefined)
-  const [mcpBusy, setMcpBusy] = useState(false)
+  const [toolBusy, setToolBusy] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -164,23 +162,13 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     })
   }, [api, suspects, t, loadSuspects, reload])
 
-  /** The default-model radio: one save, then the row renders from the answer. */
+  /** The default-model select: one save, then the options render from the answer. */
   const setDefault = useCallback((id: string): void => {
-    setBusyId(id)
+    if (id.length === 0) return
+    setBusyId('default')
     void saveImageConfig({ defaultModel: id }).then(answer => {
       setBusyId(undefined)
       if (answer.ok) { setNotice(undefined); reload() } else setNotice(answer.error)
-    })
-  }, [reload])
-
-  /** Per-row param override. */
-  const setRowParam = useCallback((id: string, field: 'size' | 'quality' | 'n', value: string): void => {
-    const numeric = field === 'n' ? Number(value) : undefined
-    void saveImageConfig({
-      models: [{ id, ...(field === 'size' ? { size: value } : field === 'quality' ? { quality: value } : { n: numeric }) }],
-    }).then(answer => {
-      if (answer.ok) reload()
-      else setNotice(answer.error)
     })
   }, [reload])
 
@@ -208,42 +196,27 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     })
   }, [reload])
 
-  /** MCP switch: install / uninstall, then confirm the hot reload landed.
-   * HMR is asynchronous — the first read after the action may still show the
-   * old state, so the pane says "submitted, reloading" and POLLS the derived
-   * status; a run that exhausts the poll gets the conservative restart hint
-   * (the design's 需重启 DSH state, without pretending we can detect HMR). */
-  const toggleMcp = useCallback((next: boolean): void => {
-    setMcpBusy(true)
-    void imageMcpAction(next ? 'install' : 'uninstall').then(answer => {
-      setMcpBusy(false)
-      if (!answer.ok) {
-        setNotice(answer.error)
-        return
-      }
-      setNotice(t('mcpHotReload'))
-      void pollMcpStatus(next).then(confirmed => {
-        reload()
-        setNotice(confirmed ? undefined : t('mcpRestartHint'))
-      })
+  /** The built-in tool test: one real generation through the shared core,
+   * with the config defaults — proves the whole chain (config → key →
+   * endpoint → disk) the way a conversation call would run it. */
+  const testTool = useCallback((): void => {
+    setToolBusy(true)
+    void generateImageDirect({ prompt: 'a red apple on a white table' }).then(answer => {
+      setToolBusy(false)
+      if (answer.ok) {
+        setNotice(answer.data.images.length === 1
+          ? t('imagegenProbeDone', { path: answer.data.images[0] })
+          : t('imagegenProbeDoneMulti', { count: answer.data.images.length, paths: answer.data.images.join('、') }))
+      } else setNotice(answer.error)
     })
-  }, [reload, t])
-
-  const runSelfcheck = useCallback((): void => {
-    setMcpBusy(true)
-    void imageMcpAction('selfcheck').then(answer => {
-      setMcpBusy(false)
-      if (answer.ok) reload()
-      else setNotice(answer.error)
-    })
-  }, [reload])
+  }, [t])
 
   /** The generate-once probe the pane offers per row (辅通道 demo). */
   const generateProbe = useCallback((id: string): void => {
     setBusyId(id)
     void generateImageDirect({ model: id, prompt: 'a red apple on a white table' }).then(answer => {
       setBusyId(undefined)
-      if (answer.ok) setNotice(t('imagegenProbeDone', { path: answer.data.filePath }))
+      if (answer.ok) setNotice(t('imagegenProbeDone', { path: answer.data.images[0] ?? '' }))
       else setNotice(answer.error)
     })
   }, [t])
@@ -262,6 +235,15 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
   const tNoParams = t as (key: string) => string
   const models = view.models
   const empty = models.length === 0
+  // A label shared by two routes (the same model behind two providers) would
+  // read as one row in the menu; the provider name disambiguates only those.
+  const labelCounts = new Map<string, number>()
+  for (const model of models) labelCounts.set(model.label, (labelCounts.get(model.label) ?? 0) + 1)
+  const modelOptionText = (model: ImageConfigView['models'][number]): string => {
+    if ((labelCounts.get(model.label) ?? 0) < 2) return model.label
+    const provider = routeNames[model.route] ?? model.providerLabel ?? model.route
+    return `${model.label} · ${provider}`
+  }
   return createElement('div', { className: 'bre-config-card' },
     createElement('div', { className: 'bre-config-card-head' },
       createElement('span', { className: 'bre-config-card-title' }, t('imagegenSectionTitle')),
@@ -274,6 +256,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
       createElement('select', {
         className: 'bre-config-select',
         value: canonicalSize(view.defaults.size),
+        'aria-label': t('imagegenSizeLabel'),
         onChange: (event: ChangeEvent<HTMLSelectElement>) => {
           void saveImageConfig({ defaults: { size: (event.target as HTMLSelectElement).value } }).then(reload)
         },
@@ -281,6 +264,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
       createElement('select', {
         className: 'bre-config-select',
         value: view.defaults.quality,
+        'aria-label': t('imagegenQualityLabel'),
         onChange: (event: ChangeEvent<HTMLSelectElement>) => {
           void saveImageConfig({ defaults: { quality: (event.target as HTMLSelectElement).value } }).then(reload)
         },
@@ -288,6 +272,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
       createElement('select', {
         className: 'bre-config-select',
         value: String(view.defaults.n),
+        'aria-label': t('imagegenCountLabel'),
         onChange: (event: ChangeEvent<HTMLSelectElement>) => {
           void saveImageConfig({ defaults: { n: Number((event.target as HTMLSelectElement).value) } }).then(reload)
         },
@@ -309,6 +294,20 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
           t('imagegenTimeoutMinutes', { minutes: Math.round(ms / 60_000) }),
         ))),
       ),
+    ),
+    // The default-model picker: its own row under the params, so the choice is
+    // one menu instead of a radio buried among the per-row controls.
+    !empty && createElement('div', { className: 'bre-config-default-row' },
+      createElement('label', { className: 'bre-config-default-label' }, t('imagegenDefaultModelLabel')),
+      createElement('select', {
+        className: 'bre-config-select bre-config-default-select',
+        value: view.defaultModel ?? '',
+        'aria-label': t('imagegenDefaultModelLabel'),
+        disabled: busyId === 'default',
+        onChange: (event: ChangeEvent<HTMLSelectElement>) => setDefault((event.target as HTMLSelectElement).value),
+      },
+      view.defaultModel === null && createElement('option', { value: '', disabled: true }, t('imagegenDefaultModelNone')),
+      models.map(model => createElement('option', { key: model.id, value: model.id }, modelOptionText(model)))),
     ),
     empty
       ? createElement('div', { className: 'bre-config-empty' },
@@ -335,16 +334,6 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
           const isDefault = view.defaultModel === model.id
           const badge = endpointBadge(tNoParams, model.endpoint.status)
           return createElement('div', { key: model.id, className: 'bre-config-row' },
-            createElement('input', {
-              type: 'radio',
-              name: 'bre-config-default-model',
-              className: 'bre-config-radio',
-              checked: isDefault,
-              disabled: busyId === model.id,
-              onChange: () => setDefault(model.id),
-              title: t('imagegenSetDefault'),
-              'aria-label': t('imagegenSetDefault'),
-            }),
             createElement('div', { className: 'bre-config-name' },
               // Row head: the model's display name only — the provider, the
               // route and the key reference move out of the title.
@@ -361,27 +350,10 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
             ),
             model.api !== 'images'
               ? createElement('span', { className: 'bre-config-badge bre-config-badge-bad' }, t('imagegenNoEndpoint'))
+              // The per-row param overrides are gone: the params row above is
+              // the one place a size/quality/n is picked, so a row keeps only
+              // the two actions that are about THIS endpoint.
               : createElement('div', { className: 'bre-config-row-controls' },
-                createElement('select', {
-                  className: 'bre-config-select',
-                  value: canonicalSize(model.size ?? view.defaults.size),
-                  onChange: (event: ChangeEvent<HTMLSelectElement>) => setRowParam(model.id, 'size', (event.target as HTMLSelectElement).value),
-                  'aria-label': t('imagegenSizeLabel'),
-                }, IMAGE_SIZE_TIERS.map(tier =>
-                  createElement('option', { key: tier.label, value: tier.value }, tier.label))),
-                createElement('select', {
-                  className: 'bre-config-select',
-                  value: model.quality ?? view.defaults.quality,
-                  onChange: (event: ChangeEvent<HTMLSelectElement>) => setRowParam(model.id, 'quality', (event.target as HTMLSelectElement).value),
-                  'aria-label': t('imagegenQualityLabel'),
-                }, [...new Set([...model.params.qualities, view.defaults.quality])].map(quality =>
-                  createElement('option', { key: quality, value: quality }, quality))),
-                createElement('select', {
-                  className: 'bre-config-select',
-                  value: String(model.n ?? view.defaults.n),
-                  onChange: (event: ChangeEvent<HTMLSelectElement>) => setRowParam(model.id, 'n', (event.target as HTMLSelectElement).value),
-                  'aria-label': t('imagegenCountLabel'),
-                }, [1, 2, 3, 4].map(count => createElement('option', { key: count, value: String(count) }, `n=${count}`))),
                 createElement('button', {
                   className: 'bre-config-btn-ghost',
                   type: 'button',
@@ -398,36 +370,27 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
           )
         }),
       ),
-    createElement('div', { className: 'bre-config-mcp' },
-      createElement('div', { className: 'bre-config-mcp-head' },
-        createElement('span', null, t('mcpEnable')),
+    // The built-in tool card: registration state the host derives from its
+    // live tools/attachments services, plus a real generation through the
+    // shared core as the end-to-end check the old MCP selfcheck approximated.
+    createElement('div', { className: 'bre-config-tool' },
+      createElement('div', { className: 'bre-config-tool-head' },
+        createElement('span', null, t('imagegenToolTitle')),
+        createElement('span', { className: 'bre-config-tool-name' },
+          view.tool.registered ? view.tool.name ?? 'generate_image' : '—'),
+      ),
+      createElement('div', { className: 'bre-config-tool-status' },
+        view.tool.registered ? t('imagegenToolRegistered', { name: view.tool.name ?? 'generate_image' }) : t('imagegenToolUnregistered'),
+      ),
+      createElement('div', { className: 'bre-config-tool-actions' },
         createElement('button', {
-          className: `bre-config-switch${view.mcp.installed ? ' on' : ''}`,
+          className: 'bre-config-btn-ghost',
           type: 'button',
-          role: 'switch',
-          'aria-checked': view.mcp.installed,
-          disabled: mcpBusy,
-          onClick: () => toggleMcp(!view.mcp.installed),
-        }, createElement('span', { className: 'bre-config-switch-knob' })),
+          disabled: toolBusy || empty || view.defaultModel === null,
+          onClick: testTool,
+        }, t('imagegenToolTest')),
       ),
-      createElement('div', { className: 'bre-config-mcp-status' },
-        view.mcp.installed
-          ? `${t('mcpInstalled')} · ${view.mcp.toolName}`
-          : t('mcpNotInstalled'),
-      ),
-      view.mcp.installed && view.mcp.diagnostics.lastCheckAt !== null && createElement('div', { className: 'bre-config-mcp-status' },
-        view.mcp.diagnostics.ok
-          ? t('mcpCheckOk')
-          : `${t('mcpCheckFailed')}: ${view.mcp.diagnostics.error ?? '?'}`,
-      ),
-      view.mcp.installed && view.mcp.malformed === true && createElement('div', { className: 'bre-config-mcp-status' },
-        t('mcpMalformed'),
-      ),
-      createElement('div', { className: 'bre-config-mcp-actions' },
-        createElement('button', { className: 'bre-config-btn-ghost', type: 'button', disabled: mcpBusy, onClick: () => toggleMcp(true) }, t('mcpReinstall')),
-        createElement('button', { className: 'bre-config-btn-ghost', type: 'button', disabled: mcpBusy, onClick: runSelfcheck }, t('mcpTestTool')),
-      ),
-      createElement('div', { className: 'bre-config-mcp-hint' }, t('mcpHint')),
+      createElement('div', { className: 'bre-config-tool-hint' }, t('imagegenToolHint')),
     ),
   )
 }

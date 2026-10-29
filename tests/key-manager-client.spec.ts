@@ -79,6 +79,26 @@ describe('the row status payload', () => {
     // A non-numeric remaining time is the host telling nothing, not cooling.
     expect(answer.entries[2]?.rest).toBeUndefined()
   })
+
+  it('carries the probe mark and the route probe flag through to the panel', async () => {
+    stubFetch({
+      body: {
+        ok: true,
+        route: 'ofox',
+        probing: true,
+        entries: [
+          { ref: 'K1', enabled: true, configured: true, masked: 'sk-1', models: ['m-a'], auto: true },
+        ],
+        endpoints: { openai: null, anthropic: null },
+      },
+    })
+    const answer = await httpKeyManagerClient.list('ofox')
+    expect(answer.ok).toBe(true)
+    if (!answer.ok) return
+    expect(answer.probing).toBe(true)
+    expect(answer.entries[0]?.models).toEqual(['m-a'])
+    expect(answer.entries[0]?.auto).toBe(true)
+  })
 })
 
 describe('list cache', () => {
@@ -98,8 +118,29 @@ describe('list cache', () => {
     expect(JSON.stringify(cached)).not.toContain('sk-live-secret')
   })
 
-  it('coalesces concurrent reads and preserves a write against a stale read', async () => {
-    let finishRead!: (response: Response) => void
+  it('keeps answering from the cache however old it is', async () => {
+    // The panel paints the cached list and revalidates behind it, so age must
+    // never take the answer away: an expansion that lands past the old 60s
+    // gate used to stare at the loading line for as long as the fresh read
+    // took, with a perfectly good list sitting right there.
+    stubFetch({
+      body: { ok: true, route: 'swr-route', entries: [{ ref: 'A', configured: true, masked: 'sk-a...z9' }] },
+    })
+    await httpKeyManagerClient.list('swr-route')
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(Date.now() + 10 * 60_000)
+      // A later read failing does not take the cached answer away either.
+      stubFetch({ status: 502, body: { ok: false, error: 'down' } })
+      const failed = await httpKeyManagerClient.list('swr-route')
+      expect(failed.ok).toBe(false)
+      expect(httpKeyManagerClient.cached?.('swr-route')?.entries[0]?.ref).toBe('A')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('coalesces concurrent reads and preserves a write against a stale read', async () => {    let finishRead!: (response: Response) => void
     let readCount = 0
     vi.stubGlobal('fetch', async (_url: unknown, init?: RequestInit) => {
       if (init?.method === 'POST') {

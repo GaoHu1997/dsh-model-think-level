@@ -490,9 +490,9 @@ describe('FingerprintPane', () => {
     const body = rowOf(pane.root, 'gpt-5.5').querySelector('.bre-fp-body')
     const pills = Array.from(body?.querySelectorAll('.bre-fp-chal') ?? []).map((node) => node.textContent)
     expect(pills).toEqual([
-      'Challenge 1: 312 numbers · counted',
-      'Challenge 2: 121 / 332 numbers · not counted',
-      'Challenge 3: 315 numbers · counted',
+      'Q1 312 · counted',
+      'Q2 121/332 · not counted',
+      'Q3 315 · counted',
     ])
     // Under the family line, before anything else in the card.
     const family = body?.querySelector('.bre-fp-family')
@@ -522,7 +522,7 @@ describe('FingerprintPane', () => {
     await flush()
 
     const third = rowOf(pane.root, 'gpt-5.5').querySelectorAll('.bre-fp-chal')[2]
-    expect(third?.textContent).toBe('Challenge 3: 315 numbers · early stop')
+    expect(third?.textContent).toBe('Q3 315 · early stop')
     expect(third?.className).toBe('bre-fp-chal is-skipped')
   })
 
@@ -558,9 +558,9 @@ describe('FingerprintPane', () => {
     expect(body?.querySelector('.bre-fp-error')?.textContent).toContain('no usable answer')
     const pills = Array.from(body?.querySelectorAll('.bre-fp-chal') ?? []).map((node) => node.textContent)
     expect(pills).toEqual([
-      'Challenge 1: 41 / 312 numbers · not counted',
-      'Challenge 2: 0 / 332 numbers · not counted',
-      'Challenge 3: 87 / 315 numbers · not counted',
+      'Q1 41/312 · not counted',
+      'Q2 0/332 · not counted',
+      'Q3 87/315 · not counted',
     ])
   })
 

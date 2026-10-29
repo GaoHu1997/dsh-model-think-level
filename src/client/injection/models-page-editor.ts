@@ -1354,6 +1354,26 @@ export function showOfficialCapacityChrome(container: HTMLElement): void {
   showChrome(capacityChromeOf(container))
 }
 
+/**
+ * Whether the official input-types fieldset is a surface the USER can see and
+ * operate right now.
+ *
+ * It is not, for every row this plugin's editor is mounted in: the scan stands
+ * that fieldset down ({@link hideOfficialCapacityChrome}) because the editor
+ * carries 支持模态 itself. A verdict "printed" on a stood-down fieldset reaches
+ * no reader — that is how a bulk adapt used to lose its modality: the tick
+ * landed on a hidden box, the write dropped the verdict in favour of it, and
+ * the editor's pills (which read the ledger) came back unselected.
+ *
+ * A fieldset the HOST hid is not a surface either, for the same reason.
+ */
+function officialModalitySurfaceOf(container: HTMLElement): boolean {
+  const fieldset = container.querySelector<HTMLElement>('[class*="modelInputTypes"]')
+  if (fieldset === null) return false
+  if (fieldset.getAttribute(CAPACITY_HIDDEN_ATTR) === '1') return false
+  return !fieldset.hidden && fieldset.style.display !== 'none'
+}
+
 /** The official input-types checkbox an image verdict belongs to, or undefined
  * when this row ships no such control (a legacy kernel) — or ships one whose
  * boxes cannot be told apart.
@@ -1396,6 +1416,10 @@ export function officialImageCheckboxOf(container: HTMLElement, imageLabels: rea
  * only remaining way the verdict can reach the document.
  */
 export function echoOfficialModality(container: HTMLElement, image: boolean, imageLabels: readonly string[]): boolean {
+  // A control this plugin has stood down is not a surface: the click would land
+  // on a box nobody can see (see {@link officialModalitySurfaceOf}), and the
+  // caller must go on to carry the verdict in its own write.
+  if (!officialModalitySurfaceOf(container)) return false
   const box = officialImageCheckboxOf(container, imageLabels)
   if (box === undefined || box.disabled) return false
   if (box.checked !== image) box.click()
@@ -1403,18 +1427,21 @@ export function echoOfficialModality(container: HTMLElement, image: boolean, ima
 }
 
 /**
- * The modality intent a row's own write may carry, once the official
- * input-types control has been offered the verdict.
+ * The modality intent a row's own write carries, after the official
+ * input-types control has been MIRRORED with the verdict.
  *
- * `undefined` out means the write states nothing about the modality: either it
- * never carried one, or the official control took the verdict over. A row with
- * no such control — a legacy kernel, or a row the user has left folded — hands
- * its intent through unchanged, which keeps the document write as the way the
- * verdict travels.
+ * The official checkbox renders the official card's own DRAFT, not the
+ * settings document — so a document write of the plugin's can never tick it
+ * before the card is saved and reopened, and the box has to be clicked for the
+ * user to see the verdict in the official form. That click is a mirror, never a
+ * handover: the row's own declaration still travels its write (or its staging),
+ * because the plugin's 支持模态 pills and the composer's vision badge both read
+ * the DOCUMENT. Dropping the intent once the box took the click — what this
+ * function used to do — left a bulk-adapted new provider with an unselected
+ * modality everywhere the user could see it.
  *
- * `null` is the plugin's deliberate UNSET, which the official control cannot
- * express at all (it knows only text and text+image): it passes through
- * untouched.
+ * `null` (the plugin's deliberate UNSET) is untouched: the official control
+ * cannot express it at all.
  */
 export function officialModalityIntent(
   container: HTMLElement | undefined,
@@ -1422,7 +1449,11 @@ export function officialModalityIntent(
   imageLabels: readonly string[],
 ): InputModalities | null | undefined {
   if (input === undefined || input === null || container === undefined) return input
-  return echoOfficialModality(container, input.includes('image'), imageLabels) ? undefined : input
+  // Mirror only onto a control the user can actually reach (see
+  // {@link officialModalitySurfaceOf}); a stood-down fieldset gets no click,
+  // and the verdict simply travels the write either way.
+  if (officialModalitySurfaceOf(container)) echoOfficialModality(container, input.includes('image'), imageLabels)
+  return input
 }
 
 /**
@@ -1590,9 +1621,12 @@ export function writeOfficialCapacities(
  * what the user sees at rest is their own fold, and the tick they were missing
  * is inside it, held by the card's draft for the card's own Save to persist.
  *
- * `false` out means the official control does not own the row's modality — no
- * such control (a legacy kernel), a disabled one (a read-only card), or a visit
- * that found nothing to click — and the caller keeps its own write.
+ * `false` out means the official control is not a surface — no such control (a
+ * legacy kernel), one this plugin stood down (the ordinary case on any row the
+ * editor is mounted in), a disabled one (a read-only card), or a visit that
+ * found nothing to click. The caller's own write carries the verdict either
+ * way; this function only answers whether the user got to SEE it in the
+ * official form.
  */
 async function imprintModality(
   container: HTMLElement | undefined,
@@ -1935,51 +1969,46 @@ export async function adaptEveryModel(
     // reported the row as adapted, which is the user-visible lie this arm
     // removes.
     let stagedRow = false
-    // Every write the walk lands for a row that is ON SCREEN goes through the
-    // official input-types control first (see {@link officialModalityIntent}):
-    // the walk must not race the official Save for the one field the user can
-    // see and edit in the official form itself.
+    // Every write the walk lands for a row that is ON SCREEN also MIRRORS its
+    // modality onto the official input-types control (see
+    // {@link officialModalityIntent}): that control renders the card's draft,
+    // so without the click the user would not see the verdict before the card
+    // is saved and reopened. The mirror never replaces the write — the
+    // document is what the editor's pills and the composer read.
     const modalityIntent = (modelId: string, input: InputModalities | null | undefined): InputModalities | null | undefined =>
       officialModalityIntent(mountedContainers.get(modelId), input, deps.labels().inputImage)
-    // The same offer, made BEFORE a row's write is committed. `true` out means
-    // the official control carries the verdict, and the caller then keeps the
-    // modality out of its own write -- the same single-writer rule
-    // {@link officialModalityIntent} enforces for a row already unfolded. A row
-    // with no such control answers `false`, and so does a row whose control
-    // could not be reached: the document write is then what carries its verdict
-    // (see {@link imprintModality}).
-    const imprintFor = async (modelId: string, nextModality: { readonly image: boolean }): Promise<boolean> => {
-      if (nextModality.image !== true) return false
+    // The same mirror for a row whose own write carries only a modality gap
+    // ('keep' ladders). It never decides whether that write happens: the write
+    // always carries the verdict, because the document is what every plugin
+    // surface reads (see {@link officialModalityIntent}).
+    const imprintFor = async (modelId: string, nextModality: { readonly image: boolean }): Promise<void> => {
+      if (nextModality.image !== true) return
       const container = mountedContainers.get(modelId) ?? rowElements.get(modelId)
-      if (container === undefined) return false
-      return imprintModality(container, deps.labels(), nextFrame)
+      if (container === undefined) return
+      await imprintModality(container, deps.labels(), nextFrame)
     }
     /**
-     * The same offer as {@link imprintFor}, made for BOTH halves a fresh
+     * The same mirror as {@link imprintFor}, made for BOTH halves a fresh
      * suggestion carries — the image verdict and the reference capacities — in
      * ONE disclosure visit ({@link visitRowDisclosure}), so a folded row is
      * opened once, not once per field. The capacities are a fill-only courtesy
      * ({@link echoOfficialCapacities}) and never part of the write; the
-     * modality half answers whether the official input-types control took the
-     * verdict over, which is what decides if the write still carries it.
+     * modality half only ticks a control the user can see.
      */
     const imprintRow = async (
       modelId: string,
       nextModality: { readonly image: boolean },
       values: { contextWindow?: number; maxTokens?: number },
-    ): Promise<{ modality: boolean; capacities: boolean } | false> => {
+    ): Promise<void> => {
       const wantsModality = nextModality.image === true
       const wantsCapacities = values.contextWindow !== undefined || values.maxTokens !== undefined
-      if (!wantsModality && !wantsCapacities) return false
+      if (!wantsModality && !wantsCapacities) return
       const container = mountedContainers.get(modelId) ?? rowElements.get(modelId)
-      if (container === undefined) return false
+      if (container === undefined) return
       const labels = deps.labels()
-      return visitRowDisclosure(container, labels, nextFrame, scope => {
-        const modality = wantsModality && officialInputTypesOf(scope) && echoOfficialModality(scope, true, labels.inputImage)
-        const landed = wantsCapacities
-          ? echoOfficialCapacities(scope, labels, values)
-          : { contextWindow: false, maxOutput: false }
-        return { modality, capacities: landed.contextWindow || landed.maxOutput }
+      await visitRowDisclosure(container, labels, nextFrame, scope => {
+        if (wantsModality) echoOfficialModality(scope, true, labels.inputImage)
+        if (wantsCapacities) echoOfficialCapacities(scope, labels, values)
       })
     }
     const api = createEditorApi(
@@ -2087,25 +2116,20 @@ export async function adaptEveryModel(
         // latest word with a suggestion (the held ledger keeps one write per
         // row, so this one would replace theirs).
         if (state.queued.get(route)?.has(modelId) === true) continue
-        // This row's own control is on screen. The official input-types
-        // checkbox renders the card's DRAFT, not the settings document, so a
-        // write of ours could never tick it before the card is saved and
-        // reopened — the user's report exactly. Print the verdict on the control
-        // instead: the tick is immediate, the official Save is what persists it,
-        // and a write that kept the modality would land after that Save and
-        // could revert whatever the user chose in the meantime. The row still
-        // counts as adapted — the verdict reached the only surface that can hold
-        // it before the Save — and no write is queued at all, because with
-        // `efforts: 'keep'` the modality WAS the whole message.
+        // This row's control is on screen. MIRROR the verdict onto it — the
+        // official input-types checkbox renders the card's DRAFT, not the
+        // settings document, so without the click the user would only see the
+        // tick after saving and reopening the card. The click never replaces the
+        // write: the row's declaration has to land in the document, because the
+        // plugin's 支持模态 pills and the composer's vision badge both read it
+        // there. Making the click a handover (the old rule) is what left a
+        // bulk-adapted new provider with nothing selected in its modality row.
         //
-        // A row whose control could not be reached is not left unfolded for this
-        // (see {@link imprintModality}): `imprintFor` answers `false` and the
-        // verdict rides the write below instead. A 生图 verdict has no official
-        // control at all, so it always rides the write.
-        if (await imprintFor(modelId, nextModality)) {
-          held += 1
-          continue
-        }
+        // A row whose control is not visible — a legacy kernel, a read-only
+        // card, or the ordinary case: the plugin's own editor stood the
+        // fieldset down to be the row's only modality surface — gets no click,
+        // and the verdict rides the write below either way.
+        await imprintFor(modelId, nextModality)
         stagedRow = !docIds.has(modelId)
         api.commit(route, modelId, pendingWriteOf({
           efforts: 'keep',
@@ -2125,18 +2149,18 @@ export async function adaptEveryModel(
         : nextDefault === '' ? null : nextDefault
       // A row the document does not hold yet stages; a saved row holds.
       stagedRow = !docIds.has(modelId)
-      // The modality AND the capacities go to the row's own official controls
-      // first — folded row included, through ONE transient visit
+      // The modality AND the capacities are MIRRORED onto the row's own
+      // official controls — folded row included, through ONE transient visit
       // ({@link visitRowDisclosure}) that puts the fold back — so both are in
-      // the card's draft the moment the click lands. Neither rides the document
-      // write: those controls render the card's draft, and a held write landing
-      // after the Save would revert whatever the user changed in the meantime.
-      const imprint = await imprintRow(modelId, nextModality, {
+      // the card's draft the moment the click lands. The capacities are a
+      // fill-only courtesy and never ride the write; the modality DOES ride it:
+      // the card's draft is not the document, and every plugin surface (the
+      // 支持模态 pills, the composer's vision badge) reads the document.
+      await imprintRow(modelId, nextModality, {
         ...(parts.contextWindow === undefined ? {} : { contextWindow: parts.contextWindow }),
         ...(parts.maxTokens === undefined ? {} : { maxTokens: parts.maxTokens }),
       })
-      const imprinted = imprint !== false && imprint.modality
-      const modalityWrite = imprinted || sameModality(nextModality, initialInput, storedImageGen)
+      const modalityWrite = sameModality(nextModality, initialInput, storedImageGen)
         ? undefined
         : buildModalityWrite(nextModality)
       api.commit(route, modelId, pendingWriteOf({

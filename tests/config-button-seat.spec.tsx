@@ -162,11 +162,18 @@ describe('ensureConfigButtonSeat', () => {
     expect(host).not.toBeNull()
     const button = host!.querySelector('button.bre-config-btn')
     expect(button).not.toBeNull()
-    expect(button!.textContent).toContain('configButton')
+    // Icon-only circle: no text node at all, the copy rides on the attributes.
+    expect(button!.textContent).toBe('')
+    expect(button!.querySelector('svg')).not.toBeNull()
+    expect(button!.getAttribute('aria-label')).toBe('configButton')
+    expect(button!.getAttribute('title')).toBe('configButtonHint')
     expect(row.lastElementChild).toBe(host)
     // The line mechanics that right-align the seat are plugin-owned on the
-    // heading; the card list never receives them.
+    // heading; the card list never receives them. They ride BOTH the class and
+    // the inline style: the host re-renders the heading with a fresh className.
     expect(row.classList.contains(CONFIG_TITLE_LINE_CLASS)).toBe(true)
+    expect(row.style.display).toBe('flex')
+    expect(row.style.alignItems).toBe('center')
 
     // A second pass over the settled page writes nothing new.
     ensureConfigButtonSeat(row, { t, onOpen }, state)
@@ -176,6 +183,19 @@ describe('ensureConfigButtonSeat', () => {
     // The click opens the pane.
     ;(button as HTMLButtonElement).click()
     expect(onOpen).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the line right-aligned when the host re-render resets className', () => {
+    const { row } = mountModelsPage()
+    const state = createConfigButtonSeatState()
+    ensureConfigButtonSeat(row, { t, onOpen: () => {} }, state)
+    // What React writes on every render of the heading: the host's own class
+    // list, with the plugin's flex class gone.
+    row.className = 'jrmgQW_title'
+    ensureConfigButtonSeat(row, { t, onOpen: () => {} }, state)
+    expect(row.querySelectorAll(`.${CONFIG_HOST_CLASS}`)).toHaveLength(1)
+    expect(row.classList.contains(CONFIG_TITLE_LINE_CLASS)).toBe(true)
+    expect(row.style.display).toBe('flex')
   })
 
   it('remounts fresh when the page re-rendered the line under the seat', () => {
@@ -209,5 +229,9 @@ describe('ensureConfigButtonSeat', () => {
     expect(document.querySelectorAll(`.${CONFIG_HOST_CLASS}`)).toHaveLength(0)
     expect(document.querySelectorAll(`.${CONFIG_TITLE_LINE_CLASS}`)).toHaveLength(0)
     expect(row.classList.contains(CONFIG_TITLE_LINE_CLASS)).toBe(false)
+    // The inline line mechanics leave with the seat, so the host's heading is
+    // exactly the element it rendered.
+    expect(row.style.display).toBe('')
+    expect(row.style.alignItems).toBe('')
   })
 })

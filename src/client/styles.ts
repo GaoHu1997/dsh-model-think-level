@@ -1920,6 +1920,79 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   .bre-provider-switch::after { transition: none; }
 }
 
+/* ---- Provider balance chip (Models page) ---- */
+
+/* Leads the enable switch as context, not as a control: a quiet pill that must
+   never read like a button, and never pushes the switch out of line. Tabular
+   figures keep two providers' amounts from jittering as the page rescans. The
+   pill holds the amount and, AFTER it, the small refresh control. */
+.bre-provider-balance {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  max-width: 168px;
+  margin-right: 8px;
+  padding: 1px 4px 1px 8px;
+  border-radius: 9px;
+  background: var(--dsw-alias-bg-tertiary, #eef0f4);
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+}
+
+.bre-provider-balance-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The icon is a real button (16×16 hit area, 12px glyph) but visually part of
+   the pill: quiet until hovered, and it never widens the amount's ellipsis
+   budget — the text column shrinks, the control stays. */
+.bre-provider-balance-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  opacity: .7;
+}
+
+.bre-provider-balance-refresh svg { width: 12px; height: 12px; }
+
+.bre-provider-balance-refresh:hover {
+  opacity: 1;
+  background: var(--dsw-alias-bg-quaternary, #e2e5ea);
+}
+
+.bre-provider-balance-refresh:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 1px;
+}
+
+.bre-provider-balance-refresh.is-spinning svg {
+  animation: bre-balance-spin .8s linear infinite;
+}
+
+@keyframes bre-balance-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bre-provider-balance-refresh.is-spinning svg { animation: none; }
+}
+
 /* ---- The reserved delete seat (Models page) ---- */
 
 /* A provider the host will not let the user remove renders no delete button, so
@@ -3930,19 +4003,28 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    Grammar is the badge's — 19px, 5px corner, 11px text, one hairline — so the
    result card reads as one instrument instead of a second design. Only the
    state changes colour, and the state is exactly three: counted (success),
-   not counted (warn), early-stopped (muted, dashed, because nothing failed). */
+   not counted (warn), early-stopped (muted, dashed, because nothing failed).
+
+   一行就是一行（m00557）：三颗并排、不换行、不收缩，靠「Q1 312 · 计入」
+   这种窄标签把宽度压回来；换行会让三题读成两张表。 */
 .bre-fp-chals {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 6px;
   margin-top: 8px;
+  min-width: 0;
+  /* 药丸三颗合计约 320px，窄窗才用得上：宁可横向滚一点，也不让第三颗被
+     .bre-fp-row 的 overflow:hidden 悄悄裁掉。 */
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 .bre-fp-chal {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   height: 19px;
-  padding: 0 7px;
+  padding: 0 6px;
   border: 1px solid transparent;
   border-radius: 5px;
   font-size: 11px;
@@ -4114,23 +4196,37 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   margin-left: auto;
   flex: none;
 }
+/* The seat is a ROUND, icon-only button (user request: 圆形按钮，只放图标，不要文字).
+   Circle at the same 28px the host's own title-line controls use, so it reads
+   as one of them rather than a labelled pill competing with the heading. The
+   label is not rendered as a text node at all — it lives in the button's
+   title/aria-label — hence the fixed square, centred glyph and zero padding. */
 .bre-config-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   border: 1px solid var(--bre-line-2);
-  border-radius: 8px;
+  border-radius: 50%;
   background: var(--dsw-alias-bg-elevated, #ffffff);
   color: var(--bre-ink-2);
   font: inherit;
-  font-size: 12.5px;
-  line-height: 18px;
+  line-height: 1;
   cursor: pointer;
+  transition: background var(--bre-t) var(--bre-ease), color var(--bre-t) var(--bre-ease),
+    border-color var(--bre-t) var(--bre-ease);
 }
 .bre-config-btn:hover {
-  color: var(--bre-ink-1);
+  color: var(--bre-ink);
   border-color: var(--bre-line-3);
+  background: var(--bre-hover);
+}
+.bre-config-btn:focus-visible {
+  outline: none;
+  border-color: var(--bre-accent);
+  box-shadow: 0 0 0 3px var(--bre-accent-glow);
 }
 .bre-config-btn-icon { flex: none; display: block; }
 
@@ -4296,6 +4392,24 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   max-width: none;
 }
 
+/* The default-model row under the params: one menu standing in for the old
+   per-row radio, so the pick does not compete with each row's own controls. */
+.bre-config-default-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--bre-ink-3);
+}
+.bre-config-default-label { flex: none; }
+.bre-config-default-select {
+  max-width: none;
+  min-width: 160px;
+  flex: 0 1 auto;
+}
+.bre-config-default-select:disabled { opacity: 0.6; cursor: default; }
+
 .bre-config-rows {
   display: flex;
   flex-direction: column;
@@ -4310,7 +4424,6 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   padding: 9px 12px;
 }
 .bre-config-row + .bre-config-row { border-top: 1px solid var(--bre-line-1); }
-.bre-config-radio { flex: none; accent-color: var(--bre-accent); }
 .bre-config-name { min-width: 0; flex: 1 1 auto; }
 .bre-config-name-main {
   font-size: 12.5px;
@@ -4392,62 +4505,63 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   color: var(--bre-ink-2);
 }
 
-.bre-config-mcp {
+.bre-config-tool {
   margin-top: 14px;
   border-top: 1px solid var(--bre-line-1);
   padding-top: 12px;
 }
-.bre-config-mcp-head {
+.bre-config-tool-head {
   display: flex;
   align-items: center;
   gap: 10px;
   font-size: 12.5px;
   color: var(--bre-ink-1);
 }
-.bre-config-mcp-status {
+.bre-config-tool-name {
+  margin-left: auto;
+  font-family: var(--bre-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--bre-ink-2);
+  background: var(--bre-line-1);
+  border-radius: var(--bre-r-pill);
+  padding: 1px 8px;
+}
+.bre-config-tool-status {
   margin-top: 6px;
   font-size: 11.5px;
   line-height: 16px;
   color: var(--bre-ink-3);
   overflow-wrap: anywhere;
 }
-.bre-config-mcp-actions {
+.bre-config-tool-actions {
   display: flex;
   gap: 6px;
   margin-top: 8px;
 }
-.bre-config-mcp-hint {
+.bre-config-tool-hint {
   margin-top: 8px;
   font-size: 11px;
   line-height: 16px;
   color: var(--bre-ink-3);
 }
 
-.bre-config-switch {
-  margin-left: auto;
-  width: 34px;
-  height: 20px;
-  border-radius: var(--bre-r-pill);
-  border: 1px solid var(--bre-line-3);
-  background: var(--bre-line-1);
-  position: relative;
-  cursor: pointer;
-  padding: 0;
-  flex: none;
+/* The conversation's generated-image card (keyed tool.call.toolview). */
+.bre-image-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
-.bre-config-switch.on { background: var(--bre-accent); border-color: var(--bre-accent); }
-.bre-config-switch:disabled { opacity: 0.6; cursor: default; }
-.bre-config-switch-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 1px 3px #00000033;
-  transition: left 120ms ease;
+.bre-image-card-running {
+  font-size: 12px;
+  color: var(--bre-ink-3);
 }
-.bre-config-switch.on .bre-config-switch-knob { left: 16px; }
+.bre-image-card-caption {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
 
 `

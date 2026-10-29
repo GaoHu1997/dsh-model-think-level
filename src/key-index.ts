@@ -29,7 +29,9 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
+  normalizeBalanceEndpoint,
   normalizeKeyAlias,
+  normalizeKeyAuto,
   normalizeKeyDisabled,
   normalizeKeyModels,
   normalizeKeyProtocol,
@@ -47,7 +49,9 @@ export type KeyIndexEntry = KeyEntry
  * fields absent (rather than `undefined`) keeps hand-edited index files diff-
  * clean and lets `parseKeyIndex`/`writeKeyIndex` round-trip an unscoped key
  * without inventing an empty `models` list that would read as "reached nothing".
- * Being enabled is the default, so only a switched-off key carries the flag.
+ * Being enabled is the default, so only a switched-off key carries the flag;
+ * being user-assigned is the default for scopes, so only a probe-maintained
+ * scope carries `auto`.
  */
 function makeEntry(
   ref: string,
@@ -55,6 +59,7 @@ function makeEntry(
   models: readonly string[] | undefined,
   protocol: RouteProtocol | undefined,
   disabled: boolean | undefined,
+  auto: boolean | undefined,
 ): KeyIndexEntry {
   const entry: {
     ref: string
@@ -62,11 +67,13 @@ function makeEntry(
     models?: readonly string[]
     protocol?: RouteProtocol
     disabled?: boolean
+    auto?: boolean
   } = { ref }
   if (alias !== undefined) entry.alias = alias
   if (models !== undefined) entry.models = models
   if (protocol !== undefined) entry.protocol = protocol
   if (disabled === true) entry.disabled = true
+  if (auto === true) entry.auto = true
   return entry
 }
 
@@ -83,6 +90,15 @@ export interface KeyIndexDocument {
    * "no extra endpoints" (every key falls back to the route's own `baseURL`).
    */
   readonly endpoints?: Record<string, RouteEndpoints>
+  /**
+   * Route → the URL that answers that provider's remaining balance.
+   *
+   * A balance endpoint is display-only: requests never use it, so it lives
+   * beside the key metadata rather than in the pi-ai profile. Absent (or a
+   * route without an entry) means "not configured", which is what the Models
+   * page reads to decide whether to show a balance at all.
+   */
+  readonly balances?: Record<string, string>
 }
 
 /** A fresh, empty index. */
@@ -135,13 +151,35 @@ export function parseKeyIndex(raw: unknown): KeyIndexDocument {
       const models = normalizeKeyModels(record['models'])
       const protocol = normalizeKeyProtocol(record['protocol'])
       const disabled = normalizeKeyDisabled(record['disabled'])
-      list.push(makeEntry(ref, alias, models, protocol, disabled))
+      const auto = normalizeKeyAuto(record['auto'])
+      list.push(makeEntry(ref, alias, models, protocol, disabled, auto))
     }
     if (list.length > 0) out[route] = list
   }
   const endpoints = parseEndpoints(root['endpoints'])
-  const document: KeyIndexDocument = { version: 1, providers: out }
-  return endpoints === undefined ? document : { ...document, endpoints }
+  const balances = parseBalances(root['balances'])
+  let document: KeyIndexDocument = { version: 1, providers: out }
+  if (endpoints !== undefined) document = { ...document, endpoints }
+  if (balances !== undefined) document = { ...document, balances }
+  return document
+}
+
+/**
+ * Read the per-route balance URLs, dropping unusable entries. Separate for the
+ * same reason the endpoint map is: an older file that never carried balances
+ * still parses, and one bad line costs only that route.
+ * @param raw - the decoded `balances` member (or anything else).
+ * @returns the cleaned map, or undefined when it holds nothing usable.
+ */
+function parseBalances(raw: unknown): Record<string, string> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const out: Record<string, string> = {}
+  for (const [route, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (route.length === 0) continue
+    const endpoint = normalizeBalanceEndpoint(value)
+    if (endpoint !== undefined) out[route] = endpoint
+  }
+  return Object.keys(out).length === 0 ? undefined : out
 }
 
 /**
@@ -261,17 +299,18 @@ export function withKeyEntry(
   const index = list.findIndex(entry => entry.ref === ref)
   const label = normalizeKeyAlias(alias)
   if (index === -1) {
-    list.push(makeEntry(ref, label, undefined, undefined, undefined))
+    list.push(makeEntry(ref, label, undefined, undefined, undefined, undefined))
   } else {
     const existing = list[index]
     // A relabel with no alias keeps the stored one; the model scope, the
     // pinned protocol and the switch state always ride along untouched —
     // adding or renaming a key never touches its scope, nor silently re-pins
-    // its protocol, nor switches it back on.
+    // its protocol, nor switches it back on. A probe-maintained scope stays
+    // probe-maintained: the label is not a claim on it.
     const keptLabel = label === undefined ? existing?.alias : label
-    list[index] = makeEntry(ref, keptLabel, existing?.models, existing?.protocol, existing?.disabled)
+    list[index] = makeEntry(ref, keptLabel, existing?.models, existing?.protocol, existing?.disabled, existing?.auto)
   }
-  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document), ...balancesOf(document) }
 }
 
 /**
@@ -291,8 +330,8 @@ export function withKeyAlias(
   const index = list.findIndex(entry => entry.ref === ref)
   if (index === -1) return document
   const label = normalizeKeyAlias(alias)
-  list[index] = makeEntry(ref, label, list[index]?.models, list[index]?.protocol, list[index]?.disabled)
-  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
+  list[index] = makeEntry(ref, label, list[index]?.models, list[index]?.protocol, list[index]?.disabled, list[index]?.auto)
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document), ...balancesOf(document) }
 }
 
 /**
@@ -313,8 +352,39 @@ export function withKeyModels(
   const index = list.findIndex(entry => entry.ref === ref)
   if (index === -1) return document
   const scope = models === undefined ? undefined : normalizeKeyModels(models)
-  list[index] = makeEntry(ref, list[index]?.alias, scope, list[index]?.protocol, list[index]?.disabled)
-  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
+  // A manual assignment is a claim: the user chose what this key serves, so
+  // the probe's maintenance mark goes with it and the probe never rewrites
+  // this scope again.
+  list[index] = makeEntry(ref, list[index]?.alias, scope, list[index]?.protocol, list[index]?.disabled, undefined)
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document), ...balancesOf(document) }
+}
+
+/**
+ * Write the probe's model assignment, marking it as maintained.
+ *
+ * This is the host's post-save probe speaking, not the user: the scope is
+ * rewritten on every probe pass until a manual edit (via {@link withKeyModels})
+ * claims it. `undefined` stores a marked catch-all — the probe found the key
+ * serving every declared model, and the catch-all is both the honest reading
+ * and the one that keeps serving models added later.
+ * @param document - the current document.
+ * @param route - the provider route key.
+ * @param ref - the credential reference.
+ * @param models - the ids the probe observed within the route's declared set,
+ *   or undefined for a maintained catch-all.
+ */
+export function withKeyAutoScope(
+  document: KeyIndexDocument,
+  route: string,
+  ref: string,
+  models: readonly string[] | undefined,
+): KeyIndexDocument {
+  const list = [...keyEntriesOf(document, route)]
+  const index = list.findIndex(entry => entry.ref === ref)
+  if (index === -1) return document
+  const scope = models === undefined ? undefined : normalizeKeyModels(models)
+  list[index] = makeEntry(ref, list[index]?.alias, scope, list[index]?.protocol, list[index]?.disabled, true)
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document), ...balancesOf(document) }
 }
 
 /**
@@ -341,8 +411,8 @@ export function withKeyProtocol(
   const index = list.findIndex(entry => entry.ref === ref)
   if (index === -1) return document
   const pinned = normalizeKeyProtocol(protocol)
-  list[index] = makeEntry(ref, list[index]?.alias, list[index]?.models, pinned, list[index]?.disabled)
-  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
+  list[index] = makeEntry(ref, list[index]?.alias, list[index]?.models, pinned, list[index]?.disabled, list[index]?.auto)
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document), ...balancesOf(document) }
 }
 
 /**
@@ -367,8 +437,8 @@ export function withKeyDisabled(
   const index = list.findIndex(entry => entry.ref === ref)
   if (index === -1) return document
   const existing = list[index]
-  list[index] = makeEntry(ref, existing?.alias, existing?.models, existing?.protocol, disabled ? true : undefined)
-  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document) }
+  list[index] = makeEntry(ref, existing?.alias, existing?.models, existing?.protocol, disabled ? true : undefined, existing?.auto)
+  return { version: 1, providers: { ...document.providers, [route]: list }, ...endpointsOf(document), ...balancesOf(document) }
 }
 
 /**
@@ -387,14 +457,48 @@ export function withRouteEndpoints(
   const cleaned = normalizeRouteEndpoints(endpoints)
   if (cleaned === undefined) delete map[route]
   else map[route] = cleaned
-  const next: KeyIndexDocument = { version: 1, providers: document.providers }
+  const next: KeyIndexDocument = { version: 1, providers: document.providers, ...balancesOf(document) }
   return Object.keys(map).length === 0 ? next : { ...next, endpoints: map }
 }
 
 /**
+ * Set (or clear) one route's balance endpoint.
+ *
+ * The URL is display-only and independent of the protocol-family addresses, so
+ * it is stored in its own map: writing endpoints never clears a balance URL and
+ * writing a balance URL never disturbs the routing addresses.
+ * @param document - the current document.
+ * @param route - the provider route key.
+ * @param endpoint - the URL to store, or undefined/blank to clear it.
+ */
+export function withRouteBalance(
+  document: KeyIndexDocument,
+  route: string,
+  endpoint: string | undefined,
+): KeyIndexDocument {
+  const map: Record<string, string> = { ...(document.balances ?? {}) }
+  const cleaned = normalizeBalanceEndpoint(endpoint)
+  if (cleaned === undefined) delete map[route]
+  else map[route] = cleaned
+  const next: KeyIndexDocument = { version: 1, providers: document.providers, ...endpointsOf(document) }
+  return Object.keys(map).length === 0 ? next : { ...next, balances: map }
+}
+
+/**
+ * Carry a document's existing balance map forward on a write that does not
+ * touch it, exactly as {@link endpointsOf} does for the routing addresses.
+ * @param document - the source document.
+ * @returns `{ balances }` when one exists, else `{}` (spreads to nothing).
+ */
+function balancesOf(document: KeyIndexDocument): { balances?: Record<string, string> } {
+  return document.balances === undefined ? {} : { balances: document.balances }
+}
+
+/**
  * Carry a document's existing endpoint map forward on a providers-only rewrite.
- * Spread as `{ version: 1, providers, ...endpointsOf(document) }` so the writers
- * above never silently drop a route's endpoints when they only touch key lists.
+ * Spread as `{ version: 1, providers, ...endpointsOf(document), ...balancesOf(document) }`
+ * so the writers above never silently drop a route's endpoints or balance URL
+ * when they only touch key lists.
  * @param document - the source document.
  * @returns `{ endpoints }` when one exists, else `{}` (spreads to nothing).
  */
@@ -414,5 +518,5 @@ export function withoutKeyEntry(document: KeyIndexDocument, route: string, ref: 
   const providers: Record<string, readonly KeyIndexEntry[]> = { ...document.providers }
   if (list.length === 0) delete providers[route]
   else providers[route] = list
-  return { version: 1, providers, ...endpointsOf(document) }
+  return { version: 1, providers, ...endpointsOf(document), ...balancesOf(document) }
 }

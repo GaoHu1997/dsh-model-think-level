@@ -27,12 +27,12 @@ import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import Schema from '@deepseek-ai/schemastery'
 import {
   AUTOFILL_CONFIG_PATH,
+  BALANCE_PATH,
   DIAG_PATH,
   FINGERPRINT_PATH,
   HEADERS_CONFIG_PATH,
   IMAGE_CONFIG_PATH,
   IMAGE_GENERATE_PATH,
-  IMAGE_MCP_PATH,
   KEY_INDEX_PATH,
   PI_AI_NS,
   PLUGIN_ID,
@@ -48,7 +48,6 @@ import {
   normalizeKeyModels,
   normalizeKeyProtocol,
   normalizeRouteEndpoints,
-  type EndpointFamily,
   type RouteEndpoints,
   type RouteProtocol,
 } from './key-refs.js'
@@ -59,21 +58,26 @@ import {
   readKeyIndex,
   updateKeyIndex,
   withKeyAlias,
+  withKeyAutoScope,
   withKeyDisabled,
   withKeyEntry,
   withKeyModels,
   withKeyProtocol,
+  withRouteBalance,
   withRouteEndpoints,
   withoutKeyEntry,
+  writeKeyIndex,
+  type KeyIndexEntry,
 } from './key-index.js'
 import { keyRest, keysForModel, restKeyOf, type KeyCandidate, type ServingKnowledge } from './key-route-core.js'
 import { keyServesFilePath, readKeyServes, servesOfRoute, withServes, withoutServes, writeKeyServes, type KeyServesDocument } from './key-serves.js'
 import { collectKeyListings, mergeKeyListings } from './multi-key-listing.js'
-import { FAMILY_PROTOCOL } from './key-probe.js'
+import { listingTargetsOf, type ProbeTarget } from './key-probe.js'
 import { probeListing } from './discovery-merge.js'
 import { suggestEfforts } from './knowledge.js'
 import type { ReasoningEfforts } from './knowledge.js'
 import { resolveGuardEffort } from './guard.js'
+import { parseBalancePayload } from './balance.js'
 import { isRecord, looksLikeCompatRefusal, modelsOf, routeFactsOf } from './shared.js'
 import {
   ANTHROPIC_VERSION,
@@ -91,8 +95,9 @@ import { headerOverlayBypass, headerOverlayInstalled, installHeaderOverlay, type
 import { describePiAiHeaderState, installPiAiHeaderTransforms } from './headers-pi-ai.js'
 import { detectHeaderConflicts, type HeaderConflictReport } from './headers-conflict.js'
 // Image generation (生图): one config file, one generation core behind three
-// entries — the wire dispatch (主通道), the /image-generate route, the /生图
-// host command — plus the MCP install lifecycle over the patch layer.
+// entries — the `generate_image` native tool (主通道), the /image-generate
+// route, the /生图 host command — plus the boot-time removal of the retired
+// MCP patch entry.
 import {
   deriveImageSeeds,
   emptyImageConfig,
@@ -104,8 +109,8 @@ import {
 } from './image/config.js'
 import { generateImage, type GenerateDeps } from './image/generate.js'
 import { registerImagegenCommand, type CommandsServiceLike } from './image/command.js'
-import { installPatch, uninstallPatch, patchStatus, selfcheck, healServerPath, resolvePatchFile, defaultServerPath } from './image/mcp-install.js'
-import { resolveRuntimeNode } from './image/runtime-node.js'
+import { imageToolHint, registerGenerateImageTool } from './image/tool.js'
+import { removeLegacyImageMcpPatch } from './image/legacy-cleanup.js'
 // The knowledge-base patch builder lives in its own module: the browser half
 // builds the SAME patch from its own idle-time read, so one suggestion can
 // never produce two different documents.
@@ -156,6 +161,13 @@ const BOOT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as con
 
 /** Probe fetch budget: a gateway that cannot answer /models in 15s will not answer the composer either. */
 const PROBE_TIMEOUT_MS = 15_000
+
+/**
+ * Balance fetch budget. Deliberately generous: a billing API can be slow, and
+ * the Models page asks once per page opening — a timeout here costs a stale
+ * chip, not repeated traffic.
+ */
+const BALANCE_TIMEOUT_MS = 30_000
 
 /**
  * Per-challenge budget for one fingerprint probe. Deliberately NOT derived from
@@ -526,6 +538,21 @@ async function resolveCredential(credentials: CredentialsService | undefined, re
     throw new HostReadError('the credential store returned an invalid value')
   }
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * Whether the store positively holds NOTHING under one reference.
+ *
+ * Both faces must agree: `describe` says unconfigured AND no value could be
+ * read. A `configured: false` contradicted by a readable value is a stale
+ * metadata face, not an empty credential, and an absent entry means the store
+ * could not answer at all — unknown, never empty. Callers that must not
+ * overwrite a key lean on exactly this distinction.
+ * @param fact - what {@link credentialFacts} answered for the reference.
+ * @returns true only for a confirmed empty reference.
+ */
+function holdsNothing(fact: CredentialFacts | undefined): boolean {
+  return fact !== undefined && fact.configured === false && fact.masked === undefined
 }
 
 /** What the store will say about one reference: configured, and its masked value. */
@@ -1037,6 +1064,232 @@ export function apply(ctx: Context, config: Config = {}): void {
     probeRouteCache.clear()
     listingCache.clear()
   }
+
+  // ---- Post-save scope probe: what each key serves, checked automatically ----
+  //
+  // A relay resolves each key to a different upstream account with its own
+  // catalogue, so the models a route declares are not the models every key
+  // serves — requests discover the difference the hard way, one refusal per
+  // model per key, until someone narrows each key's scope by hand. The probe
+  // asks instead: after a save (and after a key or an address changes), every
+  // listed key is asked for its own listing on the wires it could serve on,
+  // the answers are recorded as observations (key-serves.ts), and each key's
+  // model scope is checked to the models it actually listed within the set the
+  // route declares.
+  //
+  // The check only claims scopes nobody has claimed: a manual assignment (an
+  // entry without the `auto` mark) is never rewritten. Everything runs in the
+  // background — nothing waits on it, and a refused listing costs the route
+  // one round of observations, never correctness.
+
+  /** In-flight probe runs, by route; the list payload reports this as `probing`. */
+  const keyProbeRuns = new Map<string, Promise<void>>()
+  /** Scheduled probes, by route — the debounce that folds an event burst. */
+  const keyProbeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  ctx.effect(() => () => {
+    for (const timer of keyProbeTimers.values()) clearTimeout(timer)
+    keyProbeTimers.clear()
+  }, 'dsh-model-think-level: scope probe timers')
+
+  /** How long a burst of writes waits before one probe asks the wire. */
+  const KEY_PROBE_DELAY_MS = 600
+
+  /** Per-route signatures the settings listener diffs to find what a save moved. */
+  const keyProbeStamps = new Map<string, string>()
+  let keyProbeStampsReady = false
+
+  /**
+   * What a probe (re)acts to: the wire, the addresses, the signing reference
+   * and the declared model set. Display names and effort declarations are
+   * nobody's listing facts, so editing them costs nothing.
+   */
+  const keyProbeSignature = (profile: Record<string, unknown>): string => JSON.stringify([
+    profile['api'],
+    profile['baseURL'],
+    profile['apiKeyEnv'],
+    profile['headers'],
+    Array.isArray(profile['models'])
+      ? profile['models'].filter(isRecord).map(model => typeof model['id'] === 'string' ? model['id'].trim() : '').filter(Boolean)
+      : [],
+  ])
+
+  /**
+   * Diff the document the settings event brought against the one before it, and
+   * schedule a probe for every route whose probe facts moved. The FIRST
+   * document seen only sets the baseline: a boot fill and a page opening both
+   * land as events, and neither of those is a save.
+   */
+  const reconcileKeyProbeStamps = (): void => {
+    const providers = providersOf()
+    if (!keyProbeStampsReady) {
+      keyProbeStampsReady = true
+      for (const [route, profile] of Object.entries(providers)) {
+        if (isRecord(profile)) keyProbeStamps.set(route, keyProbeSignature(profile))
+      }
+      return
+    }
+    for (const route of Array.from(keyProbeStamps.keys())) {
+      if (!isRecord(providers[route])) keyProbeStamps.delete(route)
+    }
+    for (const [route, profile] of Object.entries(providers)) {
+      if (!isRecord(profile)) continue
+      const signature = keyProbeSignature(profile)
+      if (keyProbeStamps.get(route) === signature) continue
+      keyProbeStamps.set(route, signature)
+      scheduleKeyProbe(route)
+    }
+  }
+
+  /**
+   * Probe one route now: resolve every listed key (and the profile's own seat,
+   * when the index has never listed it), ask each on the wires a request could
+   * take, record the observations, and check the auto-maintained scopes to what
+   * each key listed within the route's declared set.
+   */
+  const probeRouteKeys = async (route: string): Promise<void> => {
+    let profile: Record<string, unknown> | undefined
+    try {
+      profile = providerProfileOf(piSection(true), route)
+    } catch {
+      return
+    }
+    if (profile === undefined) return
+    const api = normalizeKeyProtocol(profile['api'])
+    const baseURL = typeof profile['baseURL'] === 'string' ? profile['baseURL'].trim() : ''
+    if (api === undefined || !LISTABLE_PROTOCOLS.has(api) || baseURL.length === 0) return
+    let document: ReturnType<typeof readKeyIndex>
+    try {
+      document = readKeyIndex(keyIndexFilePath())
+    } catch {
+      // A malformed index is the key route's complaint to make, not the probe's.
+      return
+    }
+    const endpoints = document.endpoints?.[route]
+    const listed = keyEntriesOf(document, route)
+    const seat = enabledRefOf(profile)
+    const keys: { ref: string; entry: KeyIndexEntry | undefined }[] = listed.map(entry => ({ ref: entry.ref, entry }))
+    if (seat !== undefined && !listed.some(entry => entry.ref === seat)) keys.push({ ref: seat, entry: undefined })
+    if (keys.length === 0) return
+    const credentials = ctx.get('credentials') as CredentialsService | undefined
+    const values = await Promise.all(keys.map(async key => {
+      try {
+        return await resolveCredential(credentials, key.ref)
+      } catch {
+        return undefined
+      }
+    }))
+    const askable = keys.flatMap((key, index) => {
+      const value = values[index]
+      return value === undefined || value.length === 0 ? [] : [{ ...key, value }]
+    })
+    if (askable.length === 0) return
+    // Background work nobody waits on: each listing gets the FULL probe budget
+    // (the catalogue overlay caps at LISTING_PROBE_BUDGET_MS because it runs
+    // inside the host's own /models answer; this probe has no such caller, so
+    // a slow gateway just takes longer to be observed, never blocks anyone).
+    const timeoutMs = resolved.probeTimeoutMs
+    const send = headerOverlayBypass()
+    const targetsOf = (entry: KeyIndexEntry | undefined): ProbeTarget[] =>
+      entry?.protocol !== undefined
+        ? listingTargetsOf({ protocol: entry.protocol, endpoint: endpoints?.[endpointFamilyOf(entry.protocol)] }, api, baseURL)
+        : listingTargetsOf({ endpoints }, api, baseURL)
+    const served = new Map<string, readonly string[]>()
+    await collectKeyListings({
+      keys: askable,
+      refOf: key => key.ref,
+      probe: async key => {
+        // A key's targets are independent listings; they run together and fold
+        // in target order, exactly as the catalogue overlay folds them.
+        const listings = await Promise.all(targetsOf(key.entry).map(target => probeListing({
+          baseURL: target.baseURL,
+          api: target.api,
+          apiKey: key.value,
+          headers: profile?.['headers'],
+          timeoutMs,
+          send,
+        })))
+        const ids: string[] = []
+        for (const listing of listings) {
+          if (listing === undefined) continue
+          for (const model of listing) {
+            if (!ids.includes(model.id)) ids.push(model.id)
+          }
+        }
+        if (ids.length === 0) return { ref: key.ref, models: undefined }
+        served.set(key.ref, ids)
+        // The observations are the routing half of the answer: a later listing
+        // keeps them, and the pool prefers a key that listed the model.
+        lastKnownScopes.set(`${route}\u0000${key.ref}`, ids)
+        recordServes(route, key.ref, ids)
+        return { ref: key.ref, models: ids }
+      },
+    })
+    if (served.size === 0) return
+    // The declared set is the universe a scope may name — the models already
+    // added to the provider, never its whole catalogue. Without it there is
+    // nothing to check the observations against.
+    const declared = Array.isArray(profile['models'])
+      ? profile['models'].filter(isRecord).map(model => typeof model['id'] === 'string' ? model['id'].trim() : '').filter(Boolean)
+      : []
+    if (declared.length === 0) return
+    // Re-read before writing: keys may have been added or replaced while the
+    // listings were on the wire.
+    let next = readKeyIndex(keyIndexFilePath())
+    let mutated = false
+    for (const [ref, ids] of served) {
+      const entry = keyEntriesOf(next, route).find(candidate => candidate.ref === ref)
+      // The unlisted seat has no entry to scope; it keeps its catch-all and
+      // its recorded observations.
+      if (entry === undefined) continue
+      // A manual assignment is a claim: the user chose what this key serves,
+      // and the probe never rewrites it.
+      if (entry.models !== undefined && entry.auto !== true) continue
+      const target = declared.filter(id => ids.includes(id))
+      // A key that serves every declared model keeps the catch-all it already
+      // reads as — the assignment that keeps serving models added later.
+      const scope = target.length === declared.length ? undefined : target
+      const unchanged = scope === undefined
+        ? entry.models === undefined
+        : entry.models !== undefined && entry.models.length === scope.length && scope.every(id => entry.models?.includes(id))
+      if (unchanged) continue
+      next = withKeyAutoScope(next, route, ref, scope)
+      mutated = true
+    }
+    if (!mutated) return
+    try {
+      writeKeyIndex(next, keyIndexFilePath())
+    } catch {
+      // A failed write costs one round of re-probing after the next save.
+      return
+    }
+    refreshKeyScopes()
+  }
+
+  /** Probe one route, queueing behind the run already in flight, if any. */
+  const runKeyProbe = (route: string): Promise<void> => {
+    const previous = keyProbeRuns.get(route) ?? Promise.resolve()
+    const run = previous
+      .then(() => probeRouteKeys(route))
+      .catch(() => {
+        // A background probe never surfaces: the next save, or the user's own
+        // scope edit, is the retry.
+      })
+      .finally(() => {
+        if (keyProbeRuns.get(route) === run) keyProbeRuns.delete(route)
+      })
+    keyProbeRuns.set(route, run)
+    return run
+  }
+
+  /** Ask the wire what one route's keys serve, once its writes have settled. */
+  const scheduleKeyProbe = (route: string): void => {
+    if (keyProbeTimers.has(route)) return
+    const timer = setTimeout(() => {
+      keyProbeTimers.delete(route)
+      void runKeyProbe(route)
+    }, KEY_PROBE_DELAY_MS)
+    keyProbeTimers.set(route, timer)
+  }
   const headerRetryTimers = new Set<ReturnType<typeof setTimeout>>()
   let headerRetryAttempt = 0
   const stopHeaderRetries = (): void => {
@@ -1093,6 +1346,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         catalogueSourceStamp = source
         invalidateListings()
       }
+      // A save moved a route's probe facts (its wire, addresses, signing
+      // reference or declared models): re-probe that route in the background
+      // and re-check what its keys serve.
+      reconcileKeyProbeStamps()
     }
   })
   /**
@@ -1186,17 +1443,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         // A pinned key is asked on its own wire; an automatic key is asked on
         // every wire it could dispatch on — the route's wire, plus each
         // cross-family address it carries — so the catalogue covers the models
-        // of all of them, the same union `probeKeyModels` records for the key
-        // panel. A same-family address is skipped: the route's own URL serves
-        // that family, and requests would never be dispatched elsewhere.
-        const targets: { api: RouteProtocol; baseURL: string }[] = key.protocol !== undefined
-          ? [{ api: key.protocol, baseURL: key.endpoint ?? baseURL }]
-          : [
-            { api, baseURL },
-            ...Object.entries(key.endpoints ?? {})
-              .filter(([family]) => family !== endpointFamilyOf(api))
-              .map(([family, url]) => ({ api: FAMILY_PROTOCOL[family as EndpointFamily], baseURL: url ?? '' })),
-          ]
+        // of all of them. The same union the post-save scope probe records.
+        const distinct = listingTargetsOf(key, api, baseURL)
         const sendListing = (url: string, init: RequestInit): Promise<Response> => {
           const requestHeaders = new Headers(headers)
           requestHeaders.delete('authorization')
@@ -1209,16 +1457,6 @@ export function apply(ctx: Context, config: Config = {}): void {
               ? signal
               : AbortSignal.any([signal, init.signal])
           return send(url, { ...init, headers: requestHeaders, signal: requestSignal })
-        }
-        const asked = new Set<string>()
-        const distinct: { api: RouteProtocol; baseURL: string }[] = []
-        for (const target of targets) {
-          if (!LISTABLE_PROTOCOLS.has(target.api) || target.baseURL.length === 0) continue
-          const url = probeListingUrl(target.baseURL, target.api)
-          // A gateway that spells one listing under two protocols is asked once.
-          if (asked.has(url)) continue
-          asked.add(url)
-          distinct.push(target)
         }
         // The targets of ONE key are independent listings: asking them one after
         // another made a key with two addresses cost two timeouts in series
@@ -1286,7 +1524,21 @@ export function apply(ctx: Context, config: Config = {}): void {
   const overlay = installHeaderOverlay(overlaySource)
   ctx.effect(() => () => { overlay.dispose() }, 'dsh-model-think-level: fetch header overlay')
 
-  // ---- Image generation (生图): config sync, `/生图` command, MCP ----
+  // ---- Image generation (生图): config sync, native tool, `/生图` command ----
+
+  // One-time migration: the retired stdio MCP server's patch entry must go,
+  // or every boot would spawn a `lib/image-mcp.mjs` that no longer exists and
+  // the profile would keep a duplicate `mcp__dsh-image__generate_image` beside
+  // the native tool. Best-effort: a read-only file only costs the cleanup, and
+  // the next boot retries.
+  try {
+    const removed = removeLegacyImageMcpPatch()
+    if (removed !== undefined) {
+      console.warn(`[dsh-model-think-level] 已自动移除旧版生图 MCP 的补丁条目（${removed}）——重启 DSH 后完全生效`)
+    }
+  } catch (error) {
+    console.warn(`[dsh-model-think-level] 旧版生图 MCP 补丁条目自动移除失败（可手动删除标记块）：${error instanceof Error ? error.message : String(error)}`)
+  }
   //
   // There is NO wire interception any more: a chat model asks for a picture by
   // CALLING the MCP tool (`mcp__dsh-image__generate_image`), so image models
@@ -1343,9 +1595,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   }
 
-  // The `/生图` host command (and the MCP tool behind the config page). Registered only when the
-  // context carries a commands service (a headless composition may not) —
-  // cordis THROWS on an undeclared service read, so the lookup is fenced.
+  // The `/生图` host command. Registered only when the context carries a
+  // commands service (a headless composition may not) — cordis THROWS on an
+  // undeclared service read, so the lookup is fenced.
   let commandsService: CommandsServiceLike | undefined
   try {
     commandsService = (ctx as unknown as { commands?: CommandsServiceLike }).commands
@@ -1360,6 +1612,45 @@ export function apply(ctx: Context, config: Config = {}): void {
       generateDeps: imageGenerateDeps,
     },
   )
+
+  // The native `generate_image` tool: the conversation model's primary entry.
+  // Deferred on purpose — a host without the tools or attachments service
+  // (headless, sdk) keeps every other feature and simply gets no image tool;
+  // a hard `inject` entry would refuse to apply the whole plugin there.
+  // The registration state feeds the config page's tool card and the client's
+  // keyed image-card registration, which reads the name back over the route.
+  const imageToolState: { name: string | undefined } = { name: undefined }
+  ctx.inject(['tools', 'attachments'], (toolCtx: Context) => {
+    toolCtx.effect(
+      () => {
+        const { name, dispose } = registerGenerateImageTool(toolCtx, {
+          generateDeps: imageGenerateDeps,
+          attachments: (toolCtx as unknown as { attachments: unknown }).attachments as Parameters<typeof registerGenerateImageTool>[1]['attachments'],
+          readConfig: () => readImageConfig(),
+        })
+        imageToolState.name = name
+        return () => {
+          imageToolState.name = undefined
+          dispose()
+        }
+      },
+      'dsh-model-think-level: generate_image tool',
+    )
+    // A few lines of live defaults per model request, so the tool is called
+    // with omitted params instead of guessed ones (the dsh-image-gen
+    // precedent). Optional: hosts without the system-prompt service boot
+    // unchanged and the tool description alone still guides the model.
+    ctx.inject(['systemPrompt'], (promptCtx: Context) => {
+      promptCtx.effect(
+        () => (promptCtx as unknown as { systemPrompt: { context(contribution: { name: string; order: number; text: () => string }): () => void } }).systemPrompt.context({
+          name: 'dsh-model-think-level:image-tool',
+          order: 61,
+          text: () => imageToolHint(readImageConfig()),
+        }),
+        'dsh-model-think-level: image tool hint',
+      )
+    })
+  })
 
 
   // `?diag=1` on the probe route reports this without touching the wire, so
@@ -1745,6 +2036,15 @@ export function apply(ctx: Context, config: Config = {}): void {
                 })
                 return
               }
+              if (req.method === 'GET' && url.searchParams.get('op') === 'balance') {
+                if (route.length === 0) {
+                  sendJson(res, 400, { ok: false, error: 'a route is required' })
+                  return
+                }
+                const endpoint = readKeyIndex(keyIndexFilePath()).balances?.[route]
+                sendJson(res, 200, { ok: true, route, endpoint: endpoint ?? null })
+                return
+              }
               // Read the entry fresh rather than through the cached section: this
               // route writes to it, and an answer built from a pre-write snapshot
               // would show the user the state they just changed away from.
@@ -1837,11 +2137,20 @@ export function apply(ctx: Context, config: Config = {}): void {
                 const declaredModels = new Set(routeModels)
                 const listed = keyEntriesOf(document, route)
                 const refs = listed.map(entry => entry.ref)
-                // The seat (the reference the adapter itself resolves) is always
-                // on the list, even when the official page wrote it and this
-                // plugin has never listed it — the adapter still needs it.
-                if (seat !== undefined && !refs.includes(seat)) refs.push(seat)
-                const facts = await credentialFacts(credentials, refs, 250)
+                // The seat (the reference the adapter itself resolves) joins the
+                // list when it can answer for itself: the index lists it, or the
+                // store holds a value for it — the adapter still needs that one.
+                // A profile can also name a reference nothing was ever stored
+                // under (`apiKeyEnv: MAGPIE_GATEWAY_KEY` written by a shipped
+                // patch, with no such variable in the environment). That is a
+                // route waiting for its first key, not a key: painting it as a
+                // "not stored" row put a phantom beside the official warning
+                // that already says the variable is missing. Only a store that
+                // positively answers "nothing, and no value to read" hides it —
+                // a store that cannot answer is unknown, not empty.
+                const probed = seat !== undefined && !refs.includes(seat) ? [...refs, seat] : refs
+                const facts = await credentialFacts(credentials, probed, 250)
+                if (seat !== undefined && !refs.includes(seat) && !holdsNothing(facts[seat])) refs.push(seat)
                 const now = Date.now()
                 const entries: KeyEntryView[] = refs.map(ref => {
                   const fact = facts[ref]
@@ -1884,11 +2193,17 @@ export function apply(ctx: Context, config: Config = {}): void {
                 // The models this route actually offers — the universe a key's
                 // scope is chosen from (user rule: pick from the models already
                 // added, never the provider's whole catalog).
+                // A scheduled or in-flight scope probe rides along, so an open
+                // panel can follow the assignments the probe writes — silently:
+                // the probe has no progress display, the assignments are the
+                // only thing that ever shows up.
+                const probing = keyProbeTimers.has(route) || keyProbeRuns.has(route)
                 return {
                   ok: true,
                   route,
                   entries,
                   models: routeModels,
+                  ...(probing ? { probing: true } : {}),
                   endpoints: {
                     openai: endpoints?.openai ?? null,
                     anthropic: endpoints?.anthropic ?? null,
@@ -1935,17 +2250,106 @@ export function apply(ctx: Context, config: Config = {}): void {
                 // provider is running on.
                 const active = enabledNow()
                 if (active !== undefined && !taken.includes(active)) taken.push(active)
-                let created = nextKeyRef(route, taken)
-                // Metadata cannot enumerate the credential store. Check each
-                // candidate against both read faces before writing a new value.
-                for (;;) {
-                  const facts = await credentialFacts(credentials, [created])
-                  const configured = facts[created]?.configured
-                  if (configured === undefined) throw new HostReadError('the credential store could not confirm a free reference')
-                  if (!configured && await resolveCredential(credentials, created) === undefined) break
-                  taken.push(created)
-                  created = nextKeyRef(route, taken)
+                // A reference this route already lists may hold this very value
+                // under a name the seat does not use. The create card is the
+                // ordinary way there: the official form stores its key under the
+                // profile's `apiKeyEnv`, then this drain adds the SAME secret
+                // again, and without this check the second copy became a second
+                // row with an identical mask — two keys that are one. Reusing the
+                // holder keeps the list honest; the label the user typed rides
+                // onto that row (it is the same secret, so it is the same key).
+                // Only a reference whose readable value EQUALS the incoming one
+                // qualifies; a store that cannot be read never matches.
+                for (const ref of taken) {
+                  let held: string | undefined
+                  try {
+                    held = await resolveCredential(credentials, ref)
+                  } catch {
+                    continue
+                  }
+                  if (held !== value) continue
+                  // One write: an unlisted holder joins the list, a listed one
+                  // keeps its own scope and protocol pin (the label is the only
+                  // thing an add carries for it).
+                  updateKeyIndex(document => withKeyEntry(document, route, ref, alias), indexFile)
+                  // The profile may still name an empty reference (the shipped
+                  // patch's `apiKeyEnv`, or a seat that lost its value). The key
+                  // the user just added is this one, so it takes the seat;
+                  // otherwise the official card keeps warning about the old name
+                  // while a working key sits right below it.
+                  if (active !== ref) {
+                    let seatEmpty = false
+                    if (active !== undefined) {
+                      try {
+                        seatEmpty = holdsNothing((await credentialFacts(credentials, [active]))[active])
+                      } catch {
+                        seatEmpty = false
+                      }
+                    }
+                    if (active === undefined || seatEmpty) {
+                      const failed = await setEnabledKey(ref)
+                      if (failed !== undefined) throw new Error(failed)
+                    }
+                  }
+                  refreshKeyScopes()
+                  releaseMutation?.()
+                  releaseMutation = undefined
+                  sendJson(res, 200, { ...await payload(), addedRef: ref })
+                  return
                 }
+                // A listed row the store positively holds NOTHING under is an
+                // empty slot, not a taken name. Filling it keeps the reference
+                // the profile — and any other computer that synced that
+                // profile — already uses; minting `_3` beside an empty `_2` is
+                // what made a re-fill after a sync drift away from the name the
+                // seat resolves and leave a "not stored" row behind.
+                //
+                // The seat comes first (storing there needs no re-point at
+                // all), then the remaining rows in the order the page shows
+                // them. Only a store that answered "nothing, and no value to
+                // read" qualifies — an unreadable store is unknown, and this
+                // path must never overwrite a key it could not see. The
+                // readable face gets the final word, because metadata can
+                // outlive the value it describes.
+                const listedRefs = keyEntriesOf(readKeyIndex(indexFile), route).map(entry => entry.ref)
+                const slotCandidates = active !== undefined && listedRefs.includes(active)
+                  ? [active, ...listedRefs.filter(candidate => candidate !== active)]
+                  : listedRefs
+                const slotFacts = slotCandidates.length > 0
+                  ? await credentialFacts(credentials, slotCandidates)
+                  : {}
+                const emptySlot = slotCandidates.find(candidate => holdsNothing(slotFacts[candidate]))
+                let created = emptySlot !== undefined
+                  && await resolveCredential(credentials, emptySlot) === undefined
+                  ? emptySlot
+                  : undefined
+                if (created === undefined) {
+                  created = nextKeyRef(route, taken)
+                  // Metadata cannot enumerate the credential store. Check each
+                  // candidate against both read faces before writing a new value.
+                  for (;;) {
+                    const facts = await credentialFacts(credentials, [created])
+                    const configured = facts[created]?.configured
+                    if (configured === undefined) throw new HostReadError('the credential store could not confirm a free reference')
+                    if (!configured && await resolveCredential(credentials, created) === undefined) break
+                    taken.push(created)
+                    created = nextKeyRef(route, taken)
+                  }
+                }
+                // A profile can name a reference the store holds NOTHING under:
+                // a shipped patch writes `apiKeyEnv: MAGPIE_GATEWAY_KEY` ahead of
+                // any key, and the official card then warns that the variable is
+                // missing. Such a route has no working key at all — the same
+                // state as a profile naming no reference — so this add takes the
+                // seat, or the warning would outlive the key that fixed it and
+                // the adapter would keep resolving an empty name. Only a store
+                // that POSITIVELY holds nothing hands the seat over: an
+                // unreadable store is unknown, and re-pointing a working key on
+                // a bad read is the one mistake this must not make.
+                const seatBefore = active
+                const seatIsEmpty = seatBefore !== undefined
+                  && seatBefore !== created
+                  && holdsNothing((await credentialFacts(credentials, [seatBefore]))[seatBefore])
                 // The value goes into the store first: a reference the index
                 // lists but the store cannot hold would render as a key the
                 // user can never reveal, enable or remove.
@@ -1959,7 +2363,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                   updateKeyIndex(document => withKeyEntry(document, route, created, alias), indexFile)
                   indexed = true
                   // Adding the first key also configures the route.
-                  if (enabledNow() === undefined) {
+                  if (seatBefore === undefined || seatIsEmpty) {
                     const failed = await setEnabledKey(created)
                     if (failed !== undefined) throw new Error(failed)
                   }
@@ -2098,6 +2502,15 @@ export function apply(ctx: Context, config: Config = {}): void {
                   })
                   : undefined
                 updateKeyIndex(document => withRouteEndpoints(document, route, endpoints), indexFile)
+              } else if (op === 'balance') {
+                // The one URL a provider's balance is read from. It is display
+                // only and independent of the protocol-family addresses: an
+                // empty value clears it, and a route without one shows no
+                // balance on the Models page.
+                const endpoint = isRecord(body) && typeof body['endpoint'] === 'string'
+                  ? body['endpoint']
+                  : ''
+                updateKeyIndex(document => withRouteBalance(document, route, endpoint), indexFile)
               } else if (op === 'rename') {
                 // The key the provider is RUNNING on takes a label too: that
                 // reference is usually the one the official card wrote, which
@@ -2205,6 +2618,13 @@ export function apply(ctx: Context, config: Config = {}): void {
               if (['add', 'remove', 'value', 'protocol', 'endpoints', 'enable'].includes(op)) {
                 invalidateListings()
               }
+              // A new value is a different upstream account, a new address a
+              // different listing target: either can change what the keys
+              // serve, so the route is re-probed (and its auto scopes
+              // re-checked) once these writes have settled.
+              if (['add', 'value', 'protocol', 'endpoints'].includes(op)) {
+                scheduleKeyProbe(route)
+              }
               // The transaction is committed. Slow display-only credential reads
               // must not hold the next unrelated mutation in the global queue.
               releaseMutation?.()
@@ -2221,6 +2641,144 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         }),
       'dsh-model-think-level: key index route',
+    )
+
+    // One provider's balance, fetched from the URL that provider configured.
+    //
+    // The browser half cannot make this call itself: the balance API is a
+    // third-party origin (CORS), and the request is signed with a stored key
+    // that only the host can resolve. The URL itself is plugin state in the key
+    // index (`balances`), written from the provider card's balance row. A route
+    // with no URL answers `configured:false` — the Models page shows nothing in
+    // that case — while a configured route that fails answers an error, so a
+    // broken endpoint does not masquerade as "not configured".
+    ctx.effect(
+      () =>
+        webServerCtx.webServer.register({
+          kind: 'exact',
+          path: BALANCE_PATH,
+          handler: async (req, res) => {
+            res.setHeader('cache-control', 'no-store')
+            if (!isTrustedRequest(req)) {
+              sendJson(res, 403, { ok: false, error: 'forbidden' })
+              return
+            }
+            if (req.method !== 'GET') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
+              return
+            }
+            const url = new URL(req.url ?? '/', 'http://x')
+            const route = url.searchParams.get('route') ?? ''
+            if (route.length === 0) {
+              sendJson(res, 400, { ok: false, error: 'a route is required' })
+              return
+            }
+            let document: ReturnType<typeof readKeyIndex>
+            try {
+              document = readKeyIndex(keyIndexFilePath())
+            } catch (error) {
+              sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+              return
+            }
+            const endpoint = document.balances?.[route]
+            if (endpoint === undefined) {
+              sendJson(res, 200, { ok: true, route, configured: false })
+              return
+            }
+            let profile: Record<string, unknown> | undefined
+            try {
+              profile = providerProfileOf(piSection(true), route)
+            } catch {
+              sendJson(res, 502, { ok: false, configured: true, error: 'the llm-pi-ai settings could not be read' })
+              return
+            }
+            if (profile === undefined) {
+              sendJson(res, 400, {
+                ok: false,
+                configured: true,
+                error: `no llm-pi-ai provider route "${route}"`,
+              })
+              return
+            }
+            // Only the FIRST key of the provider is asked for a balance.
+            // Further keys may resolve to different upstream accounts, but the
+            // row shows one amount per provider, so asking them would multiply
+            // traffic for values nobody sees. A route whose key list is empty
+            // falls back to the profile's seat (the only key it can have); a
+            // route with no key at all still gets the call, because some
+            // balance endpoints are public.
+            const credentials = ctx.get('credentials') as CredentialsService | undefined
+            const ref = keyEntriesOf(document, route)[0]?.ref ?? enabledRefOf(profile)
+            let apiKey: string | undefined
+            if (ref !== undefined) {
+              try {
+                apiKey = await resolveCredential(credentials, ref)
+              } catch {
+                sendJson(res, 502, {
+                  ok: false,
+                  configured: true,
+                  error: 'the credential store could not read the reference',
+                })
+                return
+              }
+            }
+            try {
+              const headers: Record<string, string> = { accept: 'application/json' }
+              if (apiKey !== undefined) {
+                // The upstream protocol family decides the header the provider
+                // expects for an account-level call; the two are not combined,
+                // so an endpoint that rejects the other family's header (or a
+                // WAF that flags it) is not handed a credential it never asked
+                // for. Redirects are refused for the same reason: the key must
+                // only reach the authority the user typed.
+                const api = typeof profile['api'] === 'string' ? profile['api'] : ''
+                if (api === 'anthropic-messages') headers['x-api-key'] = apiKey
+                else headers['authorization'] = `Bearer ${apiKey}`
+              }
+              const upstream = await headerOverlayBypass()(endpoint, {
+                method: 'GET',
+                headers,
+                redirect: 'error',
+                signal: AbortSignal.timeout(BALANCE_TIMEOUT_MS),
+              })
+              if (!upstream.ok) {
+                const hint = upstream.status === 401 || upstream.status === 403 ? '; check the API key' : ''
+                sendJson(res, 502, {
+                  ok: false,
+                  configured: true,
+                  error: `${displayUrl(endpoint)} answered ${upstream.status}${hint}`,
+                })
+                return
+              }
+              const text = await readBounded(upstream, endpoint)
+              const reading = parseBalancePayload(text)
+              if (reading === undefined) {
+                sendJson(res, 502, {
+                  ok: false,
+                  configured: true,
+                  error: `${displayUrl(endpoint)} answered no recognisable balance`,
+                })
+                return
+              }
+              sendJson(res, 200, {
+                ok: true,
+                route,
+                configured: true,
+                amount: reading.amount,
+                ...(reading.currency === undefined ? {} : { currency: reading.currency }),
+              })
+            } catch (error) {
+              // undici's own failure texts quote the original URL verbatim;
+              // strip credentials before the reason reaches the page.
+              sendJson(res, 502, {
+                ok: false,
+                configured: true,
+                error: `could not reach ${displayUrl(endpoint)}: ${redactUrlSecrets(error instanceof Error ? error.message : String(error))}`,
+              })
+            }
+          },
+        }),
+      'dsh-model-think-level: balance route',
     )
 
     // The autofill switches, for the browser half that runs the running
@@ -2591,7 +3149,6 @@ export function apply(ctx: Context, config: Config = {}): void {
               // fresh); a failed sync leaves the stored document, still useful.
               syncImageConfigNow()
               const config = readImageConfig()
-              const mcp = patchStatus()
               sendJson(res, 200, {
                 ok: true,
                 models: config.models,
@@ -2599,15 +3156,11 @@ export function apply(ctx: Context, config: Config = {}): void {
                 defaults: config.defaults,
                 outputDir: config.outputDir,
                 syncedAt: config.syncedAt,
-                mcp: {
-                  installed: mcp.installed,
-                  serverName: mcp.serverName,
-                  toolName: mcp.toolName,
-                  restartRequired: false,
-                  diagnostics: readImageConfig().mcp.diagnostics,
-                  patchFile: mcp.patchFile,
-                  nodeCommand: mcp.nodeCommand,
-                  malformed: mcp.malformed,
+                // The native tool's registration state: the pane's status card
+                // and the client's keyed image card both read this name back.
+                tool: {
+                  registered: imageToolState.name !== undefined,
+                  name: imageToolState.name ?? null,
                 },
               })
               return
@@ -2698,31 +3251,10 @@ export function apply(ctx: Context, config: Config = {}): void {
                     },
                   }
                 }
-                if (Array.isArray(body['models'])) {
-                  // `null` clears an override (falls back to defaults), a
-                  // concrete value sets it, anything else leaves it stored.
-                  const pickString = (value: unknown, kept: string | undefined): string | undefined =>
-                    value === null ? undefined
-                      : typeof value === 'string' && value.length > 0 ? value : kept
-                  const pickN = (value: unknown, kept: number | undefined): number | undefined =>
-                    value === null ? undefined
-                      : typeof value === 'number' && Number.isInteger(value) && value >= 1 ? Math.min(value, 16) : kept
-                  for (const row of body['models']) {
-                    if (!isRecord(row) || typeof row['id'] !== 'string') continue
-                    next = {
-                      ...next,
-                      models: next.models.map(model => {
-                        if (model.id !== row['id']) return model
-                        return {
-                          ...model,
-                          size: pickString(row['size'], model.size),
-                          quality: pickString(row['quality'], model.quality),
-                          n: pickN(row['n'], model.n),
-                        }
-                      }),
-                    }
-                  }
-                }
+                // A `models` row in the body (older clients send per-row param
+                // overrides) is accepted and ignored: those overrides were
+                // removed with the pane's row controls, so the params row is
+                // now the only place size/quality/n are picked.
                 return next
               })
               syncImageConfigNow()
@@ -2771,8 +3303,9 @@ export function apply(ctx: Context, config: Config = {}): void {
               })
               sendJson(res, 200, {
                 ok: true,
-                filePath: result.filePath,
-                mime: result.mime,
+                // Every image this run produced, in order — the pane's preview
+                // and scripted callers read the paths from here.
+                images: result.images.map(image => image.filePath),
                 model: result.model,
                 paramsUsed: result.paramsUsed,
                 ...(result.revisions.length > 0 ? { warning: `参数回退：${result.revisions.join('、')}` } : {}),
@@ -2783,101 +3316,6 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         }),
       'dsh-model-think-level: image generate route',
-    )
-
-    // The image MCP lifecycle: install / uninstall over the patch file's
-    // marker block, status derived from the file, and the self-check that
-    // proves the resolved `command` can actually start the server.
-    ctx.effect(
-      () =>
-        webServerCtx.webServer.register({
-          kind: 'exact',
-          path: IMAGE_MCP_PATH,
-          handler: async (req, res) => {
-            res.setHeader('cache-control', 'no-store')
-            if (!isTrustedRequest(req)) {
-              sendJson(res, 403, { ok: false, error: 'forbidden' })
-              return
-            }
-            if (req.method !== 'GET' && req.method !== 'POST') {
-              sendJson(res, 405, { ok: false, error: 'method not allowed' })
-              return
-            }
-            const action = req.method === 'GET'
-              ? 'status'
-              : await readJsonBody(req, 4096).then(body => isRecord(body) && typeof body['action'] === 'string' ? body['action'] : 'status')
-            try {
-              if (action === 'install') {
-                // The config file must exist (and carry the derived models)
-                // before the server can serve a call.
-                syncImageConfigNow()
-                const runtime = resolveRuntimeNode()
-                const serverPath = defaultServerPath()
-                installPatch({
-                  nodeCommand: runtime.command,
-                  serverPath,
-                  ...(runtime.env === undefined ? {} : { nodeEnv: runtime.env }),
-                })
-                // Prove the entry starts; the verdict lands in the diagnostics
-                // the status line renders.
-                const check = await selfcheck(runtime.command, serverPath, runtime.env)
-                updateImageConfig(document => ({
-                  ...document,
-                  mcp: {
-                    ...document.mcp,
-                    nodePath: runtime.command,
-                    diagnostics: { lastCheckAt: new Date().toISOString(), ok: check.ok, error: check.error },
-                  },
-                }))
-                sendJson(res, 200, { ok: true, action, selfcheck: check, status: patchStatus() })
-                return
-              }
-              if (action === 'uninstall') {
-                const file = uninstallPatch()
-                sendJson(res, 200, { ok: true, action, ...(file === undefined ? { unchanged: true } : { patchFile: file }) })
-                return
-              }
-              if (action === 'selfcheck') {
-                // Repair the installed block before checking it, so the verdict
-                // describes the code that is actually on disk: an older build
-                // recorded the package root instead of lib/image-mcp.mjs, and
-                // the desktop app re-dumps cordis.yml with a default 80-column
-                // width, which FOLDS a long path scalar into `…\bin\ \node.exe`
-                // (spawn answers ENOENT) — both are rewritten here.
-                const runtime = resolveRuntimeNode()
-                try {
-                  healServerPath({
-                    serverPath: defaultServerPath(),
-                    ...(runtime.command.length > 0 ? { nodeCommand: runtime.command } : {}),
-                    ...(runtime.env === undefined ? {} : { nodeEnv: runtime.env }),
-                  })
-                } catch {
-                  // A read-only patch file keeps the old path: the check below
-                  // then reports what is really installed.
-                }
-                const status = patchStatus()
-                const check = await selfcheck(
-                  status.nodeCommand.length > 0 ? status.nodeCommand : runtime.command,
-                  status.serverPath.length > 0 ? status.serverPath : defaultServerPath(),
-                  runtime.env,
-                )
-                updateImageConfig(document => ({
-                  ...document,
-                  mcp: {
-                    ...document.mcp,
-                    diagnostics: { lastCheckAt: new Date().toISOString(), ok: check.ok, error: check.error },
-                  },
-                }))
-                sendJson(res, 200, { ok: true, action, selfcheck: check })
-                return
-              }
-              sendJson(res, 200, { ok: true, action: 'status', status: patchStatus() })
-            } catch (error) {
-              sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
-            }
-          },
-        }),
-      'dsh-model-think-level: image mcp route',
     )
   })
 }

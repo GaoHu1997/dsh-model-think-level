@@ -47,6 +47,19 @@ export const PROVIDER_KEY_PATH = '/dsh-model-think-level/provider-key'
 export const KEY_INDEX_PATH = '/dsh-model-think-level/key-index'
 
 /**
+ * Same-origin host route that reads one provider's balance.
+ *
+ * The URL itself is configured per route in the plugin's key index (the
+ * `balances` map) and is queried host-side, because only the host can resolve
+ * the route's stored API key for the upstream call and the page would otherwise
+ * face CORS on a third-party balance API. The route answers
+ * `{ok, configured:false}` when the provider has no balance endpoint at all, so
+ * the browser half can tell "not configured" (show nothing) from "configured but
+ * unreadable" (show nothing but keep the endpoint).
+ */
+export const BALANCE_PATH = '/dsh-model-think-level/balance'
+
+/**
  * Same-origin host route that reports this plugin's autofill switches. The
  * browser half runs the running auto-fill complement, and a `dsh.client`
  * declaration carries no plugin config, so the two switches have to be read
@@ -155,37 +168,30 @@ export const IMAGE_CONFIG_PATH = '/dsh-model-think-level/image-config'
 
 /**
  * Same-origin host route that runs one image generation through the shared
- * core (`src/image/generate.ts`): the explicit entry beside the wire dispatch
- * and the `/生图` host command — used for scripted calls and for callers that
- * want the `filePath` back.
+ * core (`src/image/generate.ts`): the explicit entry beside the native
+ * `generate_image` tool and the `/生图` host command — used for scripted calls
+ * and for callers that want the file paths back.
  */
 export const IMAGE_GENERATE_PATH = '/dsh-model-think-level/image-generate'
-
-/**
- * Same-origin host route owning the image MCP server's install lifecycle:
- * `{action: "install"|"uninstall"|"status"|"selfcheck"}` over the marker block
- * in the current profile's `cordis.patch.yml`.
- */
-export const IMAGE_MCP_PATH = '/dsh-model-think-level/image-mcp'
 
 /** File name of the image-generation config inside the plugin's home dir. */
 export const IMAGE_CONFIG_FILE = 'image.json'
 
 /**
- * Fixed MCP `serverName` of the image server. Tool names derive as
- * `mcp__<serverName>__<rawName>`, so this string is part of the public surface:
- * `mcp__dsh-image__generate_image` must stay stable across HMR reloads.
+ * The patch-layer id the RETIRED image-MCP entry carried. No entry is written
+ * any more — the native `generate_image` tool replaced the stdio server — but
+ * the id and the marker below still matter: the boot-time migration
+ * (`src/image/legacy-cleanup.ts`) recognizes and removes a leftover block, so
+ * an upgraded profile stops spawning the now-missing `lib/image-mcp.mjs` and
+ * stops exposing the duplicate `mcp__dsh-image__generate_image`.
  */
-export const IMAGE_MCP_SERVER_NAME = 'dsh-image'
-
-/** The patch-layer id the installed MCP entry carries (see src/image/mcp-install.ts). */
 export const IMAGE_MCP_PATCH_ID = 'dsh-image-mcp'
 
 /**
- * Marker-block name this plugin uses inside `cordis.patch.yml`. The begin/end
- * comment lines are `# >>> <name>:begin` / `# <<< <name>:end`; every write
- * splices exactly that byte range, so third-party marker blocks (the
- * dsh-skill-mcp-panel precedent) survive untouched.
+ * Marker-block name the retired installer used inside `cordis.patch.yml`. The
+ * begin/end comment lines are `# >>> <name>:begin` / `# <<< <name>:end`; the
+ * legacy cleanup splices exactly that byte range, so third-party marker blocks
+ * (the dsh-skill-mcp-panel precedent) survive untouched.
  */
 export const IMAGE_MCP_PATCH_MARK = 'dsh-model-think-level:image-mcp'
 

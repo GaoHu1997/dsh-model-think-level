@@ -45,6 +45,7 @@ import {
 import { createStagedHeadersState, flushStagedRequestHeaders } from './staged-headers.js'
 import { createStagedKeysState, flushStagedKeys } from './staged-keys.js'
 import { httpKeyManagerClient } from '../key-manager-client.js'
+import { BALANCE_CHANGED_EVENT } from '../events.js'
 import {
   createProviderOrderState,
   reconcileProviderOrder,
@@ -58,6 +59,18 @@ import {
   teardownProviderEnabled,
   type ProviderToggleDeps,
 } from './provider-toggle.js'
+import {
+  createProviderBalanceState,
+  invalidateProviderBalance,
+  reconcileProviderBalance,
+  teardownProviderBalance,
+  type ProviderBalanceDeps,
+} from './provider-balance.js'
+import {
+  createKeyPrefetchState,
+  reconcileKeyPrefetch,
+  type KeyPrefetchDeps,
+} from './key-prefetch.js'
 import {
   reconcileProviderDeleteSeat,
   teardownProviderDeleteSeats,
@@ -249,6 +262,15 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   const providerOrderDeps: ProviderOrderDeps = { t, labels }
   const providerToggleState = createProviderToggleState()
   const providerToggleDeps: ProviderToggleDeps = { t, labels }
+  // The balance chip in front of each switch: one store of readings per page,
+  // and one read schedule per route (see provider-balance.ts). It is DOM-only
+  // between reads, so it rides the same synchronous pass as the switch.
+  const providerBalanceState = createProviderBalanceState()
+  const providerBalanceDeps: ProviderBalanceDeps = { t, labels, repaint: () => schedule() }
+  // The key lists warmed ahead of any card opening: one read per provider per
+  // page opening, fired the moment the list first shows (see key-prefetch.ts).
+  const keyPrefetchState = createKeyPrefetchState()
+  const keyPrefetchDeps: KeyPrefetchDeps = { labels, client: httpKeyManagerClient }
   // No per-scan state: the seat IS the DOM node, and the pass is idempotent by
   // its presence, so nothing has to be remembered between scans.
   const providerDeleteDeps: ProviderDeleteDeps = { t, labels }
@@ -415,9 +437,18 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
    */
   const reconcileDom = (): void => {
     const root = panelRoot()
-    if (rowsListOf(root) === undefined) return
+    if (rowsListOf(root) === undefined) {
+      // The Models page is not on screen. The balance pass has to hear that, or
+      // a page reopened later would reuse the previous opening's read session
+      // and never fetch again. The key prefetch opens its session the same way.
+      reconcileProviderBalance(root, providerBalanceDeps, providerBalanceState)
+      reconcileKeyPrefetch(root, keyPrefetchDeps, keyPrefetchState)
+      return
+    }
     reconcileProviderOrder(root, providerOrderDeps, providerOrderState)
     reconcileProviderEnabled(root, providerToggleDeps, providerToggleState)
+    reconcileProviderBalance(root, providerBalanceDeps, providerBalanceState)
+    reconcileKeyPrefetch(root, keyPrefetchDeps, keyPrefetchState)
     reconcileProviderDeleteSeat(root, providerDeleteDeps)
     reconcileProviderDisabledGroup(root, providerDisabledDeps, providerDisabledState)
     reconcileModelOrder(root, modelOrderDeps, modelOrderState)
@@ -490,6 +521,20 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
         if (waiting > 0) scheduleRetry(DEFERRED_RETRY_MS)
       })
     }, SCAN_DEBOUNCE_MS)
+  }
+
+  /**
+   * A provider card wrote (or cleared) a route's balance URL. The chip reads
+   * that URL through the host, and the card and the list are separate mounts:
+   * drop the route's read stamp and rescan so the amount appears or disappears
+   * now instead of after the refresh window.
+   */
+  const onBalanceChanged = (event: Event): void => {
+    const detail = (event as CustomEvent<{ route?: unknown }>).detail
+    const route = detail?.route
+    if (typeof route !== 'string' || route.length === 0) return
+    invalidateProviderBalance(providerBalanceState, route)
+    schedule()
   }
 
   const start = (onComposerMutation: () => void): void => {
@@ -575,6 +620,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       attributes: true,
       attributeFilter: ['hidden'],
     })
+    document.addEventListener(BALANCE_CHANGED_EVENT, onBalanceChanged)
     schedule()
   }
 
@@ -588,6 +634,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       window.clearTimeout(retryTimer)
       retryTimer = undefined
     }
+    document.removeEventListener(BALANCE_CHANGED_EVENT, onBalanceChanged)
     observer?.disconnect()
     observer = undefined
   }
@@ -618,6 +665,8 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // Same for the enable switches: a live listener on a dead fiber would keep
     // toggling providers the user can no longer see the state of.
     teardownProviderEnabled()
+    // And for the balance chips: raw nodes this plugin put in the official row.
+    teardownProviderBalance()
     // The delete seats are raw DOM as well, and they stand for a control the
     // page owns: a dead fiber must not leave a row reading as unavailable.
     teardownProviderDeleteSeats()
