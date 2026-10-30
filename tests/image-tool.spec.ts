@@ -107,6 +107,46 @@ function toolDeps(overrides: Partial<Parameters<typeof registerGenerateImageTool
   }
 }
 
+/**
+ * Mirror of `dsh-tools`' `assertSupportedJsonSchema` walk (the subset the host
+ * accepts). Kept local because the package is not a dependency of this plugin;
+ * the point is to fail on the author-dialect `required: true` spelling that
+ * silently aborted registration.
+ */
+function schemaViolations(schema: unknown, path = 'schema'): readonly string[] {
+  const violations: string[] = []
+  const annotations = new Set(['description', 'title', 'default', 'examples'])
+  const keywords = new Set(['type', 'oneOf', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const'])
+  const walk = (node: unknown, at: string): void => {
+    if (typeof node !== 'object' || node === null || Array.isArray(node)) {
+      violations.push(`${at} must be an object`)
+      return
+    }
+    const record = node as Record<string, unknown>
+    for (const key of Object.keys(record)) {
+      if (!keywords.has(key) && !annotations.has(key)) violations.push(`${at}.${key} is not a supported keyword`)
+    }
+    const type = record['type']
+    if (Object.hasOwn(record, 'required')) {
+      if (type !== 'object') violations.push(`${at}.required is not supported on type ${JSON.stringify(type)}`)
+      else if (!Array.isArray(record['required']) || record['required'].some(entry => typeof entry !== 'string')) {
+        violations.push(`${at}.required must be an array of strings`)
+      }
+    }
+    if (Object.hasOwn(record, 'items')) {
+      if (type !== 'array') violations.push(`${at}.items is not supported on type ${JSON.stringify(type)}`)
+      else walk(record['items'], `${at}.items`)
+    }
+    if (Object.hasOwn(record, 'properties')) {
+      const properties = record['properties']
+      if (type !== 'object' || typeof properties !== 'object' || properties === null) violations.push(`${at}.properties is not supported here`)
+      else for (const [key, child] of Object.entries(properties)) walk(child, `${at}.properties.${key}`)
+    }
+  }
+  walk(schema, path)
+  return violations
+}
+
 describe('registerGenerateImageTool', () => {
   it('registers under the primary name and the disposer unregisters', () => {
     const fake = fakeTools()
@@ -145,15 +185,34 @@ describe('registerGenerateImageTool', () => {
     const definition = fake.registry.get('generate_image') as {
       name: string
       description: string
-      parameters: Record<string, { type: string; required?: boolean }>
+      parameters: Record<string, unknown>
       output: { schema: Record<string, unknown>; render: (args: unknown, value: unknown) => unknown[] }
       presentCall: (args: unknown) => unknown
       presentResult: (args: unknown, result: { meta?: unknown }) => unknown
     }
-    expect(definition.parameters['prompt']).toMatchObject({ type: 'string', required: true })
+    expect(definition.parameters['type']).toBe('object')
+    expect(definition.parameters['required']).toEqual(['prompt'])
+    expect(definition.description).toContain('最终回复必须逐张直接嵌入所有生成的图片')
+    expect(definition.description).toContain('![图片说明](<filePath>)')
     expect(definition.output.schema).toBeDefined()
     expect(typeof definition.output.render).toBe('function')
     expect(definition.presentCall({ prompt: 'a cat' })).toMatchObject({ card: 'generic' })
+  })
+
+  /**
+   * The host validates both schemas with `assertSupportedJsonSchema` and throws
+   * `JsonSchemaError` out of `tools.register`. A throwing registration fails the
+   * whole tools injection, so the tool silently never appears — the regression
+   * this pins: the schemas must stay inside the enforced raw subset, where
+   * `required` is an array of property names on an object and nothing else.
+   */
+  it('both schemas stay inside the raw JSON Schema subset the host enforces', () => {
+    const fake = fakeTools()
+    registerGenerateImageTool(fake.ctx, toolDeps())
+    const definition = fake.registry.get('generate_image') as { parameters: unknown; output: { schema: unknown } }
+    for (const schema of [definition.parameters, definition.output.schema]) {
+      expect(schemaViolations(schema)).toEqual([])
+    }
   })
 })
 
@@ -203,6 +262,35 @@ describe('generate_image execute', () => {
     const blocks = definition.output.render({}, value)
     expect(blocks.filter(block => block.type === 'image')).toHaveLength(2)
     expect(blocks.filter(block => block.type === 'text')).toHaveLength(1)
+  })
+
+  it.each([
+    { label: 'a single image', paths: ['/out/a.png'] },
+    { label: 'all images including Windows paths with spaces', paths: ['C:\\My Images\\a.png', '/out/b image.png'] },
+  ])('success text tells the assistant to embed $label in its final reply', ({ paths }) => {
+    const fake = fakeTools()
+    registerGenerateImageTool(fake.ctx, toolDeps())
+    const definition = fake.registry.get('generate_image') as { output: { render: (args: unknown, value: unknown) => { type: string; text?: string }[] } }
+    const value = {
+      images: paths.map((filePath, index) => ({
+        attachment: { attachmentId: `att-${index + 1}`, mediaType: 'image/png', bytes: 4, width: 1, height: 1 },
+        filePath,
+      })),
+      model: 'openai/gpt-image-1',
+      prompt: 'x',
+      paramsUsed: { size: '1024x1024', quality: 'high', n: paths.length },
+      revisions: [],
+    }
+    const blocks = definition.output.render({}, value)
+    const text = blocks.find(block => block.type === 'text')!.text!
+    expect(text).toContain('最终回复必须逐张直接嵌入所有生成的图片')
+    expect(text).toContain('不能只放文件链接或依赖工具卡片')
+    for (const [index, path] of paths.entries()) {
+      expect(text).toContain(`![生成的图片 ${index + 1}](<${path.replace(/\\/g, '/')}>)`)
+    }
+    if (paths[0]!.startsWith('C:')) expect(text).toContain('![生成的图片 1](<C:/My Images/a.png>)')
+    expect(blocks.filter(block => block.type === 'image')).toHaveLength(paths.length)
+    expect(text).not.toContain('图片已在对话里，直接回复用户即可')
   })
 
   it('presentationMeta names the plugin kind and mirrors every image', () => {
@@ -346,9 +434,41 @@ describe('imageToolHint', () => {
     expect(hint).toContain('generate_image')
     expect(hint).toContain('openai/gpt-image-1')
     expect(hint).toContain('1024x1024')
+    expect(hint).toContain('最终回复必须逐张直接嵌入所有生成的图片')
+    expect(hint).toContain('![图片说明](<filePath>)')
   })
 
   it('is empty without models — no hint for a capability that does not exist', () => {
     expect(imageToolHint(emptyImageConfig())).toBe('')
+  })
+
+  /*
+   * The hint must not promise a default the resolver will not honor: with two
+   * candidates and `defaultModel: null`, `resolveImageModel` refuses, so naming
+   * `models[0]` here made models omit `model` and eat a `config` error.
+   */
+  it('asks for an explicit model when several candidates have no default', () => {
+    const config = syncImageConfig(emptyImageConfig(), {
+      openai: {
+        ...PROVIDERS.openai,
+        models: [
+          { id: 'gpt-image-1', name: 'GPT-Image-1', inputImageGen: true },
+          { id: 'gpt-image-2', name: 'GPT-Image-2', inputImageGen: true },
+        ],
+      },
+    })
+    expect(config.defaultModel).toBeNull()
+    const hint = imageToolHint(config)
+    expect(hint).toContain('generate_image')
+    expect(hint).toContain('必须显式填 model')
+    expect(hint).toContain('openai/gpt-image-1')
+    expect(hint).toContain('openai/gpt-image-2')
+    expect(hint).not.toContain('缺省参数即可')
+    expect(hint).toContain('最终回复必须逐张直接嵌入所有生成的图片')
+  })
+
+  it('keeps the defaults wording for the single model the resolver does pick', () => {
+    const config = syncImageConfig(emptyImageConfig(), PROVIDERS)
+    expect(imageToolHint(config)).toContain('缺省参数即可')
   })
 })

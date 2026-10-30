@@ -14,6 +14,12 @@ export type TransportAnswer<T> = { ok: true; data: T } | { ok: false; error: str
 export interface ImageToolView {
   registered: boolean
   name: string | null
+  /**
+   * Why the registration failed, when it did: the host records the error the
+   * `tools.register` call threw, so a broken schema is readable instead of
+   * silent. Absent while the tool is registered or never attempted.
+   */
+  error?: string
 }
 
 /** GET image-config 的应答体（结构声明：浏览器不 import host-only 模块）。 */

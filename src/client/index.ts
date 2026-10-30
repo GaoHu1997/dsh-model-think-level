@@ -380,7 +380,12 @@ export function apply(ctx: ClientContext): void {
   // The generated-image card: a keyed tool.call.toolview entry under the tool
   // name the host reports, rendering results through the official
   // tool.call.images gallery. Without it the generic tool row shows only text.
-  ctx.effect(() => registerImageCard(ctx, t), 'dsh-model-think-level: image tool card')
+  // The generated-image card: a keyed tool.call.toolview entry under the tool
+  // name the host reports, rendering results through the official
+  // tool.call.images gallery. Without it the generic tool row shows only text.
+  // The registration opens its own effect (it re-keys once the config route
+  // names the tool), so there is no wrapping effect here.
+  registerImageCard(ctx, t)
 }
 
 export type { BreKey }

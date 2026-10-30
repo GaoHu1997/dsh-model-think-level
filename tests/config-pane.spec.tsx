@@ -142,6 +142,27 @@ describe('ConfigPane', () => {
     expect(document.body.textContent).not.toContain('openai/gpt-image-1')
   })
 
+  it('surfaces the host reason when the native tool failed to register', async () => {
+    handleFetch = () => new Response(JSON.stringify({
+      ...CONFIG_VIEW,
+      tool: { registered: false, name: null, error: 'unsupported JSON schema: schema.prompt is not a supported keyword' },
+    }), { status: 200 })
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const warn = document.querySelector('.bre-config-notice-warn')!
+    expect(warn).not.toBeNull()
+    expect(warn.textContent).toContain('imagegenToolMissing')
+    expect(warn.querySelector('.bre-config-notice-why')!.textContent).toContain('schema.prompt is not a supported keyword')
+  })
+
+  it('stays quiet about the tool when it registered, or was never attempted', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    expect(document.querySelector('.bre-config-notice-warn')).toBeNull()
+  })
+
   it('the params row comes first and the default-model select sits under it', async () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})

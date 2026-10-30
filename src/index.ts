@@ -72,7 +72,7 @@ import {
 } from './key-index.js'
 import { keyRest, keysForModel, restKeyOf, type KeyCandidate, type ServingKnowledge } from './key-route-core.js'
 import { keyServesFilePath, readKeyServes, servesOfRoute, withServes, withoutServes, writeKeyServes, type KeyServesDocument } from './key-serves.js'
-import { commitUiOrder, readUiOrder, uiOrderFilePath } from './order-store.js'
+import { commitUiOrderGuarded, readUiOrder, uiOrderFilePath } from './order-store.js'
 import { collectKeyListings, mergeKeyListings } from './multi-key-listing.js'
 import { listingTargetsOf, type ProbeTarget } from './key-probe.js'
 import { probeListing } from './discovery-merge.js'
@@ -1830,6 +1830,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     try {
       if (piSection() === undefined) return
       const providers = providersOf()
+      // An EMPTY providers map is not the user deleting their models: it is what
+      // the document looks like before it is readable (boot, HMR, a reload that
+      // re-registers the section before its value lands). Syncing it would write
+      // models: [] and stamp defaultModel to null, and no later pass recovers the
+      // pick. Only a populated document may prune rows.
+      if (Object.keys(providers).length === 0) return
       updateImageConfig(document => syncImageConfig(document, providers))
     } catch {
       // The config file is best-effort state: a failed sync leaves the last
@@ -1893,16 +1899,30 @@ export function apply(ctx: Context, config: Config = {}): void {
   // a hard `inject` entry would refuse to apply the whole plugin there.
   // The registration state feeds the client's keyed image-card registration,
   // which reads the name back over the config route.
-  const imageToolState: { name: string | undefined } = { name: undefined }
+  const imageToolState: { name: string | undefined; error: string | undefined } = { name: undefined, error: undefined }
   ctx.inject(['tools', 'attachments'], (toolCtx: Context) => {
     toolCtx.effect(
       () => {
-        const { name, dispose } = registerGenerateImageTool(toolCtx, {
-          generateDeps: imageGenerateDeps,
-          attachments: (toolCtx as unknown as { attachments: unknown }).attachments as Parameters<typeof registerGenerateImageTool>[1]['attachments'],
-          readConfig: () => readImageConfig(),
-        })
+        // A throwing effect is logged and swallowed by the host, leaving the
+        // pane with a bare "未注册" and no reason. Record the message as well:
+        // the config route reports it, so a schema/host-version mismatch is
+        // diagnosable from the UI instead of only from a startup log line.
+        let registered: { readonly name: string; readonly dispose: () => void }
+        try {
+          registered = registerGenerateImageTool(toolCtx, {
+            generateDeps: imageGenerateDeps,
+            attachments: (toolCtx as unknown as { attachments: unknown }).attachments as Parameters<typeof registerGenerateImageTool>[1]['attachments'],
+            readConfig: () => readImageConfig(),
+          })
+        } catch (error) {
+          imageToolState.name = undefined
+          imageToolState.error = error instanceof Error ? error.message : String(error)
+          console.warn(`[dsh-model-think-level] 内建生图工具注册失败（诊断路由 ${IMAGE_CONFIG_PATH} 的 tool.error 会带回这条原因）：${imageToolState.error}`)
+          throw error
+        }
+        const { name, dispose } = registered
         imageToolState.name = name
+        imageToolState.error = undefined
         return () => {
           imageToolState.name = undefined
           dispose()
@@ -3140,8 +3160,15 @@ export function apply(ctx: Context, config: Config = {}): void {
             try {
               // Read-fold-write is synchronous (order-store is), so two
               // overlapping pushes cannot interleave the read-modify-write.
-              const data = commitUiOrder(body, Date.now())
-              sendJson(res, 200, { ok: true, data })
+              // A payload no newer than the stored document is refused with
+              // 409: it is a page that never saw the newer file, and letting it
+              // win would roll the order and the switches back.
+              const { document, stale } = commitUiOrderGuarded(body, Date.now())
+              if (stale) {
+                sendJson(res, 409, { ok: false, error: 'stale', data: document })
+                return
+              }
+              sendJson(res, 200, { ok: true, data: document })
             } catch (error) {
               sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
             }
@@ -3502,6 +3529,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 tool: {
                   registered: imageToolState.name !== undefined,
                   name: imageToolState.name ?? null,
+                  ...(imageToolState.error === undefined ? {} : { error: imageToolState.error }),
                 },
               })
               return

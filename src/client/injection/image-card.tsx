@@ -12,10 +12,15 @@
  * attachment pipeline. Declaring `tool.call.images` under `children` is what
  * authorizes the entry's `renderSlot` to dispatch it.
  *
- * The card is registered under the tool name the HOST reports (the config
- * route's `tool.name`), because a dsh-image-gen install can own the plain
- * `generate_image` key — the host then registers this plugin's tool under the
+ * The card is keyed by the tool name the HOST reports (the config route's
+ * `tool.name`), because a dsh-image-gen install can own the plain
+ * `generate_image` key — the host then registers this plugin's tool under a
  * fallback name, and the card must follow the tool, never the wishful name.
+ * That host fact is a RECONCILIATION, not a precondition: the entry is first
+ * registered under the plain `IMAGE_TOOL_KEY` and re-keyed when the route
+ * names a different tool. A page loaded while the tool was still unregistered
+ * (the route reported `name: null`) would otherwise never register a card at
+ * all, and the generic row shows no image for any tool but `read_image`.
  *
  * @module dsh-model-think-level/client/injection/image-card
  */
@@ -28,6 +33,14 @@ import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 
 /** The slot name the official gallery renders under. */
 const IMAGES_SLOT = 'tool.call.images'
+
+/**
+ * The wire name this plugin's tool registers under in the ordinary case
+ * (`IMAGE_TOOL_NAME` in the host-side `image/tool.ts`, which the browser
+ * cannot import — it pulls in the node-only generate path). Used as the card's
+ * first key so the entry never depends on the config route answering.
+ */
+const IMAGE_TOOL_KEY = 'generate_image'
 
 /** One attachment reference as the official gallery consumes it. */
 interface ImageRefLike {
@@ -47,6 +60,7 @@ interface ToolBlockLike {
   readonly kind?: string
   readonly phase?: string
   readonly content?: readonly { readonly type: string; readonly text?: string; readonly attachment?: ImageRefLike['attachment'] }[]
+  /** Legacy carrier some older result records used; `content` wins when both exist. */
   readonly resultView?: {
     readonly content?: readonly { readonly type: string; readonly text?: string; readonly attachment?: ImageRefLike['attachment'] }[]
   }
@@ -68,7 +82,9 @@ interface ImageCardProps {
 /** The image attachments one settled result carries, in order. */
 export function imageRefsOf(block: ToolBlockLike | undefined): readonly ImageRefLike[] {
   if (block === undefined || typeof block !== 'object') return []
-  const content = block.resultView?.content ?? block.content
+  // `content` is the host's real shape (the settled tool-result node carries
+  // it); `resultView` is kept only as a legacy fallback for older records.
+  const content = block.content ?? block.resultView?.content
   if (!Array.isArray(content)) return []
   const refs: ImageRefLike[] = []
   for (const part of content) {
@@ -151,29 +167,38 @@ function registerFor(slots: SlotRegistrarFace | undefined, name: string, t: Tran
 }
 
 /**
- * Register the image card under the tool name the host reports. The name is
- * a host-side fact (the collision fallback may have renamed the tool), so the
- * registration waits for one config read when the cache is cold; a host that
- * never answers leaves no card and the generic row stays.
+ * Register the image card, then follow the tool to whatever name the host
+ * actually gave it.
+ *
+ * The entry is registered under `IMAGE_TOOL_KEY` right away rather than waiting
+ * for the config route: the route only names a tool that is ALREADY registered,
+ * so a page loaded before the host's `tools.register` succeeded would sit
+ * forever without a card — which is exactly the silent failure this card
+ * exists to avoid. When the route then reports a different name (a dsh-image-gen
+ * install owns the plain key, so the host renamed this tool), the entry is
+ * disposed and re-registered under the reported name.
  */
 export function registerImageCard(ctx: ClientContext, t: Translate): void {
   const slots = (ctx as unknown as { slots?: SlotRegistrarFace }).slots
   ctx.effect(() => {
     let disposeCard: (() => void) | undefined
+    let registeredName: string | undefined
     let alive = true
-    const tryRegister = (name: unknown): void => {
-      if (!alive || disposeCard !== undefined) return
+    const useName = (name: unknown): void => {
+      if (!alive) return
       if (typeof name !== 'string' || name.length === 0) return
+      if (name === registeredName) return
+      disposeCard?.()
+      registeredName = name
       disposeCard = registerFor(slots, name, t)
     }
-    tryRegister(cachedImageConfigView()?.tool.name)
-    if (disposeCard === undefined) {
-      void readImageConfigView().then(answer => {
-        if (answer.ok) tryRegister(answer.data.tool.name)
-      }).catch(() => {
-        // No config read, no card: the generic row keeps showing the text.
-      })
-    }
+    useName(IMAGE_TOOL_KEY)
+    useName(cachedImageConfigView()?.tool.name)
+    void readImageConfigView().then(answer => {
+      if (answer.ok) useName(answer.data.tool.name)
+    }).catch(() => {
+      // No config read: the entry keeps the plain name it registered with.
+    })
     return () => {
       alive = false
       disposeCard?.()

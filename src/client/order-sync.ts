@@ -27,7 +27,7 @@
 import { ORDER_PATH } from '../constants.js'
 import { providerOrder, setProviderOrder, subscribeProviderOrder } from './provider-order.js'
 import { adoptModelOrders, modelOrders, subscribeModelOrders } from './model-order.js'
-import { disabledProviders, subscribeDisabledProviders, syncDisabledProviders } from './provider-enabled.js'
+import { adoptDisabledProviders, disabledProviders, subscribeDisabledProviders } from './provider-enabled.js'
 
 /** localStorage key of the last local order change (epoch ms; 0 = unstamped). */
 export const ORDER_SAVED_AT_KEY = 'dsh-model-think-level.order-saved-at'
@@ -38,6 +38,14 @@ export const ORDER_SAVED_AT_KEY = 'dsh-model-think-level.order-saved-at'
  * usually still lands (and `flushOrderSync` covers the rest).
  */
 export const ORDER_PUSH_DEBOUNCE_MS = 400
+
+/**
+ * How often a visible page asks the host for the document again. The file is
+ * written by whichever machine synced last, so a page that only pulled at boot
+ * would keep showing the old order (and the old switches) until a reload. One
+ * GET a minute per open tab is cheap; `focus`/`visibilitychange` pull sooner.
+ */
+export const ORDER_POLL_MS = 60_000
 
 /** The wire shape of the order document (declared here; the host parses its own). */
 export interface OrderDocumentView {
@@ -126,9 +134,27 @@ function contentKey(): string {
 
 let lastSynced: string | undefined
 let pushTimer: ReturnType<typeof setTimeout> | undefined
+/** The periodic pull and the focus listener, while a sync is running. */
+let pollTimer: ReturnType<typeof setInterval> | undefined
+let stopListening: (() => void) | undefined
 let disposed = false
 /** True while the stores are being written FROM the file: a change we made, not one to push. */
 let adopting = false
+/** True while a reconcile's GET is in flight: a poll and a focus event must not ask twice. */
+let reconciling = false
+/**
+ * Bumped on every start and on dispose. A push's answer (or a reconcile's)
+ * belongs to the generation that asked; a page that was torn down and rebuilt
+ * must not fold a late answer from its predecessor into the new stores.
+ */
+let generation = 0
+
+/** A stamp strictly newer than the stored one, so a push always beats what it replaces. */
+function nextStamp(): number {
+  const at = Math.max(Date.now(), readStamp() + 1)
+  writeStamp(at)
+  return at
+}
 
 function pushNow(): void {
   pushTimer = undefined
@@ -144,14 +170,32 @@ function pushNow(): void {
     providersDisabled: disabledProviders(),
   })
   lastSynced = contentKey()
+  const mine = generation
   void fetch(ORDER_PATH, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body,
-  }).then(response => {
+  }).then(async response => {
+    if (disposed || mine !== generation) return
+    const answer = await response.json().catch(() => undefined) as Record<string, unknown> | undefined
+    const document = sanitizeDocument(answer?.['data'])
+    // 409: the host holds a document at least as new as this push, and it differs.
+    // This page never saw it (another machine wrote it) — adopt what won instead
+    // of pushing the old order and switches back over it.
+    if (response.status === 409) {
+      if (document !== undefined && hasContent(document)) adopt(document)
+      else lastSynced = undefined
+      return
+    }
     // A refused push clears the identity so the next change retries; the boot
     // arbitrate also repairs it, because the stamp says local is newer.
-    if (!response.ok) lastSynced = undefined
+    if (!response.ok) {
+      lastSynced = undefined
+      return
+    }
+    // The host answers with the document as stored. Fold in a newer stamp it
+    // may carry (never ours, which it just accepted) so the next boot agrees.
+    if (document !== undefined && document.savedAt > readStamp()) writeStamp(document.savedAt)
   }).catch(() => {
     lastSynced = undefined
   })
@@ -180,7 +224,7 @@ export function flushOrderSync(): void {
 /** One local change: stamp it now, push it soon. */
 function onChange(): void {
   if (disposed || adopting) return
-  writeStamp(Date.now())
+  nextStamp()
   schedulePush(ORDER_PUSH_DEBOUNCE_MS)
 }
 
@@ -190,7 +234,10 @@ function adopt(document: OrderDocumentView): void {
   try {
     setProviderOrder(document.providerOrder)
     adoptModelOrders(document.modelOrder)
-    if (document.providersDisabled !== undefined) syncDisabledProviders(document.providersDisabled)
+    // Persisted, not merely applied: see adoptDisabledProviders. A value that
+    // only lives in the running page comes back as the old one after a reload,
+    // and the next reconcile then pushes that old one over the file.
+    if (document.providersDisabled !== undefined) adoptDisabledProviders(document.providersDisabled)
   } finally {
     adopting = false
   }
@@ -199,10 +246,14 @@ function adopt(document: OrderDocumentView): void {
 }
 
 /**
- * Boot pass: pull the file and arbitrate. Resolves once the decision has been
- * acted on (adoption is synchronous; a push is fire-and-forget).
+ * Boot pass (and every later pull): fetch the file and arbitrate. Resolves once
+ * the decision has been acted on (adoption is synchronous; a push is
+ * fire-and-forget).
  */
 export async function reconcileOrderSync(): Promise<void> {
+  if (disposed || reconciling) return
+  reconciling = true
+  const mine = generation
   let document: OrderDocumentView | undefined
   try {
     const response = await fetch(ORDER_PATH, { method: 'GET' })
@@ -213,38 +264,75 @@ export async function reconcileOrderSync(): Promise<void> {
   } catch {
     // No host on this origin (or offline): the local stores stand alone.
     return
+  } finally {
+    reconciling = false
   }
-  if (disposed) return
+  if (disposed || mine !== generation) return
+  // A local change is already queued and stamped newer than anything the file
+  // can hold; pulling now would only race the push that is about to land.
+  if (pushTimer !== undefined) return
   const stamp = readStamp()
-  if (document !== undefined && hasContent(document) && document.savedAt > stamp) {
-    adopt(document)
-    return
-  }
-  // The file is older (or empty, or absent): overwrite it with what we hold —
-  // the seed after an upgrade, the repair of a push the last session missed.
-  // Same content on both sides (a fresh install included) is nothing to sync.
   const fileContent = JSON.stringify({
     providerOrder: document?.providerOrder ?? [],
     modelOrder: document?.modelOrder ?? {},
     providersDisabled: document?.providersDisabled ?? [],
   })
+  if (document !== undefined && hasContent(document)) {
+    if (document.savedAt > stamp) {
+      adopt(document)
+      return
+    }
+    // The same instant with different content cannot be arbitrated by the
+    // stamp: move ours one millisecond ahead so the push below is strictly
+    // newer, instead of bouncing off the host's stale guard forever.
+    if (document.savedAt === stamp && contentKey() !== fileContent) writeStamp(nextStamp())
+  }
+  // The file is older (or empty, or absent): overwrite it with what we hold —
+  // the seed after an upgrade, the repair of a push the last session missed.
+  // Same content on both sides (a fresh install included) is nothing to sync.
   if (contentKey() !== fileContent) schedulePush(0)
 }
 
+/** Ask the host again, unless the page is hidden (a background tab has no reader). */
+function poll(): void {
+  if (disposed) return
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+  void reconcileOrderSync()
+}
+
 /**
- * Start the sync: the boot pass plus the change subscription. Returns the
- * disposer; a disposed sync stops pushing and ignores the boot answer.
+ * Start the sync: the boot pass, the change subscription, and the pulls that
+ * make another machine's write show up without a reload — a visible page on a
+ * timer, plus `focus`/`visibilitychange` for the moment someone comes back to
+ * the tab. Returns the disposer; a disposed sync stops pushing, stops pulling
+ * and ignores answers already in flight.
  */
 export function startOrderSync(): () => void {
   disposed = false
+  generation += 1
   const unsubscribeOrders = subscribeProviderOrder(onChange)
   const unsubscribeModels = subscribeModelOrders(onChange)
   const unsubscribeDisabled = subscribeDisabledProviders(onChange)
+  pollTimer = setInterval(poll, ORDER_POLL_MS)
+  if (typeof window !== 'undefined') window.addEventListener('focus', poll)
+  if (typeof document !== 'undefined') {
+    const onVisibility = (): void => { if (document.visibilityState === 'visible') poll() }
+    document.addEventListener('visibilitychange', onVisibility)
+    stopListening = () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      if (typeof window !== 'undefined') window.removeEventListener('focus', poll)
+    }
+  }
   void reconcileOrderSync()
   return () => {
     disposed = true
+    generation += 1
     if (pushTimer !== undefined) clearTimeout(pushTimer)
     pushTimer = undefined
+    if (pollTimer !== undefined) clearInterval(pollTimer)
+    pollTimer = undefined
+    stopListening?.()
+    stopListening = undefined
     unsubscribeOrders()
     unsubscribeModels()
     unsubscribeDisabled()

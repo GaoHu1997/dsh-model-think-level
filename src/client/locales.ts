@@ -243,6 +243,8 @@ export const en = {
   imagegenTimeoutMinutes: '{minutes} min',
   imagegenTimeoutHint: 'The per-request cap; every retry of the parameter fallback chain gets this budget too.',
   imagegenCardRunning: 'Generating image…',
+  imagegenToolMissing: 'The built-in image tool is not registered, so a model cannot call it.',
+  imagegenToolMissingWhy: 'Host said: {reason}',
 }
 
 /** The plugin's locale key union. */
@@ -490,4 +492,6 @@ export const zh: { [Key in keyof typeof en]: string } = {
   imagegenTimeoutMinutes: '{minutes} 分钟',
   imagegenTimeoutHint: '单次请求上限；参数回退的每次重试也用它。',
   imagegenCardRunning: '正在生成图片…',
+  imagegenToolMissing: '内建生图工具没有注册成功，模型调不到它。',
+  imagegenToolMissingWhy: '宿主说：{reason}',
 }

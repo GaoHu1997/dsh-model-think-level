@@ -4340,6 +4340,17 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   line-height: 17px;
   overflow-wrap: anywhere;
 }
+/* A failed native-tool registration: the same box, on the state colours, with
+   the host's own words in quieter ink underneath so the sentence leads. */
+.bre-config-notice-warn {
+  border-color: var(--dsw-alias-state-warn-label, #dd8629);
+  background: var(--bre-warn-weak);
+  color: var(--dsw-alias-state-warn-label, #dd8629);
+}
+.bre-config-notice-why {
+  margin-top: 3px;
+  color: var(--bre-ink-3);
+}
 
 .bre-config-defaults {
   display: flex;

@@ -41,6 +41,19 @@ function legacyBlock(): string {
   ].join('\n')
 }
 
+/** The same entry with the comment lines stripped (a panel re-serialized it). */
+function markerlessBlock(): string {
+  return [
+    '- insert:',
+    `    - id: ${IMAGE_MCP_PATCH_ID}`,
+    '      name: "@deepseek-ai/dsh-mcp-client"',
+    '      config:',
+    '        serverName: dsh-image',
+    '        transport: stdio',
+    '',
+  ].join('\n')
+}
+
 /** A third-party marker block that shares the file (the skill-mcp-panel precedent). */
 function foreignBlock(): string {
   return [
@@ -76,6 +89,39 @@ describe('removeLegacyImageMcpPatch', () => {
 
   it('an absent file is a no-op, not an error', () => {
     expect(removeLegacyImageMcpPatch(home, patchFile)).toBeUndefined()
+  })
+
+  it('a markerless leftover written by a third-party panel is still removed', () => {
+    // The panel re-serializes the document and drops the comment lines: the
+    // entry survives without markers, so the marker splice alone cannot see it.
+    const header = ['- insert:', '    - id: keep-me', '      name: keep-me', ''].join('\n')
+    writeFileSync(patchFile, header + markerlessBlock() + ['- id: after-me', '  name: after-me', ''].join('\n'))
+    expect(removeLegacyImageMcpPatch(home, patchFile)).toBe(patchFile)
+    const after = readFileSync(patchFile, 'utf8')
+    expect(after).not.toContain(IMAGE_MCP_PATCH_ID)
+    expect(after).toBe(header + ['- id: after-me', '  name: after-me', ''].join('\n'))
+  })
+
+  it('a markerless top-level bare row is removed as well', () => {
+    const header = ['- id: keep-me', '  name: keep-me', ''].join('\n')
+    const bare = ['- id: dsh-image-mcp', '  name: "@deepseek-ai/dsh-mcp-client"', ''].join('\n')
+    writeFileSync(patchFile, header + bare)
+    expect(removeLegacyImageMcpPatch(home, patchFile)).toBe(patchFile)
+    expect(readFileSync(patchFile, 'utf8')).toBe(header)
+  })
+
+  it('a markerless insert list that also carries a foreign row is left alone', () => {
+    const mixed = ['- insert:', '    - id: dsh-image-mcp', '      name: "@deepseek-ai/dsh-mcp-client"', '    - id: theirs', '      name: theirs', ''].join('\n')
+    writeFileSync(patchFile, mixed)
+    expect(removeLegacyImageMcpPatch(home, patchFile)).toBeUndefined()
+    expect(readFileSync(patchFile, 'utf8')).toBe(mixed)
+  })
+
+  it('an unrelated markerless insert list naming another plugin is left alone', () => {
+    const other = ['- insert:', '    - id: other-plugin-row', '      name: other-plugin', ''].join('\n')
+    writeFileSync(patchFile, other)
+    expect(removeLegacyImageMcpPatch(home, patchFile)).toBeUndefined()
+    expect(readFileSync(patchFile, 'utf8')).toBe(other)
   })
 
   it('a foreign block that reuses the marker lines but not our id is untouched', () => {

@@ -337,10 +337,21 @@ export function syncImageConfig(
     }
   })
   const ids = new Set(models.map(model => model.id))
+  // A pass that derives no row at all carries no evidence about which ids exist:
+  // that is also what an empty providers map looks like before the settings
+  // document is readable, and what the document looks like in the middle of a
+  // rows rewrite. Clearing the picked default there is how a configured default
+  // model disappears for good — the next pass re-derives the rows, but the pick
+  // is already gone and nothing tells the user. Keeping it is safe: a default
+  // that matches no row is never used to generate (resolveImageModel refuses it
+  // and falls back to the sole candidate rule), so a stale pick cannot quietly
+  // fire with some other model.
+  const keepDefault = stored.defaultModel !== null
+    && (models.length === 0 || ids.has(stored.defaultModel))
   return {
     ...stored,
     syncedAt: now().toISOString(),
-    defaultModel: stored.defaultModel !== null && ids.has(stored.defaultModel) ? stored.defaultModel : null,
+    defaultModel: keepDefault ? stored.defaultModel : null,
     models,
   }
 }

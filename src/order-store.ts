@@ -163,6 +163,23 @@ export function writeUiOrder(document: UiOrderDocument, file: string = uiOrderFi
   }
 }
 
+/** The payload's own stamp, when it carries a usable one (0 and junk mean none). */
+function savedAtOf(patch: unknown): number | undefined {
+  if (typeof patch !== 'object' || patch === null) return undefined
+  const at = (patch as Record<string, unknown>)['savedAt']
+  return typeof at === 'number' && Number.isFinite(at) && at > 0 ? at : undefined
+}
+
+/** Whether two documents say the same thing, their stamps aside. */
+export function sameUiOrderContent(left: UiOrderDocument, right: UiOrderDocument): boolean {
+  const shape = (document: UiOrderDocument): string => JSON.stringify([
+    document.providerOrder,
+    document.modelOrder,
+    document.providersDisabled,
+  ])
+  return shape(left) === shape(right)
+}
+
 /**
  * Read, fold a payload over it, and write back — the POST route's whole body.
  * The read and the write bracket one synchronous section, so two overlapping
@@ -173,4 +190,32 @@ export function commitUiOrder(patch: unknown, at: number, file: string = uiOrder
   const next = mergeUiOrder(readUiOrder(file), patch, at)
   writeUiOrder(next, file)
   return next
+}
+
+/**
+ * The guarded fold the route uses: a payload that is not NEWER than the stored
+ * document may not rewrite it.
+ *
+ * `savedAt` is the arbitration every machine shares, so a push that carries an
+ * older (or the same) stamp with different content is a page that never saw the
+ * newer file — a second computer, or a tab whose boot answer arrived late. Letting
+ * it write would flip the stored order and the switches back to what that page
+ * still held, which is exactly how a disabled set "un-syncs" itself. The answer
+ * tells the sender it lost, and carries the document that actually won so it can
+ * adopt it instead of retrying.
+ * @param patch - the posted payload.
+ * @param at - the stamp to use when the payload carries none.
+ * @param file - document path (tests pass a temp file).
+ * @returns the stored document, and whether the payload was refused as stale.
+ */
+export function commitUiOrderGuarded(patch: unknown, at: number, file: string = uiOrderFilePath()): { document: UiOrderDocument, stale: boolean } {
+  const current = readUiOrder(file)
+  const incoming = savedAtOf(patch)
+  const merged = mergeUiOrder(current, patch, at)
+  if (incoming !== undefined && incoming <= current.savedAt && !sameUiOrderContent(merged, current)) {
+    // Nothing written: the losing payload must not become the new base either.
+    return { document: current, stale: true }
+  }
+  writeUiOrder(merged, file)
+  return { document: merged, stale: false }
 }

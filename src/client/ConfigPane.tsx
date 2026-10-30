@@ -6,8 +6,10 @@
  * One card today, 「生图」, per the design's card-list shape with room for
  * more: the params row and the default-model select under it. The marked
  * models surface as that select's options; marking itself lives on the Models
- * page (展开模型行 → 输入模态 → 勾选「生图」), so the pane keeps no list,
- * no empty state and no built-in-tool status card of its own.
+ * page (展开模型行 → 输入模态 → 勾选「生图」), so the pane keeps no list and
+ * no empty state of its own. The one status line it does carry is the host's
+ * verbatim reason when `tools.register` threw: a silently missing native tool
+ * is otherwise indistinguishable from a model that simply never asks.
  *
  * Esc / backdrop / ✕ close it; the wrapper unmounts and the page keeps
  * whatever the pane saved.
@@ -136,6 +138,10 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
 
   const models = view.models
   const empty = models.length === 0
+  // The host records why a failed `tools.register` threw; without it the only
+  // symptom is a model that never asks for a picture, so the card says it out
+  // loud. A registered tool (or one never attempted) leaves this undefined.
+  const toolError = view.tool.error
   // A label shared by two routes (the same model behind two providers) would
   // read as one row in the menu; the provider name disambiguates only those.
   const labelCounts = new Map<string, number>()
@@ -150,6 +156,9 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
       createElement('span', { className: 'bre-config-card-title' }, t('imagegenSectionTitle')),
     ),
     notice !== undefined && createElement('div', { className: 'bre-config-notice' }, notice),
+    toolError !== undefined && createElement('div', { className: 'bre-config-notice bre-config-notice-warn' },
+      createElement('div', null, t('imagegenToolMissing')),
+      createElement('div', { className: 'bre-config-notice-why' }, t('imagegenToolMissingWhy', { reason: toolError }))),
     createElement('div', { className: 'bre-config-defaults' },
       createElement('label', null, t('imagegenDefaultsLabel')),
       createElement('select', {

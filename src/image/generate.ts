@@ -24,6 +24,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { harnessHome } from '../key-index.js'
+import { createImageDeadline, type ImageDeadline } from './deadline.js'
 import {
   effectiveParams,
   readImageConfig,
@@ -38,9 +39,9 @@ export interface GenerateRequest {
   readonly model?: string
   readonly prompt: string
   /**
-   * The caller's cancellation (the user pressed stop while the reply stream
-   * was still pending). Aborts the in-flight images request too, so a stop
-   * never leaves a paid generation running to completion behind the UI.
+   * Caller cancellation is propagated to cooperative dependencies and bounds
+   * local waiting even when they ignore it. Aborting HTTP is best effort: it
+   * cannot guarantee that a remote paid job or an already-started save stops.
    */
   readonly signal?: AbortSignal
   readonly size?: string
@@ -114,7 +115,7 @@ export interface GenerateDeps {
   /** The live config; read fresh per call (the MCP path re-reads the file). */
   readonly config?: () => ImageConfig
   /** Resolve one credential reference to its value. */
-  readonly resolveKey: (ref: string) => Promise<string | undefined>
+  readonly resolveKey: (ref: string, signal?: AbortSignal) => Promise<string | undefined>
   /** The fetch beneath any wrapper — the images call must not be re-intercepted. */
   readonly send: typeof globalThis.fetch
   /** Base dir for relative `outputDir`s (defaults to the harness home). */
@@ -154,12 +155,41 @@ function sanitize(text: string, key: string | undefined): string {
   return out
 }
 
-/** Body text of a Response, bounded — an error page must not be read whole. */
-async function boundedText(response: Response, limit = 4096): Promise<string> {
+/** Read under the call's deadline, cancelling even a non-cooperative body. */
+async function responseBytes(response: Response, deadline: ImageDeadline, limit = Infinity): Promise<Uint8Array> {
+  deadline.check()
+  const reader = response.body?.getReader()
+  if (reader === undefined) return new Uint8Array()
+  const chunks: Uint8Array[] = []
+  let length = 0
+  let complete = false
   try {
-    const text = await response.text()
-    return text.length > limit ? text.slice(0, limit) : text
+    while (length < limit) {
+      const { done, value } = await deadline.run(() => reader.read())
+      if (done) { complete = true; break }
+      const chunk = value.subarray(0, limit - length)
+      chunks.push(chunk)
+      length += chunk.length
+    }
+    deadline.check()
+    const bytes = new Uint8Array(length)
+    let offset = 0
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
+    return bytes
+  } finally {
+    // Cleanup must not become another unbounded await. A rejected/late cancel
+    // is consumed, and releaseLock rejects any still-pending read safely.
+    if (!complete) void reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+}
+
+/** Only error snippets are bounded; successful JSON must never be truncated. */
+async function boundedText(response: Response, deadline: ImageDeadline, limit = 4096): Promise<string> {
+  try {
+    return new TextDecoder().decode(await responseBytes(response, deadline, limit))
   } catch {
+    deadline.check()
     return ''
   }
 }
@@ -321,14 +351,14 @@ export function resolveDestination(
 }
 
 /** The b64 payloads of a successful images answer, in the order the wire returned them. */
-async function imagesOfAnswer(answer: unknown, send: typeof globalThis.fetch): Promise<string[]> {
+async function imagesOfAnswer(answer: unknown, send: typeof globalThis.fetch, deadline: ImageDeadline, key: string | undefined): Promise<string[]> {
   if (typeof answer !== 'object' || answer === null) throw new GenerateError('upstream', '上游返回了无法识别的应答结构')
   const data = (answer as Record<string, unknown>)['data']
   if (!Array.isArray(data) || data.length === 0) {
     // Some relays wrap the answer one level deeper; try the common shapes once.
-    for (const key of ['images', 'output', 'result'] as const) {
-      const nested = (answer as Record<string, unknown>)[key]
-      if (Array.isArray(nested) && nested.length > 0) return imagesOfAnswer({ data: nested }, send)
+    for (const nestedKey of ['images', 'output', 'result'] as const) {
+      const nested = (answer as Record<string, unknown>)[nestedKey]
+      if (Array.isArray(nested) && nested.length > 0) return imagesOfAnswer({ data: nested }, send, deadline, key)
     }
     throw new GenerateError('upstream', '上游应答缺少 data 数组')
   }
@@ -340,13 +370,21 @@ async function imagesOfAnswer(answer: unknown, send: typeof globalThis.fetch): P
       images.push(record['b64_json'])
       continue
     }
+    deadline.check()
     if (typeof record['url'] === 'string' && record['url'].length > 0) {
-      const response = await send(record['url'], { redirect: 'follow' })
-      if (!response.ok) throw new GenerateError('upstream', `下载上游图片失败（${response.status}）`)
-      const bytes = new Uint8Array(await response.arrayBuffer())
-      let binary = ''
-      for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]!)
-      images.push(btoa(binary))
+      try {
+        const response = await deadline.run(() => send(record['url'] as string, { redirect: 'follow', signal: deadline.signal }))
+        if (!response.ok) throw new GenerateError('upstream', `下载上游图片失败（${response.status}）`)
+        const bytes = await responseBytes(response, deadline)
+        let binary = ''
+        for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]!)
+        deadline.check()
+        images.push(btoa(binary))
+      } catch (error) {
+        deadline.check()
+        if (error instanceof GenerateError) throw error
+        throw new GenerateError('upstream', `下载上游图片失败：${sanitize(error instanceof Error ? error.message : String(error), key)}`)
+      }
       continue
     }
     throw new GenerateError('upstream', '上游应答既无 b64_json 也无 url')
@@ -354,13 +392,11 @@ async function imagesOfAnswer(answer: unknown, send: typeof globalThis.fetch): P
   return images
 }
 
-/**
- * Whether the caller's own signal (not the per-attempt deadline) fired. A
- * function call on purpose: a narrowable expression would let TypeScript
- * treat the check after the loop-top guard as dead code.
- */
-function callerAborted(signal: AbortSignal | undefined): boolean {
-  return signal?.aborted === true
+/** The core and native tool use identical cancellation/timeout classification. */
+export function createGenerateDeadline(timeoutMs: number, signal?: AbortSignal): ImageDeadline {
+  return createImageDeadline(timeoutMs, signal, kind => new GenerateError(kind, kind === 'aborted'
+    ? '生成已取消'
+    : `生成超时（${timeoutMs}ms）——可在配置页调大超时`))
 }
 
 /**
@@ -368,15 +404,28 @@ function callerAborted(signal: AbortSignal | undefined): boolean {
  * priority chain, merges params, calls the images endpoint (with one pass of
  * the param fallback chain), decodes and writes the file.
  */
-export async function generateImage(deps: GenerateDeps, request: GenerateRequest): Promise<GenerateResult> {
+export async function generateImage(deps: GenerateDeps, request: GenerateRequest, sharedDeadline?: ImageDeadline): Promise<GenerateResult> {
   const config = deps.config?.() ?? readImageConfig()
+  const deadline = sharedDeadline ?? createGenerateDeadline(deps.timeoutMs ?? config.defaults.timeoutMs, request.signal)
+  try {
+    deadline.check()
+    return await generateWithinDeadline(deps, request, config, deadline)
+  } catch (error) {
+    deadline.check()
+    throw error
+  } finally {
+    if (sharedDeadline === undefined) deadline.dispose()
+  }
+}
+
+async function generateWithinDeadline(deps: GenerateDeps, request: GenerateRequest, config: ImageConfig, deadline: ImageDeadline): Promise<GenerateResult> {
   const prompt = request.prompt.trim()
   if (prompt.length === 0) throw new GenerateError('param', '提示词为空')
   const model = resolveImageModel(config, request.model)
   if (model === undefined) {
     throw new GenerateError('config', config.models.length === 0
       ? '没有已配置的生图模型——请到 模型配置 → 输入模态 勾选「生图」，或在插件配置页添加'
-      : `生图模型不存在或无法唯一定位：${request.model ?? config.defaultModel ?? '(未设默认)'}`)
+      : `生图模型不存在或无法唯一定位：${request.model ?? config.defaultModel ?? `(未设默认，候选 ${config.models.map(candidate => candidate.id).join('、')})`}。请带上 model 参数，或到插件配置页把其中一个设为默认模型`)
   }
   if (model.api !== 'images') {
     throw new GenerateError('endpoint', `该模型（${model.id}）的协议没有兼容的 images 端点，生成已禁用`)
@@ -385,7 +434,7 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
     throw new GenerateError('config', `模型 ${model.id} 所在供应商未配置 baseURL`)
   }
   const params = effectiveParams(config, model, request)
-  const key = model.keyRef === undefined ? undefined : await deps.resolveKey(model.keyRef)
+  const key = model.keyRef === undefined ? undefined : await deadline.run(() => deps.resolveKey(model.keyRef!, deadline.signal))
   if (model.keyRef !== undefined && key === undefined) {
     throw new GenerateError('auth', `该 route（${model.route}）未配置密钥（引用 ${model.keyRef}）——请到模型配置页填写`)
   }
@@ -398,6 +447,7 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
   const referenceReads: { name: string; bytes: Uint8Array; mime: string }[] = [
     ...(request.referenceFiles ?? []).map(file => ({ name: file.name, bytes: file.bytes, mime: file.mime })),
     ...(request.referenceImages ?? []).map(path => {
+      deadline.check()
       const absolute = resolve(path)
       if (!existsSync(absolute)) throw new GenerateError('reference', `参考图不存在或不可读：${path}`)
       try {
@@ -417,12 +467,8 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
   let lastFailure: { kind: GenerateFailureKind; message: string; status?: number } | undefined
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    if (callerAborted(request.signal)) throw new GenerateError('aborted', '生成已取消')
-    const timeoutMs = deps.timeoutMs ?? config.defaults.timeoutMs
-    // The per-attempt deadline and the caller's stop are one signal: a user
-    // stop aborts the paid request instead of letting it finish unwatched.
-    const deadline = AbortSignal.timeout(timeoutMs)
-    const signal = request.signal === undefined ? deadline : AbortSignal.any([deadline, request.signal])
+    deadline.check()
+    const signal = deadline.signal
     let response: Response
     try {
       if (referenceReads.length > 0) {
@@ -435,7 +481,7 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
         }
         if (format !== 'none') fields['output_format'] = 'png'
         const { body, contentType } = buildMultipart(boundary, fields, referenceReads)
-        response = await deps.send(`${base}/images/edits`, {
+        response = await deadline.run(() => deps.send(`${base}/images/edits`, {
           method: 'POST',
           headers: {
             'content-type': contentType,
@@ -443,7 +489,7 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
           },
           body,
           signal,
-        })
+        }))
       } else {
         const payload: Record<string, unknown> = {
           model: model.modelId,
@@ -454,7 +500,7 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
         }
         if (format === 'b64_json') payload['response_format'] = 'b64_json'
         if (format === 'output_format') payload['output_format'] = 'png'
-        response = await deps.send(`${base}/images/generations`, {
+        response = await deadline.run(() => deps.send(`${base}/images/generations`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
@@ -462,36 +508,37 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
           },
           body: JSON.stringify(payload),
           signal,
-        })
+        }))
       }
     } catch (error) {
+      deadline.check()
       if (error instanceof GenerateError) throw error
-      // A stop wins over every classification: the caller is gone, and the
-      // message is never shown (the stream it belonged to was cancelled).
-      if (callerAborted(request.signal)) throw new GenerateError('aborted', '生成已取消')
       const message = error instanceof Error ? error.message : String(error)
-      if (/abort|timeout/i.test(message)) throw new GenerateError('timeout', `生成超时（${timeoutMs}ms）——可在配置页调大超时`)
       throw new GenerateError('upstream', `无法连接 ${base}：${sanitize(message, key)}`)
     }
 
     if (response.ok) {
       let answer: unknown
       try {
-        answer = JSON.parse(await boundedText(response, 262_144))
+        answer = JSON.parse(new TextDecoder().decode(await responseBytes(response, deadline)))
       } catch {
+        deadline.check()
         throw new GenerateError('upstream', '上游应答不是合法 JSON')
       }
-      const payloads = await imagesOfAnswer(answer, deps.send)
+      const payloads = await imagesOfAnswer(answer, deps.send, deadline, key)
       // One file per returned image. Each destination is resolved only after
       // the previous file is on disk, so the never-overwrite suffixes advance
       // (`a.png`, `a-2.png`, …) whatever spelling the caller chose.
       const images: GeneratedImage[] = []
       for (const data of payloads) {
+        deadline.check()
         const filePath = resolveDestination(request.outputPath, outputDirOf(deps, config), promptSlug(prompt), now)
         const bytes = Uint8Array.from(atob(data), ch => ch.charCodeAt(0))
+        deadline.check()
         writeFileSync(filePath, bytes)
         images.push({ filePath, data })
       }
+      deadline.check()
       if (revisions.length > 0 && deps.persistLastGood !== undefined) {
         deps.persistLastGood(model.id, {
           ...model.params,
@@ -501,6 +548,7 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
           maxN: model.params.maxN,
         })
       }
+      deadline.check()
       return {
         images,
         mime: 'image/png',
@@ -511,7 +559,7 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
       }
     }
 
-    const bodyText = await boundedText(response)
+    const bodyText = await boundedText(response, deadline)
     let body: unknown
     try {
       body = JSON.parse(bodyText)

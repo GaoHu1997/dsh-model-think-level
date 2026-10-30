@@ -147,6 +147,84 @@ describe('boot arbitrate', () => {
   })
 })
 
+describe('adopted switches survive a reload', () => {
+  it('persists the disabled set the file brought, so the old one cannot come back and win', async () => {
+    window.localStorage.setItem(PROVIDER_DISABLED_KEY, '["old"]')
+    window.localStorage.setItem(ORDER_SAVED_AT_KEY, '100')
+    stubFetch({ ok: true, data: { savedAt: 300, providerOrder: [], modelOrder: {}, providersDisabled: ['b'] } })
+    const { reconcileOrderSync } = await import('../src/client/order-sync.js')
+    const { isProviderEnabled } = await import('../src/client/provider-enabled.js')
+    await reconcileOrderSync()
+    expect(isProviderEnabled('b')).toBe(false)
+    expect(isProviderEnabled('old')).toBe(true)
+    // The write lands in localStorage, not just in the running page.
+    expect(window.localStorage.getItem(PROVIDER_DISABLED_KEY)).toBe('["b"]')
+
+    // A reload re-reads the stores from storage; the file's answer must be
+    // what comes back, and the reconcile must then agree with the file rather
+    // than push the pre-adoption set back over it.
+    vi.resetModules()
+    const calls = stubFetch({ ok: true, data: { savedAt: 300, providerOrder: [], modelOrder: {}, providersDisabled: ['b'] } })
+    const fresh = await import('../src/client/order-sync.js')
+    const reloaded = await import('../src/client/provider-enabled.js')
+    expect(reloaded.disabledProviders()).toEqual(['b'])
+    await fresh.reconcileOrderSync()
+    vi.advanceTimersByTime(2_000)
+    expect(posts(calls)).toEqual([])
+  })
+})
+
+describe('stale push', () => {
+  it('adopts the document that won when the host refuses an old stamp', async () => {
+    window.localStorage.setItem(PROVIDER_DISABLED_KEY, '["stale"]')
+    window.localStorage.setItem(ORDER_SAVED_AT_KEY, '100')
+    const calls: FetchCall[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const method = init?.method ?? 'GET'
+      calls.push({ method, url: String(input), ...(init?.body === undefined ? {} : { body: JSON.parse(init.body) as Record<string, unknown> }) })
+      if (method === 'GET') return { ok: false, status: 500, json: async () => ({ ok: false }) }
+      // Another machine wrote this while the page was closed.
+      return {
+        ok: false,
+        status: 409,
+        json: async () => ({ ok: false, error: 'stale', data: { savedAt: 400, providerOrder: [], modelOrder: {}, providersDisabled: ['fresh'] } }),
+      }
+    }))
+    const { reconcileOrderSync } = await import('../src/client/order-sync.js')
+    const { isProviderEnabled } = await import('../src/client/provider-enabled.js')
+    await reconcileOrderSync()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(posts(calls)).toHaveLength(1)
+    // The refused push did not leave the old switches in place: the winner was
+    // adopted, stamp included, and nothing is retried.
+    expect(isProviderEnabled('stale')).toBe(true)
+    expect(isProviderEnabled('fresh')).toBe(false)
+    expect(window.localStorage.getItem(PROVIDER_DISABLED_KEY)).toBe('["fresh"]')
+    expect(window.localStorage.getItem(ORDER_SAVED_AT_KEY)).toBe('400')
+    vi.advanceTimersByTime(2_000)
+    expect(posts(calls)).toHaveLength(1)
+  })
+})
+
+describe('later pulls', () => {
+  it('picks up a newer document written by another machine without a reload', async () => {
+    let answer: unknown = { ok: true, data: { savedAt: 100, providerOrder: ['a', 'b'], modelOrder: {}, providersDisabled: [] } }
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => answer })))
+    const { startOrderSync, ORDER_POLL_MS } = await import('../src/client/order-sync.js')
+    const { providerOrder } = await import('../src/client/provider-order.js')
+    const dispose = startOrderSync()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(providerOrder()).toEqual(['a', 'b'])
+      answer = { ok: true, data: { savedAt: 200, providerOrder: ['b', 'a'], modelOrder: {}, providersDisabled: [] } }
+      await vi.advanceTimersByTimeAsync(ORDER_POLL_MS)
+      expect(providerOrder()).toEqual(['b', 'a'])
+    } finally {
+      dispose()
+    }
+  })
+})
+
 describe('change push', () => {
   it('stamps a change immediately and pushes it once, debounced', async () => {
     stubFetch()
@@ -158,10 +236,15 @@ describe('change push', () => {
       setProviderOrder(['x', 'y'])
       // The stamp lands with the change, not with the push: a page closed
       // inside the debounce window still reads as the newer side next boot.
-      const stamp = window.localStorage.getItem(ORDER_SAVED_AT_KEY)
-      expect(stamp).toBe(String(Date.parse('2026-01-01T00:00:00Z')))
+      const first = window.localStorage.getItem(ORDER_SAVED_AT_KEY)
+      expect(first).toBe(String(Date.parse('2026-01-01T00:00:00Z')))
       setModelOrder('openai', ['m2', 'm1'])
       setProviderOrder(['x'])
+      // Three edits inside one frozen millisecond still get three distinct
+      // stamps: the file's arbitration is "strictly newer wins", so a burst
+      // must not hand several changes the same instant.
+      const last = window.localStorage.getItem(ORDER_SAVED_AT_KEY)
+      expect(Number(last)).toBeGreaterThan(Number(first))
       vi.advanceTimersByTime(400)
       // Exactly one POST for the whole burst, carrying the final state and
       // the same stamp the change wrote — so file and localStorage agree.
@@ -169,7 +252,7 @@ describe('change push', () => {
       const pushed = calls.filter(([, init]) => init?.method === 'POST')
       expect(pushed).toHaveLength(1)
       expect(JSON.parse(pushed[0]![1].body!)).toEqual({
-        savedAt: Number(stamp),
+        savedAt: Number(last),
         providerOrder: ['x'],
         modelOrder: { openai: ['m2', 'm1'] },
         providersDisabled: [],

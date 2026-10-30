@@ -60,6 +60,20 @@ export function syncDisabledProviders(next: readonly string[]): void {
   apply(next, false)
 }
 
+/**
+ * Take a set that came from the shared order document, and persist it.
+ *
+ * This is the one path where the value is not a user action in this tab but the
+ * file's answer for every machine — the boot arbitrate's adoption. It must land
+ * in localStorage exactly like a switch would: `syncDisabledProviders` only
+ * updates the running page, so after a reload the pre-adoption set came back and
+ * the next reconcile pushed it over the file. That was the disabled set's
+ * "synced on one machine only" bug.
+ */
+export function adoptDisabledProviders(next: readonly string[]): void {
+  apply(next, true)
+}
+
 /** Listen for a switch, from this tab or another; returns the unsubscribe. */
 export function subscribeDisabledProviders(listener: () => void): () => void {
   listeners.add(listener)

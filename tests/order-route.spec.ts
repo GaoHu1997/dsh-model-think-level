@@ -143,6 +143,27 @@ describe('apply() ui-order route', () => {
     })
   })
 
+  it('refuses a payload no newer than the stored document, and answers with what won', async () => {
+    const { ctx, routes } = fakeHost()
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(ORDER_PATH)!
+    await answer(handler, 'POST', { savedAt: 500, providerOrder: ['new'], providersDisabled: ['x'] })
+    // A page that never saw the newer file: same instant, different content.
+    const stale = await answer(handler, 'POST', { savedAt: 500, providerOrder: ['old'], providersDisabled: [] })
+    expect(stale.status).toBe(409)
+    expect(stale.json['error']).toBe('stale')
+    expect((stale.json['data'] as Record<string, unknown>)['providerOrder']).toEqual(['new'])
+    // The losing payload did not become the stored document.
+    expect(readUiOrder(uiOrderFilePath(home))).toMatchObject({ savedAt: 500, providerOrder: ['new'], providersDisabled: ['x'] })
+    // An older stamp is refused the same way.
+    const older = await answer(handler, 'POST', { savedAt: 400, providerOrder: ['ancient'] })
+    expect(older.status).toBe(409)
+    // The same content at the same stamp is a retry, not a conflict.
+    const retry = await answer(handler, 'POST', { savedAt: 500, providerOrder: ['new'], providersDisabled: ['x'] })
+    expect(retry.status).toBe(200)
+  })
+
   it('POST refuses a non-JSON body and leaves the file untouched', async () => {
     const { ctx, routes } = fakeHost()
     const { apply } = await import('../src/index.js')

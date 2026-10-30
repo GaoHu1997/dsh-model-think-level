@@ -230,6 +230,31 @@ describe('syncImageConfig', () => {
     expect(synced.models.some(model => model.id === 'gone/model')).toBe(false)
     expect(synced.defaultModel).toBeNull()
   })
+
+  it('keeps the picked default through a pass that derives no rows at all', () => {
+    // An empty providers map is not "the user deleted every image model": it is
+    // what the document looks like before its value is readable (boot, HMR, a
+    // reload that re-registers the section first). Clearing the pick there is
+    // how a configured default disappears for good, so a pass with no evidence
+    // must leave it alone. resolveImageModel already refuses a default that
+    // matches no row, so a stale pick cannot fire with some other model.
+    const stored = {
+      ...emptyImageConfig(),
+      defaultModel: 'openai/gpt-image-1',
+      models: [{
+        ...emptyImageConfig().models[0]!,
+        id: 'openai/gpt-image-1',
+        route: 'openai',
+        modelId: 'gpt-image-1',
+        label: 'GPT-Image-1',
+        api: 'images' as const,
+        baseURL: 'https://api.openai.com/v1',
+      }],
+    }
+    const synced = syncImageConfig(stored, {})
+    expect(synced.models).toEqual([])
+    expect(synced.defaultModel).toBe('openai/gpt-image-1')
+  })
 })
 
 describe('resolveImageModel', () => {

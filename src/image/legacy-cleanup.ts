@@ -62,6 +62,70 @@ function markerRange(text: string): { start: number; end: number } | undefined {
   return { start, end: lineEnd === -1 ? text.length : lineEnd + 1 }
 }
 
+/** One line of the patch document plus its byte offset. */
+interface PatchLine {
+  readonly text: string
+  readonly start: number
+}
+
+/** Split into lines while keeping each line's own start offset. */
+function linesOf(text: string): readonly PatchLine[] {
+  const out: PatchLine[] = []
+  let start = 0
+  for (const line of text.split('\n')) {
+    out.push({ text: line, start })
+    start += line.length + 1
+  }
+  return out
+}
+
+/**
+ * Range of a leftover entry the RETIRED installer wrote but whose marker
+ * comment lines were lost — by a hand edit, or by a third-party panel that
+ * re-serialized the file. The marker splice above cannot see those, yet they
+ * still make the loader spawn the removed `lib/image-mcp.mjs` on every boot and
+ * keep a dead `dsh-image` MCP server in the host's client list.
+ *
+ * Two shapes count, and both must be owned by our id alone:
+ *   - a top-level `- insert:` list whose `- id:` rows are all ours, and
+ *   - a bare top-level `- id: dsh-image-mcp` row (the "silent non-install"
+ *     shape the loader skips).
+ * A block carrying anyone else's row is left untouched: a byte splice cannot
+ * remove half of it, and guessing would delete a live plugin entry.
+ * @returns the byte range to cut, or undefined when nothing of ours is there.
+ */
+function staleEntryRange(text: string): { start: number; end: number } | undefined {
+  const lines = linesOf(text)
+  const ownId = new RegExp(`^\\s*-\\s+id:\\s*['"]?${IMAGE_MCP_PATCH_ID}['"]?\\s*$`)
+  const anyId = /^\s*-\s+id:/
+  for (const [index, line] of lines.entries()) {
+    if (!/^-(\s|$)/.test(line.text)) continue
+    // A top-level item runs until the next top-level line (or EOF).
+    let end = lines.length
+    for (let probe = index + 1; probe < lines.length; probe += 1) {
+      const candidate = lines[probe]!
+      if (candidate.text.trim().length === 0) continue
+      if (!/^\s/.test(candidate.text)) {
+        end = probe
+        break
+      }
+    }
+    const body = lines.slice(index + 1, end)
+    const owned = /^-\s*insert:\s*$/.test(line.text)
+      // Every row inside the list must be ours — never cut a mixed block.
+      ? body.some(entry => ownId.test(entry.text)) && !body.some(entry => anyId.test(entry.text) && !ownId.test(entry.text))
+      : ownId.test(line.text)
+    if (!owned) continue
+    return { start: line.start, end: end < lines.length ? lines[end]!.start : text.length }
+  }
+  return undefined
+}
+
+/** The range to cut: the marked block when the markers survived, else the bare entry. */
+function legacyRange(text: string): { start: number; end: number } | undefined {
+  return markerRange(text) ?? staleEntryRange(text)
+}
+
 /** Whether a modified document still parses as "our markers, balanced, once". */
 function validateAfterSplice(text: string): string | undefined {
   const begins = text.split(MARK_BEGIN).length - 1
@@ -85,7 +149,7 @@ class ModifiedError extends Error {}
 /** One attempt of the fenced splice. Throws on mtime movement. */
 function spliceOnce(patchFile: string, mtimeMs: number): void {
   const current = readFileSync(patchFile, 'utf8')
-  const range = markerRange(current)
+  const range = legacyRange(current)
   if (range === undefined) return // already gone: idempotent
   let next = current.slice(0, range.start) + current.slice(range.end)
   // The append seam's blank line goes with the block: when nothing but
@@ -125,9 +189,9 @@ export function removeLegacyImageMcpPatch(home?: string, patchFile?: string): st
   } catch {
     return undefined
   }
-  if (!text.includes(MARK_BEGIN)) return undefined
+  if (legacyRange(text) === undefined) return undefined
   if (!text.includes(`- id: ${IMAGE_MCP_PATCH_ID}`)) {
-    // A foreign block reusing our marker lines is not ours to touch.
+    // Only a marker block that no longer names our entry: not ours to touch.
     return undefined
   }
   let lastError: unknown

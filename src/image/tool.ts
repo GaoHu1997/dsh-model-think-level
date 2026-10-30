@@ -21,12 +21,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { generateImage, type GenerateDeps } from './generate.js'
-import type { ImageConfig } from './config.js'
+import { createGenerateDeadline, generateImage, type GenerateDeps } from './generate.js'
+import { resolveImageModel, type ImageConfig } from './config.js'
 
 /** The attachment-store face this tool needs, typed structurally. */
 export interface ImageAttachmentsLike {
-  saveImage(input: { data: Uint8Array; mediaType: string; name?: string }):
+  /** Optional adapter signal; one-argument host stores still require a local deadline race. */
+  saveImage(input: { data: Uint8Array; mediaType: string; name?: string }, signal?: AbortSignal):
     Promise<{ attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string }>
   readImage(ref: { attachmentId: string }, signal?: AbortSignal):
     Promise<{ data: Uint8Array; ref?: { name?: string; mediaType?: string } }>
@@ -79,45 +80,79 @@ function attachmentRefOf(id: string): { attachmentId: string } {
   return { attachmentId: trimmed.startsWith('sha256:') ? trimmed : `sha256:${trimmed}` }
 }
 
-/** The model-facing JSON schema of the canonical value (harness dialect). */
+/**
+ * The model-facing JSON schema of the canonical value — RAW JSON Schema only.
+ *
+ * `tools.register` calls `assertSupportedJsonSchema(output.schema)` without any
+ * author-dialect conversion (that is `defineTool`'s job, and this plugin
+ * registers directly), so the accepted vocabulary is exactly
+ * type/oneOf/properties/required/additionalProperties/items/enum/const plus the
+ * annotations description/title/default/examples. In particular `required` is
+ * an ARRAY OF PROPERTY NAMES on an OBJECT — never a per-node boolean. Writing
+ * the harness author dialect here (`required: true` inside a property) throws
+ * `JsonSchemaError` out of `register`, which fails the whole tools injection
+ * and leaves the tool permanently unregistered.
+ */
 const OUTPUT_SCHEMA = {
-  type: 'object', additionalProperties: false, properties: {
+  type: 'object',
+  additionalProperties: false,
+  required: ['images', 'model', 'prompt', 'paramsUsed'],
+  properties: {
     images: {
-      type: 'array', required: true, items: {
-        type: 'object', additionalProperties: false, properties: {
-          attachment: { type: 'object', required: true, additionalProperties: false, properties: {
-            attachmentId: { type: 'string', required: true },
-            mediaType: { type: 'string', required: true },
-            bytes: { type: 'integer', required: true },
-            width: { type: 'integer', required: true },
-            height: { type: 'integer', required: true },
-            name: { type: 'string' },
-            originalDimensions: { type: 'object', additionalProperties: false, properties: {
-              width: { type: 'integer', required: true }, height: { type: 'integer', required: true },
-            } },
-          } },
-          filePath: { type: 'string', required: true },
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['attachment', 'filePath'],
+        properties: {
+          attachment: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['attachmentId', 'mediaType', 'bytes', 'width', 'height'],
+            properties: {
+              attachmentId: { type: 'string' },
+              mediaType: { type: 'string' },
+              bytes: { type: 'integer' },
+              width: { type: 'integer' },
+              height: { type: 'integer' },
+              name: { type: 'string' },
+            },
+          },
+          filePath: { type: 'string' },
         },
       },
     },
-    model: { type: 'string', required: true },
-    prompt: { type: 'string', required: true },
-    paramsUsed: { type: 'object', required: true, additionalProperties: false, properties: {
-      size: { type: 'string', required: true }, quality: { type: 'string', required: true }, n: { type: 'integer', required: true },
-    } },
+    model: { type: 'string' },
+    prompt: { type: 'string' },
+    paramsUsed: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['size', 'quality', 'n'],
+      properties: {
+        size: { type: 'string' },
+        quality: { type: 'string' },
+        n: { type: 'integer' },
+      },
+    },
     revisions: { type: 'array', items: { type: 'string' } },
   },
 }
 
+/** The model-facing argument schema — object-rooted RAW JSON Schema, same rules. */
 const TOOL_PARAMETERS = {
-  prompt: { type: 'string', required: true, description: '完整画面描述：主体、构图、风格、光照，以及需要出现的文字。' },
-  model: { type: 'string', description: '生图模型（route/modelId 或显示名）；缺省用配置页的默认模型，用户没有点名时省略。' },
-  size: { type: 'string', description: '如 1024x1024；缺省取模型行 → 默认参数。用户没有点名时省略。' },
-  quality: { type: 'string', description: '如 high；缺省取模型行 → 默认参数。用户没有点名时省略。' },
-  n: { type: 'number', description: '生成张数；缺省取模型行 → 默认参数，超过该模型上限时报错并列出允许值。' },
-  reference_images: { type: 'array', items: { type: 'string' }, description: '本地参考图路径；非空走 /images/edits。' },
-  reference_attachments: { type: 'array', items: { type: 'string' }, description: '对话内图片的附件 ID（sha256:… 或裸摘要）；与本地路径可混用。' },
-  path: { type: 'string', description: '落盘文件（以 .png 结尾，存在则自动加 -2 后缀，不覆盖）或目录；缺省 generated-images/<slug>-<ts>.png。' },
+  type: 'object',
+  additionalProperties: false,
+  required: ['prompt'],
+  properties: {
+    prompt: { type: 'string', description: '完整画面描述：主体、构图、风格、光照，以及需要出现的文字。' },
+    model: { type: 'string', description: '生图模型（route/modelId 或显示名）；缺省用配置页的默认模型，用户没有点名时省略。' },
+    size: { type: 'string', description: '如 1024x1024；缺省取模型行 → 默认参数。用户没有点名时省略。' },
+    quality: { type: 'string', description: '如 high；缺省取模型行 → 默认参数。用户没有点名时省略。' },
+    n: { type: 'integer', description: '生成张数；缺省取模型行 → 默认参数，超过该模型上限时报错并列出允许值。' },
+    reference_images: { type: 'array', items: { type: 'string' }, description: '本地参考图路径；非空走 /images/edits。' },
+    reference_attachments: { type: 'array', items: { type: 'string' }, description: '对话内图片的附件 ID（sha256:… 或裸摘要）；与本地路径可混用。' },
+    path: { type: 'string', description: '落盘文件（以 .png 结尾，存在则自动加 -2 后缀，不覆盖）或目录；缺省 generated-images/<slug>-<ts>.png。' },
+  },
 }
 
 /** One args record narrowed from the model's JSON. Everything but prompt is optional. */
@@ -169,6 +204,9 @@ function attachmentValueOf(ref: Awaited<ReturnType<ImageAttachmentsLike['saveIma
   }
 }
 
+/** Shared by the tool schema, success text and system hint: cards alone are not the final reply. */
+const IMAGE_REPLY_HINT = '生图成功后，最终回复必须逐张直接嵌入所有生成的图片：用返回的真实 filePath 写 ![图片说明](<filePath>)，Windows 路径用 /。不能只说“图片已生成/已附到对话”，不能只放文件链接或依赖工具卡片。'
+
 /** The model-facing text beside the image blocks. */
 function summaryText(value: ImageToolValue): string {
   const paths = value.images.map(image => image.filePath)
@@ -179,7 +217,10 @@ function summaryText(value: ImageToolValue): string {
     `size ${value.paramsUsed.size} · quality ${value.paramsUsed.quality} · n ${value.paramsUsed.n}`,
     `落盘：${paths.join('、')}`,
     value.revisions.length > 0 ? `参数回退：${value.revisions.join('、')}` : '',
-    '图片已在对话里，直接回复用户即可，不要调用 read、glob 或其他工具去找或验证图片。',
+    IMAGE_REPLY_HINT,
+    '可直接复制到最终回复的图片 Markdown：',
+    ...paths.map((path, index) => `![生成的图片 ${index + 1}](<${path.replace(/\\/g, '/')}>)`),
+    '不要虚构图片 URL，也不要调用 read、glob 或其他工具去找或验证图片；直接使用上面的真实路径嵌图。',
   ]
   return lines.filter(line => line.length > 0).join('\n')
 }
@@ -197,7 +238,7 @@ export function registerGenerateImageTool(ctx: Context, deps: ImageToolDeps): { 
   const tools = (ctx as unknown as { tools: ImageToolsLike }).tools
   const definitionFor = (name: string): unknown => ({
     name,
-    description: '用当前配置的生图模型生成图片并直接附到对话。用户要画图、生成、出图时调用；改图请带参考图。参数一律缺省（读配置默认），除非用户明确点名。不要虚构图片 URL。',
+    description: `用当前配置的生图模型生成图片并直接附到对话。用户要画图、生成、出图时调用；改图请带参考图。参数一律缺省（读配置默认），除非用户明确点名。不要虚构图片 URL。${IMAGE_REPLY_HINT}`,
     parameters: TOOL_PARAMETERS,
     output: {
       schema: OUTPUT_SCHEMA,
@@ -217,41 +258,55 @@ export function registerGenerateImageTool(ctx: Context, deps: ImageToolDeps): { 
     async execute(rawArgs: unknown, exec: { signal: AbortSignal }): Promise<ImageToolValue> {
       const parsed = parseArgs(rawArgs)
       if (typeof parsed === 'string') throw new Error(parsed)
-      // Conversation attachments become reference BYTES through the attachment
-      // store — never a temp file, never a path the model could get wrong.
-      const referenceFiles = []
-      for (const [index, id] of (parsed.referenceAttachments ?? []).entries()) {
-        try {
-          const stored = await deps.attachments.readImage(attachmentRefOf(id), exec.signal)
-          const name = stored.ref?.name ?? `reference-${index + 1}.png`
-          referenceFiles.push({ name, mime: stored.ref?.mediaType ?? 'image/png', bytes: stored.data })
-        } catch (error) {
-          throw new Error(`参考图（附件 ${id}）不可读：${error instanceof Error ? error.message : String(error)}`)
+      // Snapshot once so references, generation and saves share the SAME budget
+      // and config, rather than starting another full timeout inside the core.
+      const config = deps.generateDeps.config?.() ?? deps.readConfig()
+      const deadline = createGenerateDeadline(deps.generateDeps.timeoutMs ?? config.defaults.timeoutMs, exec.signal)
+      try {
+        deadline.check()
+        // Conversation attachments become bytes, never temporary files.
+        const referenceFiles = []
+        for (const [index, id] of (parsed.referenceAttachments ?? []).entries()) {
+          try {
+            const stored = await deadline.run(() => deps.attachments.readImage(attachmentRefOf(id), deadline.signal))
+            const name = stored.ref?.name ?? `reference-${index + 1}.png`
+            referenceFiles.push({ name, mime: stored.ref?.mediaType ?? 'image/png', bytes: stored.data })
+          } catch (error) {
+            deadline.check()
+            throw new Error(`参考图（附件 ${id}）不可读：${error instanceof Error ? error.message : String(error)}`)
+          }
         }
-      }
-      const result = await generateImage(deps.generateDeps, {
-        prompt: parsed.prompt,
-        ...(parsed.model === undefined ? {} : { model: parsed.model }),
-        ...(parsed.size === undefined ? {} : { size: parsed.size }),
-        ...(parsed.quality === undefined ? {} : { quality: parsed.quality }),
-        ...(parsed.n === undefined ? {} : { n: parsed.n }),
-        ...(parsed.referenceImages === undefined ? {} : { referenceImages: parsed.referenceImages }),
-        ...(referenceFiles.length > 0 ? { referenceFiles } : {}),
-        ...(parsed.outputPath === undefined ? {} : { outputPath: parsed.outputPath }),
-        signal: exec.signal,
-      })
-      const images: ImageToolImage[] = []
-      for (const image of result.images) {
-        const bytes = Uint8Array.from(atob(image.data), ch => ch.charCodeAt(0))
-        const attachment = await deps.attachments.saveImage({ data: bytes, mediaType: result.mime, name: 'generated-image' })
-        images.push({ attachment: attachmentValueOf(attachment), filePath: image.filePath })
-      }
-      return {
-        images,
-        model: result.model,
-        prompt: result.prompt,
-        paramsUsed: result.paramsUsed,
-        revisions: result.revisions,
+        const result = await generateImage({ ...deps.generateDeps, config: () => config }, {
+          prompt: parsed.prompt,
+          ...(parsed.model === undefined ? {} : { model: parsed.model }),
+          ...(parsed.size === undefined ? {} : { size: parsed.size }),
+          ...(parsed.quality === undefined ? {} : { quality: parsed.quality }),
+          ...(parsed.n === undefined ? {} : { n: parsed.n }),
+          ...(parsed.referenceImages === undefined ? {} : { referenceImages: parsed.referenceImages }),
+          ...(referenceFiles.length > 0 ? { referenceFiles } : {}),
+          ...(parsed.outputPath === undefined ? {} : { outputPath: parsed.outputPath }),
+          signal: deadline.signal,
+        }, deadline)
+        const images: ImageToolImage[] = []
+        for (const image of result.images) {
+          deadline.check()
+          const bytes = Uint8Array.from(atob(image.data), ch => ch.charCodeAt(0))
+          const attachment = await deadline.run(() => deps.attachments.saveImage({ data: bytes, mediaType: result.mime, name: 'generated-image' }, deadline.signal))
+          images.push({ attachment: attachmentValueOf(attachment), filePath: image.filePath })
+        }
+        deadline.check()
+        return {
+          images,
+          model: result.model,
+          prompt: result.prompt,
+          paramsUsed: result.paramsUsed,
+          revisions: result.revisions,
+        }
+      } catch (error) {
+        deadline.check()
+        throw error
+      } finally {
+        deadline.dispose()
       }
     },
     presentCall: (args: unknown) => {
@@ -299,14 +354,29 @@ export function registerGenerateImageTool(ctx: Context, deps: ImageToolDeps): { 
   }
 }
 
-/** The system-prompt hint: which tool to call, what the defaults are. */
+/**
+ * The system-prompt hint: which tool to call, what the defaults are.
+ *
+ * It must describe the SAME model `resolveImageModel` will pick, or the model
+ * follows the hint, omits `model`, and gets a `config` error. So the hint asks
+ * the resolver itself instead of guessing `models[0]`: with no default set and
+ * several candidates the resolver refuses, and the hint then has to say so —
+ * naming a model there is a promise the call cannot keep.
+ */
 export function imageToolHint(config: ImageConfig): string {
   if (config.models.length === 0) return ''
-  const defaultModel = config.defaultModel ?? config.models[0]?.id
+  const defaults = `size ${config.defaults.size}，quality ${config.defaults.quality}，n ${config.defaults.n}`
+  const resolved = resolveImageModel(config)
+  const opening = resolved === undefined
+    ? `生图请调用 generate_image 工具。当前没有唯一的默认生图模型（共 ${config.models.length} 个候选），调用时必须显式填 model，可选值：${config.models.map((model) => model.id).join('、')}；size/quality/n 可缺省（默认 ${defaults}）。`
+    : `生图请调用 generate_image 工具（缺省参数即可：默认模型 ${resolved.id}，${defaults}）。`
   const lines = [
-    `生图请调用 generate_image 工具（缺省参数即可：默认模型 ${String(defaultModel)}，size ${config.defaults.size}，quality ${config.defaults.quality}，n ${config.defaults.n}）。`,
-    '用户没有点名模型或参数时，不要填 model/size/quality/n；改图用对话内图片的附件 ID 填 reference_attachments，本地文件填 reference_images。',
-    '不要自己编造图片 URL，也不要用别的工具找生成的图片——成功后图片直接附在对话里。',
+    opening,
+    resolved === undefined
+      ? '用户没有点名模型时，先问清用哪个模型，不要自己挑一个——猜错的模型会直接生成失败。改图用对话内图片的附件 ID 填 reference_attachments，本地文件填 reference_images。'
+      : '用户没有点名模型或参数时，不要填 model/size/quality/n；改图用对话内图片的附件 ID 填 reference_attachments，本地文件填 reference_images。',
+    '不要自己编造图片 URL，也不要用别的工具找生成的图片——成功后工具会返回附件和真实 filePath。',
+    IMAGE_REPLY_HINT,
   ]
   return lines.join('\n')
 }

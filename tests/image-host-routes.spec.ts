@@ -213,6 +213,31 @@ describe('apply() image wiring', () => {
     }
   })
 
+  it('an empty providers snapshot never wipes the rows or the picked default', async () => {
+    upstreamUrl = await startUpstream()
+    const settings = fakeSettings()
+    const { ctx, routes, emitUpdated } = fakeHost(settings)
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    try {
+      // The user picks a default model in the pane.
+      const saved = reqRes('POST', { defaultModel: 'openai/gpt-image-1' })
+      await routes.get(IMAGE_CONFIG_PATH)!(saved.req, saved.res)
+      expect(readImageConfig(imageConfigFilePath(home)).defaultModel).toBe('openai/gpt-image-1')
+      // A document read that carries no providers at all is what boot, HMR and a
+      // reload look like before the document's value lands. Treating it as "the
+      // user deleted every image model" writes models: [] and stamps the pick to
+      // null on disk — and no later pass can recover it.
+      settings.register({})
+      emitUpdated('llm-pi-ai')
+      const config = readImageConfig(imageConfigFilePath(home))
+      expect(config.models.map(model => model.id)).toEqual(['openai/gpt-image-1'])
+      expect(config.defaultModel).toBe('openai/gpt-image-1')
+    } finally {
+      for (const cleanup of hostCleanups.splice(0)) cleanup()
+    }
+  })
+
   it('GET image-config answers the derived list plus the native-tool status block', async () => {
     upstreamUrl = await startUpstream()
     const settings = fakeSettings()
