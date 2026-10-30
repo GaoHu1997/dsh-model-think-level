@@ -2882,6 +2882,12 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    once, not on the row it would otherwise live in. */
 .bre-keys-footer { display: flex; justify-content: flex-end; }
 
+/* The scope probe's seat: the key section's own line, above the ruled list,
+   right-aligned the way a section-level control reads. It acts on every key at
+   once, not on the row it would otherwise live in. The class is deliberately
+   not named after the floating panel the inline list replaced. */
+.bre-keys-probe-row { display: flex; justify-content: flex-end; }
+
 /* The offer to add the models the keys advertise but the provider does not
    declare: one sentence and one link, never a silent write. */
 .bre-keys-note {
@@ -4282,12 +4288,6 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   padding: 14px 16px;
   overflow-y: auto;
 }
-.bre-config-foot {
-  padding: 8px 16px 12px;
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--bre-ink-3);
-}
 .bre-config-loading {
   padding: 18px 4px;
   font-size: 12.5px;
@@ -4329,10 +4329,6 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   font-weight: 600;
   color: var(--bre-ink-1);
 }
-.bre-config-card-sub {
-  font-size: 11.5px;
-  color: var(--bre-ink-3);
-}
 .bre-config-notice {
   margin: 0 0 10px;
   padding: 7px 10px;
@@ -4344,22 +4340,6 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   line-height: 17px;
   overflow-wrap: anywhere;
 }
-
-.bre-config-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 7px;
-  border-radius: var(--bre-r-pill);
-  border: 1px solid var(--bre-line-2);
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--bre-ink-3);
-  white-space: nowrap;
-}
-.bre-config-badge-ok { color: #1c7c3c; border-color: #1c7c3c33; background: #1c7c3c0f; }
-.bre-config-badge-bad { color: #b3261e; border-color: #b3261e33; background: #b3261e0f; }
-.bre-config-badge-unknown { color: var(--bre-ink-3); }
-.bre-config-badge-default { color: var(--bre-accent); border-color: var(--bre-accent-line); background: var(--bre-accent-weak); }
 
 .bre-config-defaults {
   display: flex;
@@ -4392,8 +4372,8 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   max-width: none;
 }
 
-/* The default-model row under the params: one menu standing in for the old
-   per-row radio, so the pick does not compete with each row's own controls. */
+/* The default-model row under the params: the one place a default is picked,
+   its options being the marked image-generation models. */
 .bre-config-default-row {
   display: flex;
   align-items: center;
@@ -4409,141 +4389,6 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   flex: 0 1 auto;
 }
 .bre-config-default-select:disabled { opacity: 0.6; cursor: default; }
-
-.bre-config-rows {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--bre-line-1);
-  border-radius: 10px;
-  overflow: hidden;
-}
-.bre-config-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-}
-.bre-config-row + .bre-config-row { border-top: 1px solid var(--bre-line-1); }
-.bre-config-name { min-width: 0; flex: 1 1 auto; }
-.bre-config-name-main {
-  font-size: 12.5px;
-  color: var(--bre-ink-1);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow-wrap: anywhere;
-}
-.bre-config-name-sub {
-  margin-top: 1px;
-  font-size: 11px;
-  line-height: 15px;
-  color: var(--bre-ink-3);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow-wrap: anywhere;
-}
-.bre-config-row-controls {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.bre-config-btn-ghost {
-  border: 1px solid var(--bre-line-2);
-  border-radius: 6px;
-  background: none;
-  color: var(--bre-ink-2);
-  font: inherit;
-  font-size: 11.5px;
-  line-height: 17px;
-  padding: 3px 9px;
-  cursor: pointer;
-  flex: none;
-}
-.bre-config-btn-ghost:hover { color: var(--bre-ink-1); border-color: var(--bre-line-3); }
-.bre-config-btn-ghost:disabled { opacity: 0.55; cursor: default; }
-.bre-config-btn-primary {
-  border: none;
-  border-radius: 6px;
-  background: var(--dsw-alias-label-primary, #17181a);
-  color: var(--dsw-alias-bg-elevated, #ffffff);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  padding: 5px 12px;
-  cursor: pointer;
-  flex: none;
-}
-.bre-config-btn-primary:disabled { opacity: 0.6; cursor: default; }
-
-.bre-config-empty {
-  border: 1px dashed var(--bre-line-3);
-  border-radius: 10px;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.bre-config-empty-text { font-size: 12.5px; color: var(--bre-ink-2); }
-.bre-config-empty-hint { font-size: 11.5px; color: var(--bre-ink-3); line-height: 16px; }
-.bre-config-suspects {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-top: 4px;
-}
-.bre-config-suspect {
-  border: 1px solid var(--bre-line-2);
-  border-radius: var(--bre-r-pill);
-  padding: 2px 9px;
-  font-size: 11.5px;
-  color: var(--bre-ink-2);
-}
-
-.bre-config-tool {
-  margin-top: 14px;
-  border-top: 1px solid var(--bre-line-1);
-  padding-top: 12px;
-}
-.bre-config-tool-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12.5px;
-  color: var(--bre-ink-1);
-}
-.bre-config-tool-name {
-  margin-left: auto;
-  font-family: var(--bre-mono, ui-monospace, monospace);
-  font-size: 11px;
-  color: var(--bre-ink-2);
-  background: var(--bre-line-1);
-  border-radius: var(--bre-r-pill);
-  padding: 1px 8px;
-}
-.bre-config-tool-status {
-  margin-top: 6px;
-  font-size: 11.5px;
-  line-height: 16px;
-  color: var(--bre-ink-3);
-  overflow-wrap: anywhere;
-}
-.bre-config-tool-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: 8px;
-}
-.bre-config-tool-hint {
-  margin-top: 8px;
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--bre-ink-3);
-}
 
 /* The conversation's generated-image card (keyed tool.call.toolview). */
 .bre-image-card {

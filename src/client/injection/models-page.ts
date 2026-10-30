@@ -26,6 +26,7 @@ import {
   releaseModelListRepins, showOfficialReasoning, unwatchModelListOffsets, watchModelListOffsets,
   type HostLabels, type InjectorDeps, type ScanState,
 } from './models-page-editor.js'
+import { modelsPageMutation } from './models-page-mutation.js'
 import { teardownProviderEndpoints } from './provider-endpoints.js'
 import { describeNamespace } from '../ops.ts'
 import type { ClientContext, RemoteApi, SettingsJoin } from '../types.js'
@@ -88,6 +89,7 @@ import { reconcileSettleGuard, teardownSettleGuard } from './settle-guard.js'
 import {
   createModelOrderState,
   modelListMutation,
+  modelListsOf,
   reconcileModelOrder,
   teardownModelOrder,
   type ModelOrderDeps,
@@ -437,21 +439,26 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
    */
   const reconcileDom = (): void => {
     const root = panelRoot()
-    if (rowsListOf(root) === undefined) {
+    // One list answer for the whole pass: every decoration below shares it, so
+    // the document-wide substring-class walk happens once per scan instead of
+    // once per pass (seven passes paying it separately is what made one burst
+    // cost tens of full-document walks).
+    const list = rowsListOf(root)
+    if (list === undefined) {
       // The Models page is not on screen. The balance pass has to hear that, or
       // a page reopened later would reuse the previous opening's read session
       // and never fetch again. The key prefetch opens its session the same way.
-      reconcileProviderBalance(root, providerBalanceDeps, providerBalanceState)
-      reconcileKeyPrefetch(root, keyPrefetchDeps, keyPrefetchState)
+      reconcileProviderBalance(root, providerBalanceDeps, providerBalanceState, undefined)
+      reconcileKeyPrefetch(root, keyPrefetchDeps, keyPrefetchState, undefined)
       return
     }
-    reconcileProviderOrder(root, providerOrderDeps, providerOrderState)
-    reconcileProviderEnabled(root, providerToggleDeps, providerToggleState)
-    reconcileProviderBalance(root, providerBalanceDeps, providerBalanceState)
-    reconcileKeyPrefetch(root, keyPrefetchDeps, keyPrefetchState)
-    reconcileProviderDeleteSeat(root, providerDeleteDeps)
-    reconcileProviderDisabledGroup(root, providerDisabledDeps, providerDisabledState)
-    reconcileModelOrder(root, modelOrderDeps, modelOrderState)
+    reconcileProviderOrder(root, providerOrderDeps, providerOrderState, list)
+    reconcileProviderEnabled(root, providerToggleDeps, providerToggleState, list)
+    reconcileProviderBalance(root, providerBalanceDeps, providerBalanceState, list)
+    reconcileKeyPrefetch(root, keyPrefetchDeps, keyPrefetchState, list)
+    reconcileProviderDeleteSeat(root, providerDeleteDeps, list)
+    reconcileProviderDisabledGroup(root, providerDisabledDeps, providerDisabledState, list)
+    reconcileModelOrder(root, modelOrderDeps, modelOrderState, modelListsOf(root))
     // The title-row 「配置」 seat. Pure DOM (one query + one append), so it
     // rides this synchronous pass like the decorations above: navigating to
     // Models paints the button in the same frame as the page itself. A null
@@ -550,7 +557,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     // deletion's clamp takes that position away before any later pass can read
     // it, so it has to be recorded from the event that starts the deletion.
     watchModelListOffsets()
-    const onMutation = (records: MutationRecord[]): void => {
+    const onMutation = (records: MutationRecord[], relevant: boolean): void => {
       // The composer path runs SYNCHRONOUSLY on the mutation microtask: the
       // React commit that opens the menu and this callback are delivered
       // before the browser's next paint, so the FIRST painted frame already
@@ -561,6 +568,9 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       // session switch lands as a DOM mutation, and the new session's
       // directory must be watched before its projection can read as Default.
       onComposerMutation()
+      if (!relevant) return
+      // Keep the host's field order and first-paint decoration synchronous for
+      // real Models-page commits, but never for chat/foreign-root rendering.
       // User item 5: the editor injector runs HERE too, synchronously. Its scan
       // head is DOM-only work — the label read, the row query, the provider
       // card's field order, the disclosure buttons' re-pins — and it was left
@@ -601,7 +611,9 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
       }
     }
     observer = new MutationObserver((records) => {
-      safely('models mutation', () => { onMutation(records) })
+      const relevant = modelsPageMutation(records)
+      safely('models mutation', () => { onMutation(records, relevant) })
+      if (!relevant) return
       // Stand the official per-model reasoning control down in the SAME
       // microtask the disclosure appears in, before the browser can paint the
       // opened row: the debounced scan that also hides it runs frames later,

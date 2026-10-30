@@ -24,7 +24,9 @@ class TestObserver {
   observe = vi.fn()
   disconnect = vi.fn()
   constructor(readonly callback: MutationCallback) { TestObserver.instances.push(this) }
-  deliver(): void { this.callback([], this as unknown as MutationObserver) }
+  deliver(records: MutationRecord[] = [{ type: 'childList', target: document.body, addedNodes: document.body.childNodes, removedNodes: [] } as unknown as MutationRecord]): void {
+    this.callback(records, this as unknown as MutationObserver)
+  }
 }
 
 const pages: ModelsPageInjection[] = []
@@ -145,6 +147,42 @@ describe('models page lifecycle', () => {
     await vi.advanceTimersByTimeAsync(120)
     expect(host.querySelector('.bre-effort-slot')).not.toBeNull()
     expect(error).toHaveBeenCalledWith('[bre] models page startup failed:', expect.any(Error))
+  })
+
+  it('does not rescan Models for unrelated streaming or foreign-root commits', async () => {
+    const host = modelsDom()
+    const instance = page()
+    const hook = vi.fn()
+    instance.start(hook)
+    await vi.advanceTimersByTimeAsync(120)
+    const query = vi.spyOn(document.body, 'querySelectorAll')
+    const chat = document.createElement('div')
+    chat.textContent = 'streaming'
+    document.body.append(chat)
+    query.mockClear()
+    const own = host.querySelector('.bre-effort-slot')!
+    for (let i = 0; i < 100; i++) {
+      TestObserver.instances[0]!.deliver([
+        { type: 'childList', target: chat, addedNodes: [document.createTextNode('token')], removedNodes: [] } as unknown as MutationRecord,
+        { type: 'childList', target: own, addedNodes: [document.createElement('span')], removedNodes: [] } as unknown as MutationRecord,
+      ])
+    }
+    expect(hook.mock.calls.length).toBeGreaterThanOrEqual(100)
+    await vi.advanceTimersByTimeAsync(240)
+    expect(query).not.toHaveBeenCalled()
+  })
+
+  it('still decorates a newly opened disclosure synchronously', async () => {
+    const instance = page()
+    instance.start(vi.fn())
+    await vi.advanceTimersByTimeAsync(120)
+    const host = modelsDom()
+    TestObserver.instances[0]!.deliver([
+      { type: 'childList', target: document.body, addedNodes: [host], removedNodes: [] } as unknown as MutationRecord,
+    ])
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(host.querySelector('.bre-effort-slot')).not.toBeNull()
   })
 
   it('contains a mutation-hook exception and still schedules the next scan', async () => {

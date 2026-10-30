@@ -3242,15 +3242,16 @@ function officialCardOpen(): boolean {
  * Reshape every provider card on the page: the official edit card AND the add
  * card, which share the display-name / base-URL / API-protocol fields.
  *
- * Scoped to card containers rather than the whole document, so a card that has
- * scrolled out or a different pane's look-alike form is never touched. The work
+ * Takes the card candidates the caller's single sweep already collected (see
+ * {@link reconcile}'s scan union) instead of re-walking the document. The work
  * itself is idempotent, which is what makes running it on every scan safe: a
  * React re-render that restores the host's field order is repaired next pass.
- * @param root - the settings panel root.
+ * @param candidates - the `[class*="editor"], [class*="addCard"],
+ *   [class*="rowCard"]` elements, in document order.
  * @param labels - the host's resolved label anchors.
  * @param t - the injected copy.
  */
-function decorateCards(root: HTMLElement, labels: HostLabels, t: InjectorDeps['t']): void {
+function decorateCards(candidates: readonly HTMLElement[], labels: HostLabels, t: InjectorDeps['t']): void {
   const endpoints: EndpointLabels = {
     routeId: labels.routeId,
     modelName: labels.modelName,
@@ -3258,21 +3259,82 @@ function decorateCards(root: HTMLElement, labels: HostLabels, t: InjectorDeps['t
     apiProtocol: labels.apiProtocol,
   }
   const cards = new Set<HTMLElement>()
-  for (const node of Array.from(root.querySelectorAll<HTMLElement>('[class*="editor"], [class*="addCard"], [class*="rowCard"]'))) {
+  for (const node of candidates) {
     // Only a card that actually carries the protocol and address is ours to
     // reshape; a model row's own inputs sit inside the editor container and
     // would otherwise match the broad selector above. The display name is NOT
     // required: the add-provider card has no such field and must get the same
-    // treatment (user item 6).
-    if (hasLabeledInput(node, labels.apiProtocol) && hasLabeledInput(node, labels.baseUrl)) {
+    // treatment (user item 6). One labeled-input read answers both labels —
+    // two identical subtree walks per candidate per scan was the old cost.
+    const labeled = Array.from(node.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[aria-label], select[aria-label]'))
+    const carries = (labels: readonly string[]): boolean =>
+      labeled.some(candidate => labels.some(label => (candidate.getAttribute('aria-label') ?? '').startsWith(label)))
+    if (carries(labels.apiProtocol) && carries(labels.baseUrl)) {
       cards.add(node)
     }
   }
   for (const card of cards) decorateProviderCard(card, endpoints, { t })
 }
 
+interface DescribeRender {
+  readonly promise: Promise<SettingsJoin>
+  run: (join: SettingsJoin) => void
+  phase: string
+  reportReadFailure: boolean
+}
+
+const describeRenders = new WeakMap<ScanState, DescribeRender>()
+
+/** One continuation per snapshot; a burst replaces its DOM work with the latest scan. */
+function queueDescribeRender(state: ScanState, run: (join: SettingsJoin) => void, phase: string, reportReadFailure = false): void {
+  const promise = state.describePromise
+  if (promise === undefined) return
+  const prior = describeRenders.get(state)
+  if (prior?.promise === promise) {
+    prior.run = run
+    prior.phase = phase
+    prior.reportReadFailure = reportReadFailure
+    return
+  }
+  const queued: DescribeRender = { promise, run, phase, reportReadFailure }
+  describeRenders.set(state, queued)
+  const release = (): void => {
+    if (describeRenders.get(state) === queued) describeRenders.delete(state)
+  }
+  void promise.then(join => {
+    release()
+    // An invalidated or torn-down read must not repaint an older snapshot.
+    if (!state.disposed && state.describePromise === promise) queued.run(join)
+  }, error => {
+    release()
+    if (state.describePromise !== promise) return
+    state.describePromise = undefined
+    if (queued.reportReadFailure) {
+      console.error(`[bre] ${queued.phase} failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }).catch(error => {
+    console.error(`[bre] ${queued.phase} failed: ${error instanceof Error ? error.message : String(error)}`)
+  })
+}
+
 /**
- * Scan the settings DOM for official model rows and reconcile the injected
+ * Every page control one scan reconciles, asked from the engine in ONE
+ * traversal. Each fragment is probed by substring because the page's class
+ * names are CSS-module hashes; asked separately they cost one document-wide
+ * walk apiece — six per scan, and a burst pays the scan twice (the synchronous
+ * cascade and the debounced scan repeat every pass). `[class*="editor"]`
+ * covers `editorActions` (`editor` is its prefix), so the card-open probe and
+ * the decorate candidates share the same hit set; the partitions below
+ * re-derive the exact sets in document order.
+ */
+const SCAN_SWEEP_SELECTOR = [
+  '[class*="editor"]', '[class*="modelEntry"]',
+  '[class*="rowCard"]', '[class*="setupCard"]', '[class*="addCard"]',
+  'button[class*="addButton"]',
+  'button[aria-label]',
+].join(', ')
+
+/** Scan the settings DOM for official model rows and reconcile the injected
  * editors. Idempotent: existing editors are left alone, new disclosures get
  * one, and removed ones are unmounted.
  * @param root - the settings panel root to scan.
@@ -3289,21 +3351,46 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // itself matches on them, and reading lazily is what keeps a language switch
   // in step with the page (the labels the host renders change with it).
   const labels = deps.labels()
+  // The single document walk this scan pays (see {@link SCAN_SWEEP_SELECTOR}),
+  // partitioned into the sets the passes below used to each re-query.
+  const sweep = Array.from(root.querySelectorAll<HTMLElement>(SCAN_SWEEP_SELECTOR))
   // "Is an official editing card open?" is the gate that decides whether this
   // plugin may write at all. The card's own action row answers it structurally,
   // with the model-row containers as a second signal: an open card whose model
   // list happens to be empty carries no capacity button, and judging idleness
   // from those buttons alone would let a write slip into that card's frozen
   // revision baseline -- issue #7 again, under a rarer trigger.
-  const cardOpen = officialCardOf(root) !== undefined
+  let cardOpen = false
+  const editRows: HTMLElement[] = []
+  const modelCards: HTMLElement[] = []
+  const addProviderTriggers: HTMLElement[] = []
+  const decorateCandidates: HTMLElement[] = []
+  const capacityTriggers: HTMLButtonElement[] = []
+  for (const element of sweep) {
+    if (!cardOpen && element.matches('[class*="editorActions"], [class*="modelEntry"]')) cardOpen = true
+    if (element.matches('[class*="rowCard"], [class*="setupCard"]')) {
+      editRows.push(element)
+      modelCards.push(element)
+    } else if (element.matches('[class*="addCard"]')) {
+      modelCards.push(element)
+    }
+    if (element.matches('[class*="editor"], [class*="addCard"], [class*="rowCard"]')) decorateCandidates.push(element)
+    if (element.matches('button[class*="addButton"]') && element.closest('[data-plugin]') === null) {
+      addProviderTriggers.push(element)
+    }
+    if (element.matches('button[aria-label]')
+      && labels.capacity.some(label => (element.getAttribute('aria-label') ?? '').startsWith(label))) {
+      capacityTriggers.push(element as HTMLButtonElement)
+    }
+  }
   // The provider rows' OWN Edit buttons are wired BEFORE every gate below, and
   // that placement is the point: opening a card is the page's largest height
   // change, and it happens exactly when NO card is open — the branch that
   // returns early below — so a pin wired any later would only ever be in place
   // for the second card the user opens. Scoped to the rows themselves, so the
-  // document-wide scan this rides never goes looking for Edit buttons in the
-  // rest of the app. See {@link wireEditRepin}.
-  for (const row of Array.from(root.querySelectorAll<HTMLElement>('[class*="rowCard"], [class*="setupCard"]'))) {
+  // sweep this rides never goes looking for Edit buttons in the rest of the
+  // app. See {@link wireEditRepin}.
+  for (const row of editRows) {
     for (const trigger of editTriggersOf(row, labels)) wireEditRepin(trigger, state.editWired)
   }
   // The add-model buttons ride the same pre-gate wiring: clicking one is the
@@ -3311,7 +3398,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // gate below has run — the downward-expansion pin has to be on the button
   // before its own click commits, or the first add after a card opens still
   // squeezes the page (see {@link wireAddModelRepin}).
-  for (const card of Array.from(root.querySelectorAll<HTMLElement>('[class*="rowCard"], [class*="setupCard"], [class*="addCard"]'))) {
+  for (const card of modelCards) {
     for (const trigger of addModelTriggersOf(card, labels)) wireAddModelRepin(trigger, card, state.addModelWired)
   }
   // The provider list's own add-provider button rides the same pre-gate wiring:
@@ -3321,8 +3408,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // hashed addBlock/addButton classes — the button carries no aria-label —
   // with this plugin's own DOM skipped like every other trigger above. See
   // {@link wireAddProviderRepin}.
-  for (const trigger of Array.from(root.querySelectorAll<HTMLElement>('button[class*="addButton"]'))) {
-    if (trigger.closest('[data-plugin]') !== null) continue
+  for (const trigger of addProviderTriggers) {
     wireAddProviderRepin(trigger, state.addProviderWired)
   }
   // The provider card's own layout (display name → API protocol → base URL, the
@@ -3330,13 +3416,8 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // gate below and applied to BOTH the edit card and the add card, so 添加供应商
   // is not left in the old shape. Idempotent per card, so re-running on every
   // scan is what repairs a React re-render that put the fields back.
-  decorateCards(root, labels, deps.t)
-  // Match on the attribute VALUE, never through a selector built out of host
-  // copy: a language pack whose label carries a quote or a bracket would make
-  // `querySelector` throw, and this scan has no try/catch around it, so the
-  // settings injection would stall for that language.
-  const hasCapacityRows = Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
-    .some(button => labels.capacity.some(label => (button.getAttribute('aria-label') ?? '').startsWith(label)))
+  decorateCards(decorateCandidates, labels, deps.t)
+  const hasCapacityRows = capacityTriggers.length > 0
   if (!cardOpen) {
     // No card is open, so no catalogue is either — but the seat is this
     // plugin's OWN DOM inside the host's head, and only a scan can take it
@@ -3388,15 +3469,9 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // Never used as a write seed (that is what `allowStale` is opt-in for).
   state.describePromise ??= deps.describeNamespace({ allowStale: true })
     const seatLabels = labels
-    void state.describePromise.then(join => {
+    queueDescribeRender(state, join => {
       seatEmptyCatalog(root, deps, state, join, seatLabels)
-    }).catch(error => {
-      // Same invariant as the folded read below: a rejected describe must be
-      // forgotten, or every later scan `??=`-reuses the rejection and the seat
-      // never appears (while the error log repeats forever).
-      state.describePromise = undefined
-      console.error(`[bre] empty-catalog seat failed: ${error instanceof Error ? error.message : String(error)}`)
-    })
+    }, 'empty-catalog seat', true)
     return
   }
   // The chevrons are wired HERE, not inside the describe callback below.
@@ -3406,11 +3481,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // unwired, and an unwired chevron means the card walks up the viewport on
   // every expand: the exact symptom, appearing only on the occasions a settings
   // read was unhappy. Idempotent by node (wireOnce), so it costs one query.
-  for (const aria of labels.capacity) {
-    for (const trigger of Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))) {
-      if ((trigger.getAttribute('aria-label') ?? '').startsWith(aria)) wireDisclosureRepin(trigger, state.disclosureWired)
-    }
-  }
+  for (const trigger of capacityTriggers) wireDisclosureRepin(trigger, state.disclosureWired)
   // Fold the describe request across scans (one wire read per wave). A
   // promise's .then ALWAYS runs asynchronously (microtask), even when already
   // resolved — the fold just keeps concurrent scans from stacking wire reads.
@@ -3434,31 +3505,19 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     // made the user's own save in that card fail with `settings/conflict`.
 
     const found: FoundModel[] = []
-    for (const aria of labels.capacity) {
-      // The official disclosure buttons carry a numbered aria-label
-      // ("Capacities 1", "容量 2", …), so match by prefix.
-      const triggers = Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
-        .filter(button => (button.getAttribute('aria-label') ?? '').startsWith(aria))
-      for (const trigger of triggers) {
-        // The chevron's re-pin is wired above, ahead of this read (see the
-        // pass in `reconcile`): it needs no settings data, and keeping it here
-        // would make the page's scroll behaviour depend on a wire read.
-        const card = cardOf(trigger)
-        if (card === undefined) continue
-        // The model id lives on the trigger's OWN row, not elsewhere in the
-        // card: reading the card would return the first row's id for every
-        // trigger once more than one model is present.
-        const row = trigger.closest<HTMLElement>('[class*="modelEntry"]') ?? card
-        const modelId = inputValueByLabel(row, labels.modelId)
-        if (modelId.length === 0) continue
-        // The container is OPTIONAL: a collapsed row renders no disclosure at
-        // all, and skipping it here was what kept the provider-wide seat (and
-        // every provider-wide decision) blind until the user unfolded a model.
-        // A row with no container is still a model of this provider -- it
-        // contributes to what the seat adapts, and only its own editor mount
-        // waits for the container the chevron will render.
-        found.push({ container: disclosureOf(trigger), row, modelId, card })
-      }
+    // Read the live buttons after the snapshot resolves, once for all locale
+    // aliases. Overlapping prefixes must not duplicate the same model row.
+    const triggers = Array.from(root.querySelectorAll<HTMLButtonElement>('button[aria-label]'))
+      .filter(button => labels.capacity.some(aria => (button.getAttribute('aria-label') ?? '').startsWith(aria)))
+    for (const trigger of triggers) {
+      const card = cardOf(trigger)
+      if (card === undefined) continue
+      const row = trigger.closest<HTMLElement>('[class*="modelEntry"]') ?? card
+      const modelId = inputValueByLabel(row, labels.modelId)
+      if (modelId.length === 0) continue
+      // Collapsed rows still contribute to provider-wide adaptation; only
+      // their own editor mount waits for a disclosure container.
+      found.push({ container: disclosureOf(trigger), row, modelId, card })
     }
     // The "adapt every model of this provider" seat (user request ⑤) rides the
     // same scan that found the rows: one seat per card, seated in that card's
@@ -3724,9 +3783,5 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
   // work — a throw inside it rejects the DERIVED promise, so the tail catch
   // reports it with context instead of leaving a silent unhandled rejection
   // over a half-mounted round (the next scan repairs the DOM).
-  void state.describePromise.then(run, () => {
-    state.describePromise = undefined
-  }).catch(error => {
-    console.error(`[bre] editor reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
-  })
+  queueDescribeRender(state, run, 'editor reconcile')
 }

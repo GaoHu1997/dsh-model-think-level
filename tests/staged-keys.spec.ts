@@ -155,6 +155,7 @@ function keysFake(script: {
       return stateOf(route)
     },
     setEndpoints: async route => stateOf(route),
+    probe: async route => stateOf(route),
     reveal: async () => undefined,
   }
   return { client, calls }

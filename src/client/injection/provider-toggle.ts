@@ -51,15 +51,17 @@ export function createProviderToggleState(): ProviderToggleState {
  * Visit every provider row and make sure it shows a switch carrying its own
  * state. Idempotent: a row that already has one is only relabelled, which is
  * also how a language switch and an external toggle reach the page.
+ * @param list - the provider list already resolved by the caller's scan (see
+ *   {@link reconcileProviderOrder}); re-deriving it here costs a document-wide
+ *   walk per pass, and one burst runs several passes.
  */
 export function reconcileProviderEnabled(
   root: HTMLElement,
   deps: ProviderToggleDeps,
   state: ProviderToggleState,
+  list: HTMLElement | undefined = rowsListOf(root),
 ): void {
-  if (!root.isConnected) return
-  const list = rowsListOf(root)
-  if (list === undefined) return
+  if (!root.isConnected || list === undefined) return
   const labels = deps.labels()
   for (const child of Array.from(list.children)) {
     if (!(child instanceof HTMLElement)) continue

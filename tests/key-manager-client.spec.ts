@@ -102,6 +102,46 @@ describe('the row status payload', () => {
 })
 
 describe('list cache', () => {
+  it('reuses only opted-in successful answers younger than five seconds', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(100_000)
+      stubFetch({ body: { ok: true, route: 'fresh-boundary', entries: [{ ref: 'A', masked: 'masked-A' }] } })
+      const first = await httpKeyManagerClient.list('fresh-boundary', { preferCache: true })
+      expect(calls).toHaveLength(1)
+      vi.setSystemTime(104_999)
+      expect(await httpKeyManagerClient.list('fresh-boundary', { preferCache: true })).toBe(first)
+      expect(calls).toHaveLength(1)
+      vi.setSystemTime(105_000)
+      await httpKeyManagerClient.list('fresh-boundary', { preferCache: true })
+      expect(calls).toHaveLength(2)
+      // Default and explicit false reads force transport even when freshly warmed.
+      await httpKeyManagerClient.list('fresh-boundary')
+      await httpKeyManagerClient.list('fresh-boundary', { preferCache: false })
+      expect(calls).toHaveLength(4)
+      // A backwards clock is not a valid fresh-cache interval.
+      vi.setSystemTime(104_000)
+      await httpKeyManagerClient.list('fresh-boundary', { preferCache: true })
+      expect(calls).toHaveLength(5)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never makes a failure fresh, and reuses the masked successful POST answer', async () => {
+    stubFetch({ body: { ok: false, error: 'mock refused' } })
+    await httpKeyManagerClient.list('fresh-failure', { preferCache: true })
+    await httpKeyManagerClient.list('fresh-failure', { preferCache: true })
+    expect(calls).toHaveLength(2)
+    expect(httpKeyManagerClient.cached?.('fresh-failure')).toBeUndefined()
+
+    stubFetch({ body: { ok: true, route: 'fresh-write', entries: [{ ref: 'NEW', masked: 'masked-new', key: 'not-cacheable' }] } })
+    const written = await httpKeyManagerClient.add('fresh-write', 'fake-test-value', undefined)
+    expect(await httpKeyManagerClient.list('fresh-write', { preferCache: true })).toBe(written)
+    expect(calls).toHaveLength(1)
+    expect(JSON.stringify(httpKeyManagerClient.cached?.('fresh-write'))).not.toContain('not-cacheable')
+  })
+
   it('returns a masked cached list immediately', async () => {
     let finish!: (response: Response) => void
     vi.stubGlobal('fetch', async () => await new Promise<Response>(resolve => { finish = resolve }))
@@ -155,7 +195,7 @@ describe('list cache', () => {
       return await new Promise<Response>(resolve => { finishRead = resolve })
     })
     const first = httpKeyManagerClient.list('race-route')
-    const second = httpKeyManagerClient.list('race-route')
+    const second = httpKeyManagerClient.list('race-route', { preferCache: true })
     expect(readCount).toBe(1)
     const written = await httpKeyManagerClient.add('race-route', 'sk-live-secret', undefined)
     expect(written.ok).toBe(true)
@@ -165,8 +205,11 @@ describe('list cache', () => {
         { ref: 'OLD', configured: true, masked: 'sk-o...d' },
       ] }),
     } as unknown as Response)
-    await Promise.all([first, second])
+    const answers = await Promise.all([first, second])
+    expect(answers.every(answer => answer.ok && answer.entries[0]?.ref === 'NEW')).toBe(true)
     expect(httpKeyManagerClient.cached?.('race-route')?.entries[0]?.ref).toBe('NEW')
+    expect(await httpKeyManagerClient.list('race-route', { preferCache: true })).toBe(written)
+    expect(readCount).toBe(1)
   })
 })
 
@@ -337,6 +380,15 @@ describe('mutations', () => {
     stubFetch({ body: { ok: true, route: 'ofox', entries: [] } })
     await httpKeyManagerClient.setEnabled('ofox', 'A', true)
     expect(bodyOf()).toEqual({ op: 'enable', ref: 'A', enabled: true })
+  })
+
+  it('POSTs the probe operation with no other field, and passes the run flag through', async () => {
+    stubFetch({ body: { ok: true, route: 'ofox', entries: [], probing: true } })
+    const answer = await httpKeyManagerClient.probe('ofox')
+    expect(bodyOf()).toEqual({ op: 'probe' })
+    expect(answer.ok).toBe(true)
+    if (!answer.ok) return
+    expect(answer.probing).toBe(true)
   })
 
   it('POSTs the endpoint pair with unset addresses folded to empty strings', async () => {

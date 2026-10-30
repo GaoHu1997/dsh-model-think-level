@@ -1696,6 +1696,7 @@ export function inferProtocol(route: RouteFacts): string {
  * the wire as output_config.effort (see {@link KnowledgeEntry.anthropicAdaptive}).
  */
 const COMPAT_CAPABLE_PROTOCOL = 'openai-completions'
+const RESPONSES_PROTOCOL = 'openai-responses'
 const ANTHROPIC_PROTOCOL = 'anthropic-messages'
 
 /** Whether a baseURL names a self-hosted endpoint (loopback, private LAN, .local, custom port). */
@@ -1740,6 +1741,60 @@ export function sanitizeCompatForProtocol(compat: CompatSuggestion, api: string)
   if (norm !== COMPAT_CAPABLE_PROTOCOL) return undefined
   delete copy['forceAdaptiveThinking']
   return Object.keys(copy).length === 0 ? undefined : (copy as CompatSuggestion)
+}
+
+/**
+ * Compat switches the openai-completions gate offers and NO sibling wire
+ * protocol takes (llm-pi-ai COMPLETIONS_COMPAT_GATE vs RESPONSES_COMPAT_GATE
+ * and the anthropic gate). These are exactly the keys this plugin's knowledge
+ * base and editors write, so a route switched off openai-completions leaves
+ * them behind on its models -- and the kernel then refuses every model that
+ * still carries one ("sets compat ..., but its api is ..., which does not
+ * take it"), dropping it from the served catalog.
+ */
+export const COMPLETIONS_ONLY_COMPAT: readonly string[] = [
+  'supportsReasoningEffort',
+  'thinkingFormat',
+  'thinkingTokenBudgetField',
+  'supportsThinkingTokenBudget',
+  'vllmPriority',
+]
+
+/** The anthropic-messages gate's exclusive switch (see sanitizeCompatForProtocol). */
+export const ANTHROPIC_ONLY_COMPAT: readonly string[] = ['forceAdaptiveThinking']
+
+/**
+ * Drop the compat switches one STORED block carries that its route's wire
+ * protocol does not take -- the repair for a protocol switched after the
+ * switches were written: openai-completions → openai-responses leaves
+ * `supportsReasoningEffort` behind, and the kernel then refuses the model at
+ * catalog resolution. Returns the cleaned copy, or undefined when there is
+ * nothing to drop (the common case, so a caller never writes speculatively).
+ *
+ * Deliberately a denylist of the keys this plugin writes, not an allowlist of
+ * each gate: a hand-tuned key this plugin does not know stays exactly as
+ * stored -- the same courtesy {@link sanitizeCompatForProtocol} extends to
+ * suggestions. A protocol this module does not know strips nothing.
+ */
+export function stripForeignCompat(
+  compat: Record<string, unknown>,
+  api: string,
+): Record<string, unknown> | undefined {
+  const norm = normalize(api)
+  let foreign: readonly string[]
+  if (norm === COMPAT_CAPABLE_PROTOCOL) foreign = ANTHROPIC_ONLY_COMPAT
+  else if (norm === RESPONSES_PROTOCOL) foreign = [...COMPLETIONS_ONLY_COMPAT, ...ANTHROPIC_ONLY_COMPAT]
+  else if (norm === ANTHROPIC_PROTOCOL) foreign = COMPLETIONS_ONLY_COMPAT
+  else return undefined
+  let stripped = false
+  const copy: Record<string, unknown> = { ...compat }
+  for (const key of foreign) {
+    if (key in copy) {
+      delete copy[key]
+      stripped = true
+    }
+  }
+  return stripped ? copy : undefined
 }
 
 /** Gate a compat block against the route's real protocol. */

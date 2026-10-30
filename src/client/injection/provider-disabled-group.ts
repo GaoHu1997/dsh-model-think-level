@@ -82,15 +82,17 @@ export function createProviderDisabledGroupState(): ProviderDisabledGroupState {
  * Idempotent: a row already folded stays folded, and the control is only ever
  * written when a value genuinely changed, so a scan never mutates the page on
  * behalf of a state that is already on it.
+ * @param list - the provider list already resolved by the caller's scan (see
+ *   `reconcileProviderOrder`); re-deriving it here costs a document-wide walk
+ *   per pass, and one burst runs several passes.
  */
 export function reconcileProviderDisabledGroup(
   root: HTMLElement,
   deps: ProviderDisabledGroupDeps,
   state: ProviderDisabledGroupState,
+  list: HTMLElement | undefined = rowsListOf(root),
 ): void {
-  if (!root.isConnected) return
-  const list = rowsListOf(root)
-  if (list === undefined) return
+  if (!root.isConnected || list === undefined) return
   const rows = namedRows(list, deps.labels())
   const folded = rows.filter(entry => !entry.enabled).length
   const seat = groupSeatOf(list)

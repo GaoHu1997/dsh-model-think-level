@@ -183,10 +183,11 @@ export function reconcileModelOrder(
   root: HTMLElement,
   deps: ModelOrderDeps,
   state: ModelOrderState,
+  lists: readonly HTMLElement[] = modelListsOf(root),
 ): void {
   if (!root.isConnected) return
   const labels = deps.labels()
-  for (const list of modelListsOf(root)) {
+  for (const list of lists) {
     if (providerOfList(list, deps) === undefined) continue
     // Name the rows before the engine looks at them: a row with a blank id input
     // has no name, gets no grip, and is never moved.

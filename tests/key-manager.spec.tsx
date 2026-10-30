@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { KeyManager, type KeyManagerProps } from '../src/client/KeyManager.js'
 import type { KeyAnswer, KeyManagerClient, KeyRow, KeyState } from '../src/client/key-manager-client.js'
-import { SETTINGS_CHANGED_EVENT } from '../src/client/events.js'
+import { ENDPOINTS_CHANGED_EVENT, SETTINGS_CHANGED_EVENT } from '../src/client/events.js'
 import { mountReact, unmountReact, type ForeignMount } from '../src/client/injection/mount.js'
 
 /** The English copy the component is handed, keyed as the locales are. */
@@ -47,7 +47,12 @@ const COPY: Record<string, string> = {
   keysScopeSaved: 'Models saved.',
   keysScopePlaceholder: 'Model ids, comma separated',
   keysScopeHint: 'Only the ticked models use this key.',
-  keysScopeAutoHint: 'This scope was ticked by the post-save probe; saving an edit here claims it by hand.',
+  keysScopeAutoHint: 'This scope was ticked by the probe; saving an edit here claims it by hand.',
+  keysProbe: 'Auto-probe',
+  keysProbing: 'Probing…',
+  keysProbeHint: 'Ask every key what it actually serves.',
+  keysProbeSingle: 'One key has nothing to divide.',
+  keysProbeDone: 'Probe finished.',
   keysScopeEmpty: 'No models discovered yet.',
   keysDiscover: 'Detect models',
   keysDiscoverHint: 'Probe each key for the models it can reach.',
@@ -105,15 +110,22 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
     setEnabled: async () => state(),
     setProtocol: async () => state(),
     setEndpoints: async () => state(),
+    probe: async () => state(),
     reveal: async () => undefined,
     ...script,
   }
   const client: KeyManagerClient = {
     cached: route => base.cached?.(route),
-    list: (route) => {
-      calls.push({ op: 'list', args: [route] })
-      return base.list(route)
+    list: (route, options) => {
+      calls.push({ op: 'list', args: options === undefined ? [route] : [route, options] })
+      return base.list(route, options)
     },
+    ...(base.endpoints === undefined ? {} : {
+      endpoints: (route: string) => {
+        calls.push({ op: 'endpoints', args: [route] })
+        return base.endpoints!(route)
+      },
+    }),
     add: (route, value, alias) => {
       calls.push({ op: 'add', args: [route, value, alias] })
       return base.add(route, value, alias)
@@ -145,6 +157,10 @@ function recorder(script: Partial<KeyManagerClient> = {}): {
     setEndpoints: (route, openai, anthropic) => {
       calls.push({ op: 'setEndpoints', args: [route, openai, anthropic] })
       return base.setEndpoints(route, openai, anthropic)
+    },
+    probe: (route) => {
+      calls.push({ op: 'probe', args: [route] })
+      return base.probe(route)
     },
     reveal: (route, ref) => {
       calls.push({ op: 'reveal', args: [route, ref] })
@@ -433,17 +449,82 @@ describe('the scope chips', () => {
   })
 })
 
-describe('the probe follow-up', () => {
-  it('shows nothing while the host probes; the checked chips are the only trace', async () => {
+describe('the probe button', () => {
+  it('stands down for a single-key route and asks the host for a multi-key one', async () => {
+    const pair = [row({ ref: 'A', masked: 'sk-a...a1' }), row({ ref: 'B', masked: 'sk-b...b2' })]
+    const { client, calls } = recorder({
+      list: async () => state({ entries: pair }),
+      probe: async () => state({ probing: true, entries: pair }),
+    })
+    const panel = mount({ client })
+    await flush()
+    expect(buttonByText(panel.root, COPY.keysProbe).disabled).toBe(false)
+
+    const single = recorder({
+      list: async () => state({ entries: [row({ ref: 'A', masked: 'sk-a...a1' })] }),
+    })
+    const lone = mount({ client: single.client })
+    await flush()
+    const loneButton = buttonByText(lone.root, COPY.keysProbe)
+    expect(loneButton.disabled).toBe(true)
+    expect(loneButton.getAttribute('title')).toBe(COPY.keysProbeSingle)
+
+    buttonByText(panel.root, COPY.keysProbe).click()
+    await flush()
+    // The press reached the host as the probe operation, and the run's flag
+    // turned the button into its own progress line while the host answers.
+    expect(calls.some(call => call.op === 'probe')).toBe(true)
+    expect(buttonByText(panel.root, COPY.keysProbing)).toBeDefined()
+  })
+
+  it('does not offer the probe on a draft list', async () => {
+    const panel = mount({ draft: true })
+    await flush()
+    expect(panel.root.querySelector('.bre-keys-probe')).toBeNull()
+  })
+
+  it('says the probe is done once the host stops reporting it', async () => {
     vi.useFakeTimers()
     try {
       const probing = state({
         probing: true,
-        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
+        entries: [row({ ref: 'A', masked: 'sk-a...a1' }), row({ ref: 'B', masked: 'sk-b...b2' })],
+      })
+      const settled = state({
+        entries: [row({ ref: 'A', masked: 'sk-a...a1' }), row({ ref: 'B', masked: 'sk-b...b2' })],
+      })
+      let round = 0
+      const { client } = recorder({ list: async () => (round++ < 2 ? probing : settled) })
+      const panel = mount({ client })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(panel.root.textContent).not.toContain(COPY.keysProbeDone)
+
+      // The press returns the run as queued; the poll follows until the host
+      // stops reporting it, and the one completion line lands then.
+      await vi.advanceTimersByTimeAsync(2_000)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(panel.root.textContent).not.toContain(COPY.keysProbeDone)
+      await vi.advanceTimersByTimeAsync(2_000)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(panel.root.textContent).toContain(COPY.keysProbeDone)
+      expect(buttonByText(panel.root, COPY.keysProbe).disabled).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('the probe follow-up', () => {
+  it('shows nothing but the button while the host probes; the checked chips are the only trace', async () => {
+    vi.useFakeTimers()
+    try {
+      const probing = state({
+        probing: true,
+        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' }), row({ ref: 'B', masked: 'sk-b...b2' })],
         models: ['glm-4-air'],
       })
       const settled = state({
-        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1', models: ['glm-4-air'], auto: true })],
+        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1', models: ['glm-4-air'], auto: true }), row({ ref: 'B', masked: 'sk-b...b2' })],
         models: ['glm-4-air'],
       })
       // The probe takes two rounds to finish: the panel must keep following
@@ -453,8 +534,8 @@ describe('the probe follow-up', () => {
       const panel = mount({ client })
       await vi.advanceTimersByTimeAsync(0)
 
-      // The probe is deliberately invisible: no progress line, no status, no
-      // busy state — the rows read exactly as they did before it started.
+      // No progress line beyond the button's own label, and no busy state —
+      // the rows read exactly as they did before it started.
       expect(panel.root.querySelector('.bre-keys-probing')).toBeNull()
       expect(panel.root.textContent).not.toContain(COPY.keysScopeAutoHint)
       await vi.advanceTimersByTimeAsync(2_000)
@@ -472,7 +553,7 @@ describe('the probe follow-up', () => {
     }
   })
 
-  it('re-reads when a save lands and silently lands the probe’s assignments', async () => {
+  it('re-reads when a save lands and follows another tab\'s probe from there', async () => {
     vi.useFakeTimers()
     try {
       const before = state({
@@ -505,6 +586,9 @@ describe('the probe follow-up', () => {
       await vi.advanceTimersByTimeAsync(2_000)
       await vi.advanceTimersByTimeAsync(0)
       expect(calls.filter((call) => call.op === 'list')).toHaveLength(3)
+      expect(calls.filter(call => call.op === 'list').map(call => call.args)).toEqual([
+        ['ofox', { preferCache: true }], ['ofox'], ['ofox'],
+      ])
       expect(buttonByText(panel.root, '1 models')).toBeDefined()
     } finally {
       vi.useRealTimers()
@@ -1360,5 +1444,145 @@ describe('the draft list (the create card)', () => {
     await flush()
     expect(formRowOf(panel.root)).toBeNull()
     expect(panel.root.querySelector('.bre-keys-add-row')).not.toBeNull()
+  })
+})
+
+describe('endpoint-only event updates', () => {
+  const changedEndpoints = { openai: 'https://mock.example/v1', anthropic: null }
+  const savedList = (alias: string): KeyState => state({
+    entries: [row({ ref: 'kept', alias, models: ['model-a', 'model-b'] })],
+    models: ['model-a', 'model-b'],
+  })
+  const changed = (detail: unknown): void => {
+    document.dispatchEvent(new CustomEvent(ENDPOINTS_CHANGED_EVENT, { detail }))
+  }
+  const offers = async (panel: Panel, alias: string): Promise<string[]> => {
+    const picker = rowOf(panel.root, alias).querySelector<HTMLButtonElement>('.bre-keys-protocol')
+    if (picker === null) throw new Error('no protocol picker')
+    picker.click()
+    await flush()
+    const values = menuValues()
+    picker.click()
+    await flush()
+    return values
+  }
+
+  it.each(['payload', 'endpoints', 'legacy-list'] as const)(
+    '%s updates only addresses and preserves saved rows, notice, models and drafts', async branch => {
+      let reads = 0
+      const { client, calls } = recorder({
+        list: async () => ++reads === 1 ? savedList('Original') : state({
+          entries: [row({ ref: 'stale', alias: 'Stale row' })],
+          models: ['stale-model'],
+          endpoints: changedEndpoints,
+        }),
+        rename: async (_route, _ref, alias) => savedList(alias ?? ''),
+        ...(branch === 'legacy-list' ? {} : {
+          endpoints: async () => ({ ok: true, endpoints: changedEndpoints }),
+        }),
+      })
+      const panel = mount({ client })
+      await flush()
+      expect(calls.filter(call => call.op === 'list')).toEqual([
+        { op: 'list', args: ['ofox', { preferCache: true }] },
+      ])
+      buttonByText(rowOf(panel.root, 'Original'), 'Label').click()
+      await flush()
+      type(inputsOf(panel.root)[0]!, 'Saved')
+      await flush()
+      buttonByText(formRowOf(panel.root)!, 'Save').click()
+      await flush()
+      expect(panel.root.querySelector('.bre-status')?.textContent).toBe('Label saved.')
+
+      buttonByText(rowOf(panel.root, 'Saved'), '2 models').click()
+      await flush()
+      buttonByText(formRowOf(panel.root)!, 'model-a').click()
+      await flush()
+      const detail = branch === 'payload'
+        ? { route: 'ofox', openai: changedEndpoints.openai, anthropic: '' }
+        : { route: 'ofox' }
+      changed(detail)
+      await flush()
+      expect(panel.root.querySelector('.bre-status')?.textContent).toBe('Label saved.')
+      expect(rowOf(panel.root, 'Saved')).toBeDefined()
+      expect(panel.root.textContent).not.toContain('Stale row')
+      expect(chipsOf(panel.root).map(chip => [chip.textContent, chip.getAttribute('aria-pressed')]))
+        .toEqual([['model-a', 'false'], ['model-b', 'true']])
+      expect(await offers(panel, 'Saved')).toEqual(['', 'openai-completions', 'openai-responses'])
+
+      // Name and secret drafts also remain untouched, even for the old full-list fallback.
+      buttonByText(rowOf(panel.root, 'Saved'), 'Label').click()
+      await flush()
+      type(inputsOf(panel.root)[0]!, 'Unsaved name')
+      changed(detail)
+      await flush()
+      expect(inputsOf(panel.root)[0]?.value).toBe('Unsaved name')
+      buttonByText(rowOf(panel.root, 'Saved'), 'Edit').click()
+      await flush()
+      type(inputsOf(panel.root)[0]!, 'fake-unsaved-value')
+      changed(detail)
+      await flush()
+      expect(inputsOf(panel.root)[0]?.value).toBe('fake-unsaved-value')
+      expect(panel.root.querySelector('.bre-status')?.textContent).toBe('Label saved.')
+      expect(calls.filter(call => call.op === 'list')).toHaveLength(branch === 'legacy-list' ? 4 : 1)
+      expect(calls.filter(call => call.op === 'endpoints')).toHaveLength(branch === 'endpoints' ? 3 : 0)
+    },
+  )
+
+  it('ignores other routes and an older address read cannot replace a newer payload', async () => {
+    let finish!: (answer: { ok: boolean; endpoints: KeyState['endpoints'] }) => void
+    const { client, calls } = recorder({
+      list: async () => savedList('Kept'),
+      endpoints: () => new Promise(resolve => { finish = resolve }),
+    })
+    const panel = mount({ client })
+    await flush()
+    changed({ route: 'other', openai: 'https://wrong.example', anthropic: '' })
+    changed({ route: 'other' })
+    await flush()
+    expect(calls.filter(call => call.op === 'endpoints')).toHaveLength(0)
+    expect(await offers(panel, 'Kept')).toEqual([''])
+    changed({ route: 'ofox' })
+    changed({ route: 'ofox', openai: '', anthropic: 'https://mock-anthropic.example' })
+    finish({ ok: true, endpoints: changedEndpoints })
+    await flush()
+    expect(await offers(panel, 'Kept')).toEqual(['', 'anthropic-messages'])
+    expect(calls.filter(call => call.op === 'list')).toHaveLength(1)
+  })
+
+  it.each(['endpoints', 'legacy-list'] as const)('%s read is ignored after a route switch or unmount', async branch => {
+    let finish!: (answer: KeyAnswer) => void
+    let defer = false
+    const { client, calls } = recorder({
+      list: (route) => defer && branch === 'legacy-list'
+        ? new Promise(resolve => { finish = resolve })
+        : Promise.resolve(state({ route, entries: [row({ ref: route, alias: route })] })),
+      ...(branch === 'legacy-list' ? {} : {
+        endpoints: () => new Promise<KeyAnswer>(resolve => { finish = resolve }),
+      }),
+    })
+    const panel = mount({ client })
+    await flush()
+    defer = true
+    changed({ route: 'ofox' })
+    defer = false
+    panel.mount.root.render(createElement(KeyManager, { route: 'new-route', t, client }))
+    await flush()
+    finish(state({ endpoints: changedEndpoints }))
+    await flush()
+    expect(await offers(panel, 'new-route')).toEqual([''])
+    expect(panel.root.textContent).not.toContain('ofox')
+
+    defer = true
+    changed({ route: 'new-route' })
+    unmountReact(panel.mount)
+    mounted = undefined
+    finish(state({ endpoints: changedEndpoints }))
+    await flush()
+    const count = calls.length
+    changed({ route: 'new-route' })
+    await flush()
+    expect(calls).toHaveLength(count)
+    expect(panel.root.isConnected).toBe(false)
   })
 })

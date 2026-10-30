@@ -202,15 +202,18 @@ export function applyRowOrder(list: HTMLElement, ids: readonly string[]): void {
  * open, so this cannot ride along with it) and is idempotent by DOM presence —
  * the same guard the editor injector uses, which keeps the insertion from
  * re-triggering the scan that found it.
+ * @param list - the provider list already resolved by the caller's scan. Every
+ *   pass of one `reconcileDom` shares one `rowsListOf` answer: the fallback
+ *   re-derivation costs a full-document substring-class walk, and seven passes
+ *   paying it separately is what showed up as tens of walks per burst.
  */
 export function reconcileProviderOrder(
   root: HTMLElement,
   deps: ProviderOrderDeps,
   state: ProviderOrderState,
+  list: HTMLElement | undefined = rowsListOf(root),
 ): void {
-  if (!root.isConnected) return
-  const list = rowsListOf(root)
-  if (list === undefined) return
+  if (!root.isConnected || list === undefined) return
   const labels = deps.labels()
   // Name the rows before the engine looks at them: a row without a stamp has no
   // id, and a row the engine cannot name gets no grip and is never moved.

@@ -56,14 +56,20 @@ function deps(client: KeyManagerClient): KeyPrefetchDeps {
   return { labels, client }
 }
 
+/** Flush the background start, answer and queue-slot release microtasks. */
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+}
+
 describe('the key-list prefetch', () => {
-  it('asks once per provider per page opening, and again when the page reopens', () => {
+  it('asks once per provider per page opening, and again when the page reopens', async () => {
     const { client, asked } = recorder()
     const prefetch = createKeyPrefetchState()
     const depsWithClient = deps(client)
     const root = listRoot(['a', 'b'])
 
     reconcileKeyPrefetch(root, depsWithClient, prefetch)
+    await settle()
     expect(asked.slice().sort()).toEqual(['a', 'b'])
 
     // A settled page rescans on every mutation burst: no route is asked twice
@@ -76,7 +82,111 @@ describe('the key-list prefetch', () => {
     // opening, and each provider is asked once in it.
     reconcileKeyPrefetch(listRoot([]), depsWithClient, prefetch)
     reconcileKeyPrefetch(root, depsWithClient, prefetch)
+    await settle()
     expect(asked.slice().sort()).toEqual(['a', 'a', 'b', 'b'])
+  })
+
+  it('caps background work at two and clears pending work when the page leaves', async () => {
+    const asked: string[] = []
+    const finish = new Map<string, (answer: KeyAnswer) => void>()
+    let active = 0
+    let peak = 0
+    const client = { list: (route: string, options: unknown) => {
+      expect(options).toEqual({ preferCache: true })
+      asked.push(route)
+      active += 1
+      peak = Math.max(peak, active)
+      return new Promise<KeyAnswer>(resolve => {
+        finish.set(route, answer => { active -= 1; resolve(answer) })
+      })
+    } } as unknown as KeyManagerClient
+    const prefetch = createKeyPrefetchState()
+    const root = listRoot(['a', 'b', 'c', 'd', 'e'])
+    reconcileKeyPrefetch(root, deps(client), prefetch)
+    await settle()
+    expect(asked).toEqual(['a', 'b'])
+    expect(prefetch.pending.map(item => item.route)).toEqual(['c', 'd', 'e'])
+    finish.get('a')!(state('a'))
+    await settle()
+    expect(asked).toEqual(['a', 'b', 'c'])
+    expect(peak).toBe(2)
+    reconcileKeyPrefetch(listRoot([]), deps(client), prefetch)
+    expect(prefetch.pending).toHaveLength(0)
+    finish.get('b')!(state('b'))
+    finish.get('c')!(state('c'))
+    await settle()
+    expect(asked).toEqual(['a', 'b', 'c'])
+    expect(prefetch.running.size).toBe(0)
+  })
+
+  it('retains running slots across reopen instead of starting old two plus new two', async () => {
+    const asked: string[] = []
+    const finish = new Map<string, (answer: KeyAnswer) => void>()
+    const client = { list: (route: string) => {
+      asked.push(route)
+      return new Promise<KeyAnswer>(resolve => { finish.set(route, resolve) })
+    } } as unknown as KeyManagerClient
+    const prefetch = createKeyPrefetchState()
+    reconcileKeyPrefetch(listRoot(['a', 'b', 'old-pending']), deps(client), prefetch)
+    await settle()
+    reconcileKeyPrefetch(listRoot([]), deps(client), prefetch)
+    reconcileKeyPrefetch(listRoot(['a', 'b', 'new-c', 'new-d']), deps(client), prefetch)
+    await settle()
+    expect(asked).toEqual(['a', 'b'])
+    expect(prefetch.running.size).toBe(2)
+    expect(prefetch.pending.map(item => item.route)).toEqual(['new-c', 'new-d'])
+    finish.get('a')!(state('a'))
+    await settle()
+    expect(asked).toEqual(['a', 'b', 'new-c'])
+    expect(prefetch.running.size).toBe(2)
+    finish.get('b')!(state('b'))
+    await settle()
+    expect(asked).toEqual(['a', 'b', 'new-c', 'new-d'])
+    finish.get('new-c')!(state('new-c'))
+    finish.get('new-d')!(state('new-d'))
+    await settle()
+    expect(prefetch.running.size).toBe(0)
+  })
+
+  it('releases both synchronous throws and rejected reads so queued routes still warm', async () => {
+    const asked: string[] = []
+    const client = { list: (route: string) => {
+      asked.push(route)
+      if (route === 'throw') throw new Error('mock synchronous throw')
+      if (route === 'reject') return Promise.reject(new Error('mock rejection'))
+      return Promise.resolve(state(route))
+    } } as unknown as KeyManagerClient
+    const prefetch = createKeyPrefetchState()
+    reconcileKeyPrefetch(listRoot(['throw', 'reject', 'c', 'd']), deps(client), prefetch)
+    await settle()
+    await settle()
+    expect(asked).toEqual(['throw', 'reject', 'c', 'd'])
+    expect(prefetch.running.size).toBe(0)
+    expect(prefetch.pending).toHaveLength(0)
+  })
+
+  it('does not queue a foreground editor list behind the two warm-up slots', async () => {
+    const asked: string[] = []
+    const finish = new Map<string, (answer: KeyAnswer) => void>()
+    const client = { list: (route: string) => {
+      asked.push(route)
+      return new Promise<KeyAnswer>(resolve => { finish.set(route, resolve) })
+    } } as unknown as KeyManagerClient
+    const prefetch = createKeyPrefetchState()
+    reconcileKeyPrefetch(listRoot(['a', 'b', 'edit-me']), deps(client), prefetch)
+    await settle()
+    expect(asked).toEqual(['a', 'b'])
+    // KeyManager calls its transport directly, with preferCache, not this queue.
+    const editing = client.list('edit-me', { preferCache: true })
+    expect(asked).toEqual(['a', 'b', 'edit-me'])
+    expect(prefetch.running.size).toBe(2)
+    finish.get('edit-me')!(state('edit-me'))
+    await editing
+    reconcileKeyPrefetch(listRoot([]), deps(client), prefetch)
+    finish.get('a')!(state('a'))
+    finish.get('b')!(state('b'))
+    await settle()
+    expect(prefetch.running.size).toBe(0)
   })
 
   it('asks nothing while the Models page is closed', () => {

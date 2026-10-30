@@ -48,11 +48,16 @@ export interface ProviderDeleteDeps {
  * Give every provider row the delete seat the host left out. Idempotent: a row
  * that already has one is only relabelled, and a row whose provider became
  * removable hands the seat back to the host's own button.
+ * @param list - the provider list already resolved by the caller's scan (see
+ *   `reconcileProviderOrder`); re-deriving it here costs a document-wide walk
+ *   per pass, and one burst runs several passes.
  */
-export function reconcileProviderDeleteSeat(root: HTMLElement, deps: ProviderDeleteDeps): void {
-  if (!root.isConnected) return
-  const list = rowsListOf(root)
-  if (list === undefined) return
+export function reconcileProviderDeleteSeat(
+  root: HTMLElement,
+  deps: ProviderDeleteDeps,
+  list: HTMLElement | undefined = rowsListOf(root),
+): void {
+  if (!root.isConnected || list === undefined) return
   const labels = deps.labels()
   const label = officialDeleteLabel(list) ?? deps.t('providerRemoveDisabled')
   for (const child of Array.from(list.children)) {

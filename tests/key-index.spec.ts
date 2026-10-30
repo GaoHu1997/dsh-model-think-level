@@ -29,7 +29,9 @@ import {
   withRouteBalance,
   withRouteEndpoints,
   withoutKeyEntry,
+  withoutRoute,
   writeKeyIndex,
+  type KeyIndexDocument,
 } from '../src/key-index.js'
 
 let home = ''
@@ -355,6 +357,32 @@ describe('withoutKeyEntry', () => {
     const document = withoutKeyEntry(withKeyEntry(emptyKeyIndex(), 'ofox', 'A'), 'ofox', 'A')
     expect(document.providers['ofox']).toBeUndefined()
     expect(hasKeyEntry(document, 'ofox', 'A')).toBe(false)
+  })
+})
+
+describe('withoutRoute', () => {
+  it('drops the route everywhere: keys, extra endpoints and the balance URL', () => {
+    const document: KeyIndexDocument = {
+      version: 1,
+      providers: {
+        ofox: [{ ref: 'OFOX_API_KEY' }, { ref: 'OFOX_API_KEY_2' }],
+        wb: [{ ref: 'WB_API_KEY' }],
+      },
+      endpoints: { ofox: { openai: 'https://ofox.example.com/v1' }, wb: { anthropic: 'https://wb.example.com/v1' } },
+      balances: { ofox: 'https://ofox.example.com/balance' },
+    }
+    const swept = withoutRoute(document, 'ofox')
+    expect(swept.providers).toEqual({ wb: [{ ref: 'WB_API_KEY' }] })
+    expect(swept.endpoints).toEqual({ wb: { anthropic: 'https://wb.example.com/v1' } })
+    expect(swept.balances).toBeUndefined()
+    // The swept route comes back from nothing: a re-added provider starts clean.
+    expect(withoutRoute(swept, 'wb').providers).toEqual({})
+  })
+
+  it('leaves the endpoint and balance maps off a document that carries none', () => {
+    const document = withKeyEntry(withRouteEndpoints(emptyKeyIndex(), 'ofox', undefined), 'ofox', 'A')
+    const swept = withoutRoute(document, 'ofox')
+    expect(swept).toEqual({ version: 1, providers: {} })
   })
 })
 

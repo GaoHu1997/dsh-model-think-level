@@ -437,6 +437,38 @@ describe('client apply()', () => {
     }
   })
 
+  it('coalesces key-panel broadcasts for settings notification bursts', async () => {
+    const { SETTINGS_CHANGED_EVENT } = await import('../src/client/events.js')
+    const { apply } = await import('../src/client/index.js')
+    const h = makeCtx(fakeApi(() => Promise.resolve(makeJoin(structuredClone(JOIN_FIXTURE)))))
+    const changed = vi.fn()
+    document.addEventListener(SETTINGS_CHANGED_EVENT, changed)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      apply(h.ctx as unknown as Ctx)
+      for (let i = 0; i < 100; i++) h.emitRemote('settings/document-updated', PI_AI_NS)
+      expect(changed).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(changed).toHaveBeenCalledTimes(1)
+      for (let i = 0; i < 100; i++) h.emitRemote('settings/document-updated', PI_AI_NS)
+      await vi.advanceTimersByTimeAsync(198)
+      expect(changed).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(changed).toHaveBeenCalledTimes(2)
+      h.emitRemote('settings/document-updated', 'unrelated')
+      await vi.advanceTimersByTimeAsync(200)
+      expect(changed).toHaveBeenCalledTimes(2)
+      h.emitRemote('settings/document-updated', PI_AI_NS)
+      h.disposeAll()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(changed).toHaveBeenCalledTimes(2)
+    } finally {
+      h.disposeAll()
+      document.removeEventListener(SETTINGS_CHANGED_EVENT, changed)
+      vi.useRealTimers()
+    }
+  })
+
   it('refreshes on connection/reset too', async () => {
     const providers: Record<string, unknown> = structuredClone(JOIN_FIXTURE)
     let join = makeJoin(providers)

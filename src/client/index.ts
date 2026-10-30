@@ -14,6 +14,7 @@
  *   slider-toggle-slot.ts   the Models-page footer toggle
  *   provider-order-drag.ts  the Models-page provider-row drag handles (order)
  *   provider-order.ts       the stored provider order (settings page + composer)
+ *   order-sync.ts           the orderings mirrored into ui-order.json (sync)
  *   provider-toggle.ts      the Models-page per-provider enable switch
  *   provider-enabled.ts     the stored disabled providers (settings page + composer)
  *   autofill-run.ts         the running auto-fill complement (issue #7)
@@ -42,7 +43,7 @@
  */
 
 import type {
-  ClientContext, ConfigFormsLike, RemoteApi, SettingsScopeBinderLike, SettingsScopeReadLike,
+  ClientContext, ConfigFormsLike, RemoteApi, SettingsJoin, SettingsScopeBinderLike, SettingsScopeReadLike,
 } from './types.js'
 // Type-only: pulls the shell's locale/remote context merges into this program.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -72,12 +73,14 @@ import {
 import {
   MODEL_ORDER_KEY, parseModelOrders, subscribeModelOrders, syncModelOrders,
 } from './model-order.js'
+import { flushOrderSync, startOrderSync } from './order-sync.js'
 import { STYLES } from './styles.ts'
 import { SETTINGS_CHANGED_EVENT } from './events.js'
 import { createComposerMenu } from './injection/composer-menu.js'
 import { createConfiguredInputs } from './configured-inputs.js'
 import { createConfiguredEfforts } from './injection/configured-efforts.js'
 import { createIdleAutofill } from './injection/autofill-run.js'
+import { createCompatGuard } from './injection/compat-guard.js'
 import { createModelsPage } from './injection/models-page.js'
 import { teardownFingerprintRunners } from './fingerprint-runner.js'
 import { createSessionDirectoryTracker } from './injection/session-directory.js'
@@ -202,13 +205,23 @@ export function apply(ctx: ClientContext): void {
     configuredInputs,
   })
   // The running auto-fill complement (issue #7): the host fills once at boot,
-  // everything a session adds afterwards is filled on the idle pass.
+  // everything a session adds afterwards is filled on the idle pass. The
+  // compat guard rides the same pass and runs FIRST: its common case finds
+  // nothing to clean and costs no write, and when it does clean (rare -- right
+  // after a protocol switch) the autofill's seeded read may go stale, which
+  // the next idle pass repairs for free.
   const autofill = createIdleAutofill({ api: settingsApi })
+  const compatGuard = createCompatGuard({ api: settingsApi })
   // The config pane is mounted at most once at a time: reopening replaces the
   // one that is up (the Models-page button can be clicked twice fast).
   let configPane: { close(): void } | undefined
   const modelsPage = createModelsPage({
-    ctx, api: settingsApi, t, onIdle: autofill.run, refreshed,
+    ctx, api: settingsApi, t,
+    onIdle: (join?: SettingsJoin) => {
+      compatGuard.run(join)
+      autofill.run(join)
+    },
+    refreshed,
     configSeat: {
       t,
       onOpen: () => {
@@ -259,11 +272,20 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
     const onPageHide = (): void => {
       modelsPage.flushOnUnload()
+      // A drag inside the push debounce window lands now or not until the
+      // next boot; the boot arbitrate would repair it, but the file might
+      // already have travelled.
+      flushOrderSync()
       teardownFingerprintRunners()
     }
     window.addEventListener('pagehide', onPageHide)
     return () => { window.removeEventListener('pagehide', onPageHide) }
   }, 'dsh-model-think-level: ledger flush on unload')
+
+  // Mirror the provider/model orderings into the host's ui-order.json: boot
+  // pulls and arbitrates (last writer wins on the savedAt stamp), every drag
+  // pushes debounced. The disposer stops the timers and the subscriptions.
+  ctx.effect(() => startOrderSync(), 'dsh-model-think-level: order file sync')
 
   // Refresh the injection when the settings document changes (an apply from
   // either the official page or this plugin re-renders the rows). The folded
@@ -272,7 +294,14 @@ export function apply(ctx: ClientContext): void {
   // providers as of the very first scan, making Apply conflict forever until
   // a full page reload.
   ctx.effect(() => {
+    let keysInvalidated = false
     const refresh = (): void => {
+      if (keysInvalidated) {
+        keysInvalidated = false
+        // Share the refresh scheduler's cap instead of waking every key panel
+        // once per notification in a settings-update burst.
+        document.dispatchEvent(new CustomEvent(SETTINGS_CHANGED_EVENT, { detail: { ns: PI_AI_NS } }))
+      }
       modelsPage.state.describePromise = undefined
       // The configured-pick cache rides the same invalidations: a document
       // update (or a fresh connection) must not leave stale picks behind.
@@ -290,11 +319,8 @@ export function apply(ctx: ClientContext): void {
     const disposers = [
       ctx.remote.$on('settings/document-updated', (ns: unknown) => {
         if (ns === PI_AI_NS) {
+          keysInvalidated = true
           scheduler.schedule()
-          // The key panels are mounts of their own: tell them the document
-          // moved, so a save re-reads the list (and follows the host's silent
-          // post-save scope probe) without waiting for a remount.
-          document.dispatchEvent(new CustomEvent(SETTINGS_CHANGED_EVENT, { detail: { ns } }))
         }
       }),
       ctx.on('connection/reset', scheduler.schedule),

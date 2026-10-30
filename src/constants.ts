@@ -89,6 +89,23 @@ export const HEADERS_CONFIG_PATH = '/dsh-model-think-level/headers-config'
  */
 export const FINGERPRINT_PATH = '/dsh-model-think-level/fingerprint'
 
+/**
+ * Same-origin host route owning the UI-order document: the provider-row
+ * sequence and every provider's model-row sequence the user set by dragging
+ * on the official Models page. `GET` answers the stored document,
+ * `POST` folds a (whole-state) payload over it — the synced copy the browser
+ * half pulls at boot and pushes on every drag, so the orderings survive a
+ * machine switch (see {@link ORDER_FILE}).
+ */
+export const ORDER_PATH = '/dsh-model-think-level/ui-order'
+
+/**
+ * File name of the UI-order document inside the plugin's home dir. Holds no
+ * secrets — provider routes and model ids only — which is what makes it safe
+ * to carry through a sync mechanism.
+ */
+export const ORDER_FILE = 'ui-order.json'
+
 /** The settings namespace this plugin edits: pi-ai custom provider routes. */
 export const PI_AI_NS = 'llm-pi-ai'
 
@@ -165,14 +182,6 @@ export const DEFAULT_EFFORT_FIELD = 'defaultEffort'
  * {@link IMAGE_CONFIG_FILE}).
  */
 export const IMAGE_CONFIG_PATH = '/dsh-model-think-level/image-config'
-
-/**
- * Same-origin host route that runs one image generation through the shared
- * core (`src/image/generate.ts`): the explicit entry beside the native
- * `generate_image` tool and the `/生图` host command — used for scripted calls
- * and for callers that want the file paths back.
- */
-export const IMAGE_GENERATE_PATH = '/dsh-model-think-level/image-generate'
 
 /** File name of the image-generation config inside the plugin's home dir. */
 export const IMAGE_CONFIG_FILE = 'image.json'

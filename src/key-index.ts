@@ -520,3 +520,26 @@ export function withoutKeyEntry(document: KeyIndexDocument, route: string, ref: 
   else providers[route] = list
   return { version: 1, providers, ...endpointsOf(document), ...balancesOf(document) }
 }
+
+/**
+ * Drop one route entirely: its key list, its extra endpoints and its balance
+ * URL. This is what a provider's deletion from the settings document reads as
+ * — {@link withoutKeyEntry} only empties a list the user cleaned key by key,
+ * and it deliberately leaves the endpoint maps alone, so a provider removed
+ * wholesale by the host would otherwise leave its addresses and balance URL
+ * behind for ever.
+ * @param document - the current document.
+ * @param route - the provider route key.
+ */
+export function withoutRoute(document: KeyIndexDocument, route: string): KeyIndexDocument {
+  const providers: Record<string, readonly KeyIndexEntry[]> = { ...document.providers }
+  delete providers[route]
+  const endpoints = document.endpoints === undefined ? undefined : { ...document.endpoints }
+  if (endpoints !== undefined) delete endpoints[route]
+  const balances = document.balances === undefined ? undefined : { ...document.balances }
+  if (balances !== undefined) delete balances[route]
+  let next: KeyIndexDocument = { version: 1, providers }
+  if (endpoints !== undefined && Object.keys(endpoints).length > 0) next = { ...next, endpoints }
+  if (balances !== undefined && Object.keys(balances).length > 0) next = { ...next, balances }
+  return next
+}

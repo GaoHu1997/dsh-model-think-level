@@ -50,6 +50,7 @@ function stubClient(): KeyManagerClient {
     setEnabled: async () => EMPTY,
     setProtocol: async () => EMPTY,
     setEndpoints: async () => EMPTY,
+    probe: async () => EMPTY,
     reveal: async () => undefined,
   }
 }

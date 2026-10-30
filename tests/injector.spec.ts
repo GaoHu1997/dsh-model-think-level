@@ -289,6 +289,44 @@ describe('reconcile', () => {
     expect((calls[1]![1] as EditorMountProps).officialInputTypes).toBe(false)
   })
 
+  it('runs one live DOM continuation for a burst sharing a pending describe', async () => {
+    let resolve!: (value: SettingsJoin) => void
+    const read = new Promise<SettingsJoin>(done => { resolve = done })
+    const describeNamespace = vi.fn(() => read)
+    const deps = makeDeps({ describeNamespace })
+    const state = createScanState()
+    const root = buildModelsDom()
+    for (let i = 0; i < 100; i++) reconcile(root, deps, state)
+    expect(describeNamespace).toHaveBeenCalledTimes(1)
+    const query = vi.spyOn(root, 'querySelectorAll')
+    resolve(join)
+    await read
+    await Promise.resolve()
+    expect(query.mock.calls.filter(([selector]) => selector === 'button[aria-label]')).toHaveLength(1)
+    expect(deps.mount).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not repaint an invalidated late snapshot over a newer one', async () => {
+    let resolveOld!: (value: SettingsJoin) => void
+    const old = new Promise<SettingsJoin>(done => { resolveOld = done })
+    const fresh: SettingsJoin = structuredClone(join)
+    const providers = (fresh.namespace!.value as { providers: Record<string, { models: Array<Record<string, unknown>> }> }).providers
+    providers.aliyun.models[0]!['reasoningEfforts'] = { high: 'high' }
+    const describeNamespace = vi.fn().mockReturnValueOnce(old).mockResolvedValue(fresh)
+    const deps = makeDeps({ describeNamespace })
+    const state = createScanState()
+    const root = buildModelsDom()
+    reconcile(root, deps, state)
+    state.describePromise = undefined
+    await settle(() => reconcile(root, deps, state), state)
+    expect(deps.mount).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(deps.mount).mock.calls[0]![1].efforts).toEqual({ high: 'high' })
+    resolveOld(join)
+    await old
+    await Promise.resolve()
+    for (const editor of deps.editors) expect(editor.render).not.toHaveBeenCalled()
+  })
+
   it('is idempotent: a second scan does not double-mount', async () => {
     const deps = makeDeps()
     const state = createScanState()

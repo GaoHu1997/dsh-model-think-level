@@ -630,6 +630,9 @@ export function createDraftKeyClient(store: DraftKeyStore, deps: DraftKeyClientD
       return replaceAt(ref, { ...rest, ...(protocol === undefined ? {} : { protocol }) })
     },
     setEndpoints: async () => answer(),
+    // A draft has no route, so there is nothing to probe; the panel hides the
+    // button on a draft list and never asks.
+    probe: async () => answer(),
     reveal: async (_route, ref) => findDraft(ref)?.value,
   }
 }

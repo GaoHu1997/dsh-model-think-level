@@ -94,6 +94,17 @@ function headingIn(scope: Element, cards: Element): Element | null {
 }
 
 /**
+ * The settled anchor cache. `findModelsTitleRow` climbs from the cards through
+ * the ancestor scopes re-reading EVERY element per candidate copy — on a long
+ * page that is the most expensive single query the scan makes, and the scan
+ * runs on every burst. The heading does not move while the page is open, so a
+ * hit (same root, row still connected) answers without climbing; the row
+ * leaving the document — navigation away, a host re-render that replaces the
+ * heading — is the invalidation, and the next call re-derives it.
+ */
+let titleRowCache: { root: ParentNode; row: HTMLElement } | undefined
+
+/**
  * Locate the Models page's title LINE, or null. Two gates, both required:
  * 1. the current surface carries the provider-row-card family (the Models
  *    page's own anchors — a dialog or panel without them is another page);
@@ -105,6 +116,8 @@ function headingIn(scope: Element, cards: Element): Element | null {
  * it no wrapper), so the seat can append to the line's right end.
  */
 export function findModelsTitleRow(root: ParentNode): HTMLElement | null {
+  const cached = titleRowCache
+  if (cached !== undefined && cached.root === root && cached.row.isConnected) return cached.row
   // Gate 1: the Models page's row-card family is present.
   const cards = root.querySelector<HTMLElement>(CARD_SELECTOR)
   if (cards === null) return null
@@ -115,7 +128,11 @@ export function findModelsTitleRow(root: ParentNode): HTMLElement | null {
   // nav 「模型」 label out of the search.
   for (let scope = cards.parentElement; scope !== null && scope !== body; scope = scope.parentElement) {
     const heading = headingIn(scope, cards)
-    if (heading !== null) return titleRowOf(heading, scope)
+    if (heading !== null) {
+      const row = titleRowOf(heading, scope)
+      if (row !== null) titleRowCache = { root, row }
+      return row
+    }
   }
   return null
 }
@@ -272,6 +289,10 @@ export function teardownConfigButtonSeats(state: ConfigButtonSeatState): void {
     if (line !== null) releaseTitleLine(line)
     host.remove()
   }
+  // A dead fiber must not hand its anchor to the next one: the row element may
+  // survive teardown (same document, new fiber) but the seat state does not,
+  // and a stale cache would skip the re-derivation that re-examines it.
+  titleRowCache = undefined
 }
 
 /**

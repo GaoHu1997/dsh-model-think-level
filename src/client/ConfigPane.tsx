@@ -4,12 +4,10 @@
  * Models-page title-row button.
  *
  * One card today, 「生图」, per the design's card-list shape with room for
- * more: the params row, the default-model select under it, the derived
- * image-model list (per-row endpoint badge + test/probe actions), the empty
- * state with one-click marking of suspected
- * image models (written through the SAME settings channel the Models page
- * editor uses — never a raw file edit), and the built-in-tool status card
- * whose state the host reports from its live tools/attachments registration.
+ * more: the params row and the default-model select under it. The marked
+ * models surface as that select's options; marking itself lives on the Models
+ * page (展开模型行 → 输入模态 → 勾选「生图」), so the pane keeps no list,
+ * no empty state and no built-in-tool status card of its own.
  *
  * Esc / backdrop / ✕ close it; the wrapper unmounts and the page keeps
  * whatever the pane saved.
@@ -21,18 +19,15 @@ import { createElement, useCallback, useEffect, useRef, useState } from 'react'
 import type { ChangeEvent, MouseEvent as ReactMouseEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ReactNode } from 'react'
-import { inferImageGenFromName } from '../knowledge.js'
 import { canonicalSize, IMAGE_SIZE_TIERS } from '../image/sizes.js'
 import { EffortBoundary, mountReact, unmountReact } from './injection/mount.js'
 import {
   cachedImageConfigView,
-  generateImageDirect,
   readImageConfigView,
   saveImageConfig,
-  testImageEndpoint,
   type ImageConfigView,
 } from './image-config-client.js'
-import { describeNamespace, imageGenOf, providersOf, writeModelRows } from './ops.js'
+import { describeNamespace, providersOf } from './ops.js'
 import type { RemoteApi } from './types.js'
 
 /** The pane's deps: the settings write/read face and the plugin translator. */
@@ -40,20 +35,6 @@ export interface ConfigPaneProps {
   readonly api: RemoteApi
   readonly t: (key: string, params?: Record<string, unknown>) => string
   readonly onClose: () => void
-}
-
-/** One suspected image model, for the empty state's one-click marking. */
-interface SuspectModel {
-  readonly route: string
-  readonly modelId: string
-  readonly label: string
-}
-
-/** The names one endpoint status badge shows. */
-function endpointBadge(t: (key: string) => string, status: string): { className: string; text: string } {
-  if (status === 'ok') return { className: 'bre-config-badge bre-config-badge-ok', text: t('imagegenEndpointOk') }
-  if (status === 'unsupported') return { className: 'bre-config-badge bre-config-badge-bad', text: t('imagegenEndpointUnsupported') }
-  return { className: 'bre-config-badge bre-config-badge-unknown', text: t('imagegenEndpointUnverified') }
 }
 
 /** The timeout steps, in minutes: the five the pane offers. */
@@ -78,8 +59,6 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
   const [loadError, setLoadError] = useState<string | undefined>(undefined)
   const [busyId, setBusyId] = useState<string | undefined>(undefined)
   const [notice, setNotice] = useState<string | undefined>(undefined)
-  const [suspects, setSuspects] = useState<readonly SuspectModel[] | undefined>(undefined)
-  const [toolBusy, setToolBusy] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -93,8 +72,8 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
 
   // route → the provider's display name (`providers.<route>.displayName`),
   // read from the live settings document. The host already stamps it on each
-  // row as `providerLabel`; this keeps the list readable even when the running
-  // host or a stored image.json predates that field.
+  // row as `providerLabel`; this keeps the default-model menu readable even
+  // when the running host or a stored image.json predates that field.
   const [routeNames, setRouteNames] = useState<Record<string, string>>({})
   useEffect(() => {
     let alive = true
@@ -106,8 +85,8 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
       }
       if (alive) setRouteNames(names)
     }).catch(() => {
-      // Unreadable settings only cost the pretty provider name; rows fall back
-      // to `providerLabel` and then the route.
+      // Unreadable settings only cost the pretty provider name; options fall
+      // back to `providerLabel` and then the route.
     })
     return () => { alive = false }
   }, [api])
@@ -118,49 +97,6 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
       if (answer.ok) setView(answer.data)
     })
   }, [])
-
-  /** The suspected image models the empty state offers to mark. */
-  const loadSuspects = useCallback((): void => {
-    void describeNamespace(api).then(join => {
-      const namespace = join.namespace
-      const providers = providersOf(namespace)
-      const found: SuspectModel[] = []
-      for (const [route, profile] of Object.entries(providers)) {
-        const models = Array.isArray(profile['models']) ? profile['models'].filter(entry => typeof entry === 'object' && entry !== null) : []
-        for (const row of models as Record<string, unknown>[]) {
-          const id = typeof row['id'] === 'string' ? row['id'] : ''
-          if (id.length === 0 || imageGenOf(models as Record<string, unknown>[], id)) continue
-          if (!inferImageGenFromName(id)) continue
-          const label = typeof row['name'] === 'string' && row['name'].trim().length > 0 ? row['name'].trim() : id
-          found.push({ route, modelId: id, label })
-        }
-      }
-      setSuspects(found)
-    })
-  }, [api])
-
-  /** One-click marking: through writeModelRows, the Models page's own channel. */
-  const markSuspects = useCallback((): void => {
-    const candidates = suspects ?? []
-    if (candidates.length === 0) return
-    setBusyId('mark')
-    const byRoute = new Map<string, SuspectModel[]>()
-    for (const suspect of candidates) {
-      const list = byRoute.get(suspect.route) ?? []
-      list.push(suspect)
-      byRoute.set(suspect.route, list)
-    }
-    void Promise.all([...byRoute.entries()].map(([route, list]) =>
-      writeModelRows(api, route, list.map(suspect => ({ modelId: suspect.modelId, efforts: 'keep', imageGen: true }))),
-    )).then(results => {
-      setBusyId(undefined)
-      const ok = results.every(perRoute => perRoute.every(row => row.ok))
-      setNotice(ok ? t('imagegenMarked', { count: candidates.length }) : t('writeError', { message: t('imagegenMarkFailed') }))
-      // The derive-then-save cycle turns the fresh markers into list rows.
-      loadSuspects()
-      reload()
-    })
-  }, [api, suspects, t, loadSuspects, reload])
 
   /** The default-model select: one save, then the options render from the answer. */
   const setDefault = useCallback((id: string): void => {
@@ -187,40 +123,6 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     })
   }, [view, reload])
 
-  /** The endpoint test: one real request, then the badge re-renders. */
-  const testEndpoint = useCallback((id: string): void => {
-    setBusyId(id)
-    void testImageEndpoint(id).then(answer => {
-      setBusyId(undefined)
-      if (answer.ok) { setNotice(undefined); reload() } else setNotice(answer.error)
-    })
-  }, [reload])
-
-  /** The built-in tool test: one real generation through the shared core,
-   * with the config defaults — proves the whole chain (config → key →
-   * endpoint → disk) the way a conversation call would run it. */
-  const testTool = useCallback((): void => {
-    setToolBusy(true)
-    void generateImageDirect({ prompt: 'a red apple on a white table' }).then(answer => {
-      setToolBusy(false)
-      if (answer.ok) {
-        setNotice(answer.data.images.length === 1
-          ? t('imagegenProbeDone', { path: answer.data.images[0] })
-          : t('imagegenProbeDoneMulti', { count: answer.data.images.length, paths: answer.data.images.join('、') }))
-      } else setNotice(answer.error)
-    })
-  }, [t])
-
-  /** The generate-once probe the pane offers per row (辅通道 demo). */
-  const generateProbe = useCallback((id: string): void => {
-    setBusyId(id)
-    void generateImageDirect({ model: id, prompt: 'a red apple on a white table' }).then(answer => {
-      setBusyId(undefined)
-      if (answer.ok) setNotice(t('imagegenProbeDone', { path: answer.data.images[0] ?? '' }))
-      else setNotice(answer.error)
-    })
-  }, [t])
-
   if (view === undefined) {
     // A skeleton, not a blank box: the pane structure is on screen from the
     // first frame, so a slow host read never looks like a dead button.
@@ -232,7 +134,6 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     )
   }
 
-  const tNoParams = t as (key: string) => string
   const models = view.models
   const empty = models.length === 0
   // A label shared by two routes (the same model behind two providers) would
@@ -247,8 +148,6 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
   return createElement('div', { className: 'bre-config-card' },
     createElement('div', { className: 'bre-config-card-head' },
       createElement('span', { className: 'bre-config-card-title' }, t('imagegenSectionTitle')),
-      createElement('span', { className: 'bre-config-card-sub' }, t('imagegenSectionSub')),
-      createElement('span', { className: 'bre-config-badge' }, t('imagegenModelCount', { count: models.length })),
     ),
     notice !== undefined && createElement('div', { className: 'bre-config-notice' }, notice),
     createElement('div', { className: 'bre-config-defaults' },
@@ -309,89 +208,6 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
       view.defaultModel === null && createElement('option', { value: '', disabled: true }, t('imagegenDefaultModelNone')),
       models.map(model => createElement('option', { key: model.id, value: model.id }, modelOptionText(model)))),
     ),
-    empty
-      ? createElement('div', { className: 'bre-config-empty' },
-        createElement('div', { className: 'bre-config-empty-text' }, t('imagegenEmptyText')),
-        createElement('div', { className: 'bre-config-empty-hint' }, t('imagegenEmptyHint')),
-        suspects === undefined
-          ? createElement('button', { className: 'bre-config-btn-ghost', type: 'button', onClick: loadSuspects }, t('imagegenFindSuspects'))
-          : suspects.length === 0
-            ? createElement('div', { className: 'bre-config-empty-hint' }, t('imagegenNoSuspects'))
-            : createElement('div', { className: 'bre-config-suspects' },
-              suspects.map(suspect => createElement('div', { key: `${suspect.route}/${suspect.modelId}`, className: 'bre-config-suspect' },
-                `${suspect.route} · ${suspect.label}`)),
-              createElement('button', {
-                className: 'bre-config-btn-primary',
-                type: 'button',
-                disabled: busyId === 'mark',
-                onClick: markSuspects,
-              }, t('imagegenMarkSuspects', { count: suspects.length })),
-              createElement('button', { className: 'bre-config-btn-ghost', type: 'button', onClick: () => setSuspects(undefined) }, t('cancel')),
-            ),
-      )
-      : createElement('div', { className: 'bre-config-rows' },
-        models.map(model => {
-          const isDefault = view.defaultModel === model.id
-          const badge = endpointBadge(tNoParams, model.endpoint.status)
-          return createElement('div', { key: model.id, className: 'bre-config-row' },
-            createElement('div', { className: 'bre-config-name' },
-              // Row head: the model's display name only — the provider, the
-              // route and the key reference move out of the title.
-              createElement('div', { className: 'bre-config-name-main' },
-                model.label,
-                isDefault && createElement('span', { className: 'bre-config-badge bre-config-badge-default' }, t('imagegenDefaultBadge')),
-              ),
-              // Second line (small, muted): the provider's display name, when
-              // the route profile has one; the endpoint verdict rides along.
-              createElement('div', { className: 'bre-config-name-sub' },
-                routeNames[model.route] ?? model.providerLabel ?? model.route,
-                createElement('span', { className: badge.className, title: t('imagegenEndpointBadgeHint') }, badge.text),
-              ),
-            ),
-            model.api !== 'images'
-              ? createElement('span', { className: 'bre-config-badge bre-config-badge-bad' }, t('imagegenNoEndpoint'))
-              // The per-row param overrides are gone: the params row above is
-              // the one place a size/quality/n is picked, so a row keeps only
-              // the two actions that are about THIS endpoint.
-              : createElement('div', { className: 'bre-config-row-controls' },
-                createElement('button', {
-                  className: 'bre-config-btn-ghost',
-                  type: 'button',
-                  disabled: busyId === model.id,
-                  onClick: () => testEndpoint(model.id),
-                }, t('imagegenTestEndpoint')),
-                createElement('button', {
-                  className: 'bre-config-btn-ghost',
-                  type: 'button',
-                  disabled: busyId === model.id,
-                  onClick: () => generateProbe(model.id),
-                }, t('imagegenProbe')),
-              ),
-          )
-        }),
-      ),
-    // The built-in tool card: registration state the host derives from its
-    // live tools/attachments services, plus a real generation through the
-    // shared core as the end-to-end check the old MCP selfcheck approximated.
-    createElement('div', { className: 'bre-config-tool' },
-      createElement('div', { className: 'bre-config-tool-head' },
-        createElement('span', null, t('imagegenToolTitle')),
-        createElement('span', { className: 'bre-config-tool-name' },
-          view.tool.registered ? view.tool.name ?? 'generate_image' : '—'),
-      ),
-      createElement('div', { className: 'bre-config-tool-status' },
-        view.tool.registered ? t('imagegenToolRegistered', { name: view.tool.name ?? 'generate_image' }) : t('imagegenToolUnregistered'),
-      ),
-      createElement('div', { className: 'bre-config-tool-actions' },
-        createElement('button', {
-          className: 'bre-config-btn-ghost',
-          type: 'button',
-          disabled: toolBusy || empty || view.defaultModel === null,
-          onClick: testTool,
-        }, t('imagegenToolTest')),
-      ),
-      createElement('div', { className: 'bre-config-tool-hint' }, t('imagegenToolHint')),
-    ),
   )
 }
 
@@ -429,7 +245,6 @@ export function ConfigPane(props: ConfigPaneProps): ReactNode {
         createElement(ImageGenCard, { api: props.api, t: props.t }),
       ),
     ),
-    createElement('div', { className: 'bre-config-foot' }, t('configPaneFoot')),
   ),
   )
 }

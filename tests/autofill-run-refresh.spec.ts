@@ -36,12 +36,17 @@ afterEach(() => {
 describe('idle autofill refresh wiring', () => {
   it.each(['settings/document-updated', 'connection/reset'] as const)('invalidates successful switch settings on %s', async (event) => {
     // The image tool card's registration reads the image-config route once at
-    // apply; the test counts AUTOFILL calls, so the stub answers by URL and
-    // the assertions below never depend on that extra read's position.
+    // apply, and the order sync reads the ui-order route at boot; the test
+    // counts AUTOFILL calls, so the stub answers both BY URL and the
+    // assertions below never depend on those extra reads' positions.
     let autofillCalls = 0
     const fetch = vi.fn<typeof globalThis.fetch>(async (input: RequestInfo | URL) => {
-      if (String(input) === '/dsh-model-think-level/image-config') {
+      const url = String(input)
+      if (url === '/dsh-model-think-level/image-config') {
         return new Response(JSON.stringify({ ok: true, models: [], defaultModel: null, defaults: {}, outputDir: '', tool: { registered: false, name: null } }), { status: 200 })
+      }
+      if (url === '/dsh-model-think-level/ui-order') {
+        return { ok: true, json: async () => ({ ok: true, data: null }) } as Response
       }
       autofillCalls += 1
       const body = autofillCalls === 1 ? { ok: true, data: { autofill: false } } : { ok: true, data: {} }

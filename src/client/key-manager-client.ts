@@ -75,9 +75,10 @@ export interface KeyRow {
    */
   readonly protocol?: RouteProtocol
   /**
-   * Whether the key's model scope is the host's post-save probe assignment
-   * rather than a manual one — the panel shows it so a scope edit knows the
-   * checked chips will keep being rewritten until the user saves one by hand.
+   * Whether the key's model scope is the probe's assignment rather than a
+   * manual one — the panel shows it so a scope edit knows the checked chips
+   * will keep being rewritten on every probe run until the user saves one by
+   * hand.
    */
   readonly auto?: boolean
   /**
@@ -117,10 +118,9 @@ export interface KeyState {
   /** The provider's two base URLs, keyed by protocol family. */
   readonly endpoints: KeyEndpoints
   /**
-   * Whether the host is probing this route's keys in the background (the
-   * post-save scope check). The panel follows it with a quiet poll until it
-   * clears, so the assignments the probe writes land on screen without a
-   * reopen.
+   * Whether the host is probing this route's keys right now (the panel button's
+   * scope check). The panel follows it with a quiet poll until it clears, so
+   * the assignments the probe writes land on screen without a reopen.
    */
   readonly probing?: boolean
 }
@@ -148,10 +148,16 @@ export interface RouteBalanceAnswer {
   readonly error?: string
 }
 
+/** Read policy for the masked key list; omitted options always revalidate. */
+export interface KeyListOptions {
+  /** Reuse a successful masked answer for up to five seconds. */
+  readonly preferCache?: boolean
+}
+
 /** The manager's transport, injectable so the panel can be tested without one. */
 export interface KeyManagerClient {
-  /** Read the provider's whole key list. */
-  list(route: string): Promise<KeyAnswer>
+  /** Read the provider's whole key list (fresh unless cache reuse is requested). */
+  list(route: string, options?: KeyListOptions): Promise<KeyAnswer>
   /**
    * Read only the route's two addresses.
    *
@@ -201,6 +207,13 @@ export interface KeyManagerClient {
    * survive a balance edit.
    */
   setBalanceEndpoint?(route: string, endpoint: string): Promise<KeyAnswer>
+  /**
+   * Ask the host to probe every key of a multi-key route and check the
+   * probe-maintained scopes to what each key actually serves. The answer is
+   * the list as it stands when the run was queued — `probing` says the run is
+   * on, and the panel follows it to the assignments it writes.
+   */
+  probe(route: string): Promise<KeyAnswer>
   /** The stored value of one listed reference, or undefined. */
   reveal(route: string, ref: string): Promise<string | undefined>
 }
@@ -335,6 +348,7 @@ interface KeyListCache {
 /** Only normalised, masked list answers live here; revealed values never do. */
 const KEY_LISTS = new Map<string, KeyListCache>()
 const KEY_LIST_CACHE_LIMIT = 64
+const KEY_LIST_FRESH_MS = 5_000
 
 function listCache(route: string): KeyListCache {
   const known = KEY_LISTS.get(route)
@@ -361,8 +375,12 @@ function cachedList(route: string): KeyState | undefined {
   return KEY_LISTS.get(route)?.state
 }
 
-function listKeys(route: string): Promise<KeyAnswer> {
+function listKeys(route: string, options?: KeyListOptions): Promise<KeyAnswer> {
   const cached = listCache(route)
+  const age = Date.now() - cached.updatedAt
+  if (options?.preferCache === true && cached.state !== undefined && age >= 0 && age < KEY_LIST_FRESH_MS) {
+    return Promise.resolve(cached.state)
+  }
   if (cached.read !== undefined) return cached.read
   const revision = cached.revision
   const reading = request(route).then(answer => {
@@ -466,6 +484,7 @@ export const httpKeyManagerClient: KeyManagerClient = {
   setEndpoints: (route, openai, anthropic) =>
     changeKeys(route, { op: 'endpoints', openai: openai ?? '', anthropic: anthropic ?? '' }),
   setBalanceEndpoint: (route, endpoint) => changeKeys(route, { op: 'balance', endpoint }),
+  probe: route => changeKeys(route, { op: 'probe' }),
   async reveal(route, ref) {
     try {
       const response = await fetch(

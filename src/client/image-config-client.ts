@@ -1,10 +1,10 @@
-// 生图配置路由的浏览器侧传输：读配置、存配置、测端点、直接生成。
+// 生图配置路由的浏览器侧传输：读配置、存配置。
 //
 // 纯传输 —— 不碰 React、不碰 DOM —— 所以能单测。它不认识"哪些是生图模型"
 // （那是宿主从 `inputImageGen` 行派生的），也不认识"工具注册没有"（那由宿主
 // 运行时的 tools/attachments 服务决定，宿主在 tool 块里报）。
 
-import { IMAGE_CONFIG_PATH, IMAGE_GENERATE_PATH } from '../constants.js'
+import { IMAGE_CONFIG_PATH } from '../constants.js'
 import type { ImageModel } from '../image/config.js'
 
 /** 传输层的失败：一句面向用户的原因。 */
@@ -99,38 +99,4 @@ export async function saveImageConfig(patch: {
 }): Promise<TransportAnswer<undefined>> {
   const answer = await jsonPost(IMAGE_CONFIG_PATH, { op: 'save', ...patch })
   return answer.ok ? { ok: true, data: undefined } : answer
-}
-
-/** 对一行模型发起端点测试（n:1、最小尺寸的真实请求）。 */
-export async function testImageEndpoint(id: string): Promise<TransportAnswer<{ status: string; checkedAt?: string }>> {
-  const answer = await jsonPost(IMAGE_CONFIG_PATH, { op: 'test', id })
-  if (!answer.ok) return answer
-  const status = typeof answer.data['status'] === 'string' ? answer.data['status'] : 'unverified'
-  return { ok: true, data: { status, ...(typeof answer.data['checkedAt'] === 'string' ? { checkedAt: answer.data['checkedAt'] as string } : {}) } }
-}
-
-/** 显式生成（辅通道）：拿全部落盘路径直接弹预览。 */
-export async function generateImageDirect(request: {
-  model?: string
-  prompt: string
-  size?: string
-  quality?: string
-  n?: number
-  referenceImages?: readonly string[]
-}): Promise<TransportAnswer<{ images: readonly string[]; model: string; paramsUsed: { size: string; quality: string; n: number }; warning?: string }>> {
-  try {
-    const response = await fetch(IMAGE_GENERATE_PATH, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(request),
-    })
-    const body = (await response.json().catch(() => ({}))) as Record<string, unknown>
-    const images = Array.isArray(body['images']) ? body['images'].filter((entry): entry is string => typeof entry === 'string') : undefined
-    if (response.ok && body['ok'] === true && images !== undefined) {
-      return { ok: true, data: { images, model: String(body['model'] ?? ''), paramsUsed: body['paramsUsed'] as { size: string; quality: string; n: number }, ...(typeof body['warning'] === 'string' ? { warning: body['warning'] } : {}) } }
-    }
-    return { ok: false, error: typeof body['error'] === 'string' ? body['error'] : await failureOf(response) }
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) }
-  }
 }

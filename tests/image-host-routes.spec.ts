@@ -1,19 +1,16 @@
 /**
  * apply()-level integration for the image wiring: the same-origin paths
- * register, the config file syncs from the settings document, a generation
- * through the route lands on disk, and the native `generate_image` tool
- * registers when the host carries the tools/attachments services — over a
- * fake host shaped like the real one.
+ * register, the config file syncs from the settings document, and the native
+ * `generate_image` tool registers when the host carries the tools/attachments
+ * services — over a fake host shaped like the real one.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import * as realFs from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { imageConfigFilePath, readImageConfig } from '../src/image/config.js'
-import { emptyIndex } from '../src/headers-core.js'
-import { IMAGE_CONFIG_PATH, IMAGE_GENERATE_PATH } from '../src/constants.js'
+import { IMAGE_CONFIG_PATH } from '../src/constants.js'
 
 type HostCtx = Parameters<typeof import('../src/index.js').apply>[0]
 
@@ -271,28 +268,4 @@ describe('apply() image wiring', () => {
     const handler = routes.get(IMAGE_CONFIG_PATH)
     expect(handler).toBeUndefined() // the route went with it (same effect drain)
   })
-
-  it('POST image-generate runs the shared core and lands the file (辅通道)', async () => {
-    upstreamUrl = await startUpstream()
-    const settings = fakeSettings()
-    const { ctx, routes } = fakeHost(settings)
-    const { apply } = await import('../src/index.js')
-    apply(ctx)
-    const handler = routes.get(IMAGE_GENERATE_PATH)!
-    const { req, res } = reqRes('POST', { prompt: 'a red apple' })
-    await handler(req, res)
-    expect(res.statusCode).toBe(200)
-    const body = JSON.parse(res.body) as { ok: boolean; images?: readonly string[]; model?: string; error?: string }
-    expect(body.ok).toBe(true)
-    expect(body.model).toBe('openai/gpt-image-1')
-    expect(body.images).toHaveLength(1)
-    expect(existsSync(body.images![0]!)).toBe(true)
-    // The config file's lastGoodParams stays untouched (no fallback ran).
-    expect(readImageConfig(imageConfigFilePath(home)).models[0]!.lastGoodParams).toBeNull()
-  })
 })
-
-void readFileSync
-void writeFileSync
-void realFs
-void emptyIndex

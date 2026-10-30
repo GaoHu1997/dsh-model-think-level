@@ -45,7 +45,7 @@
  * @module dsh-model-think-level/client/KeyManager
  */
 
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   endpointFamilyOf,
@@ -310,9 +310,11 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
    * the panel to route B; adopting A's answer then would paint A's key list
    * (and its refs) onto B, and the NEXT click would edit the wrong row.
    */
-  const liveRouteRef = useRef(route)
+  const liveRouteRef = useRef<string | undefined>(route)
+  liveRouteRef.current = route
   useEffect(() => {
     liveRouteRef.current = route
+    return () => { liveRouteRef.current = undefined }
   }, [route])
 
   /**
@@ -323,9 +325,9 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
    * known answer, and the next revalidate (or mutation) re-reads anyway.
    */
   const revalidate = useCallback(
-    async (atRoute: string): Promise<void> => {
+    async (atRoute: string, preferCache = false): Promise<void> => {
       const painted = client.cached?.(atRoute) !== undefined
-      const answer = await client.list(atRoute)
+      const answer = await client.list(atRoute, preferCache ? { preferCache: true } : undefined)
       if (liveRouteRef.current !== atRoute) return
       if (painted && !answer.ok) return
       adopt(answer, undefined)
@@ -334,16 +336,13 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   )
 
   useEffect(() => {
-    void revalidate(route)
+    void revalidate(route, true)
   }, [revalidate, route])
 
-  // A save anywhere moved the settings document, and the host may now be
-  // probing this route's keys in the background (the post-save scope check).
-  // The probe is deliberately INVISIBLE — no progress, no status line — so the
-  // one thing this panel does about it is re-read when the save lands and
-  // follow the probe quietly (below) until its assignments are on the rows.
-  // The push that reaches this page is dispatched after the host has already
-  // scheduled the probe, so this read sees `probing` and the poll takes over.
+  // A save anywhere moved the settings document: re-read so the painted rows
+  // stay the document's. (The probe rides the button below, not saves; this
+  // re-read is what carries another tab's probe result into this one when the
+  // document itself moved for an unrelated reason.)
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined
     const onChanged = (): void => {
@@ -361,11 +360,12 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     }
   }, [revalidate, route])
 
-  // The post-save scope probe writes its assignments to the host's index while
-  // this panel may be open, and shows nothing while it runs. While the host
-  // reports a probe, follow it with this quiet poll: each round re-adopts the
-  // list, and the one visible change is the checked scope chips moving as the
-  // probe writes them. A bounded number of rounds keeps a host that never
+  // The probe the button started writes its assignments to the host's index
+  // while this panel is open. While the host reports a probe, follow it with
+  // this quiet poll: each round re-adopts the list, and the visible change is
+  // the checked scope chips moving as the probe writes them — plus the one
+  // completion line when the run ends, so a sweep that changed nothing still
+  // says it happened. A bounded number of rounds keeps a host that never
   // answers from spinning here for ever; a failed read simply ends the
   // follow-up.
   useEffect(() => {
@@ -378,15 +378,17 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
       probePolls.current += 1
       if (probePolls.current > PROBE_POLL_MAX) {
         // The follow-up gives up rather than saying "probing" for ever; the
-        // next mount (or mutation) re-reads and tells the truth again.
+        // next mount (or button press) re-reads and tells the truth again.
         setProbing(false)
         return
       }
       void (async () => {
         const answer = await client.list(route)
         if (!live || liveRouteRef.current !== route) return
-        if (answer.ok) adopt(answer, undefined)
-        else setProbing(false)
+        if (answer.ok) {
+          adopt(answer, undefined)
+          if (answer.probing !== true) setNotice({ kind: 'status', text: t('keysProbeDone') })
+        } else setProbing(false)
       })()
     }, PROBE_POLL_MS)
     return () => {
@@ -395,24 +397,36 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     }
   }, [adopt, client, probing, route])
 
-  // The provider card above owns the two base URLs, and which protocols this list
-  // may offer depends on them (user item 3). When that card changes an address it
-  // says so, and this list re-reads instead of offering a stale set.
+  // Address changes already carry the pair: update only protocol availability,
+  // never adopt a key list (which would clear a save notice or replace rows).
   useEffect(() => {
+    let live = true
+    let revision = 0
     const onChanged = (event: Event): void => {
       const detail = (event as CustomEvent<EndpointsChangedDetail>).detail
       const changed = detail?.route
-      if (changed !== undefined && changed !== route) return
+      if (!live || liveRouteRef.current !== route || (changed !== undefined && changed !== route)) return
+      const atRevision = ++revision
+      if (typeof detail?.openai === 'string' && typeof detail.anthropic === 'string') {
+        setEndpoints({ openai: detail.openai || null, anthropic: detail.anthropic || null })
+        return
+      }
       void (async () => {
-        const answer = await client.list(route)
-        if (answer.ok) adopt(answer, undefined)
-      })()
+        // Compatibility for older events, then older clients. Even a full-list
+        // fallback contributes ONLY endpoints, never rows/models/drafts/notice.
+        const answer = client.endpoints !== undefined
+          ? await client.endpoints(route)
+          : await client.list(route)
+        if (!live || liveRouteRef.current !== route || revision !== atRevision) return
+        if (answer.ok) setEndpoints(answer.endpoints ?? NO_ENDPOINTS)
+      })().catch(() => undefined)
     }
     document.addEventListener(ENDPOINTS_CHANGED_EVENT, onChanged)
     return () => {
+      live = false
       document.removeEventListener(ENDPOINTS_CHANGED_EVENT, onChanged)
     }
-  }, [adopt, client, route])
+  }, [client, route])
 
   const closeForm = (): void => {
     setEditing(undefined)
@@ -549,7 +563,8 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
    * models the provider actually offers, so no one has to recall a model id.
    */
   /** Model assignments are chosen only from models added to this provider. */
-  const chipModels = [...new Set(routeModels)].sort(MODEL_ORDER.compare)
+  const chipModels = useMemo(() => [...new Set(routeModels)].sort(MODEL_ORDER.compare), [routeModels])
+  const selectedModels = useMemo(() => new Set(scopeDraft), [scopeDraft])
 
   const form = (): ReactNode => {
     if (editing === undefined) return null
@@ -578,7 +593,7 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
               <p className="bre-keys-hint">{t('keysScopeEmpty')}</p>
             ) : (
               chipModels.map(model => {
-                const selected = scopeDraft.includes(model)
+                const selected = selectedModels.has(model)
                 return (
                   <button
                     key={model}
@@ -756,6 +771,24 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
 
   return (
     <div className="bre-keys">
+      {/* The scope probe's seat, on the key section's own line: a multi-key
+          route may ask every key what it actually serves and have the answers
+          ticked into the rows. A single-key route has nothing to divide — the
+          button stands down rather than answering with the host's refusal —
+          and a draft list has no route to probe at all. */}
+      {draft === true ? null : (
+        <div className="bre-keys-probe-row">
+          <button
+            type="button"
+            className="bre-link-button bre-keys-probe"
+            disabled={busy || probing || rows.length < 2}
+            title={rows.length < 2 ? t('keysProbeSingle') : t('keysProbeHint')}
+            onClick={() => void run(() => client.probe(route), undefined)}
+          >
+            {probing ? t('keysProbing') : t('keysProbe')}
+          </button>
+        </div>
+      )}
       <ul className="bre-keys-list">
         {rows.map(row => {
           const name = nameOf(row)

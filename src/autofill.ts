@@ -12,7 +12,7 @@
  */
 
 import { AUTOFILL_MARKER, INPUT_IMAGE_GEN_MARKER, INPUT_UNSET_MARKER, UNSET_MARKER } from './constants.js'
-import { isSelfHostedRelay, NEW_COMPAT_KEYS, suggestEfforts } from './knowledge.js'
+import { isSelfHostedRelay, NEW_COMPAT_KEYS, stripForeignCompat, suggestEfforts } from './knowledge.js'
 import { isRecord, routeFactsOf } from './shared.js'
 
 /** A JSON object patch. */
@@ -156,8 +156,65 @@ export function buildAutofillPatch(
   return Object.keys(patchRoutes).length === 0 ? undefined : { providers: patchRoutes }
 }
 
-/** Strip newer-only compat keys from an autofill patch (older-kernel downgrade). */
-export function stripNewCompatKeysDeep(patch: JsonObject): JsonObject | undefined {
+/**
+ * Build the protocol-mismatch cleanup patch (the compat guard): every model
+ * row -- and the route-level compat block -- whose compat carries a switch its
+ * route's wire protocol does not take loses exactly those keys.
+ *
+ * This is the repair for a protocol switched after the switches were written:
+ * openai-completions → openai-responses leaves `supportsReasoningEffort` on
+ * every model, and the kernel then refuses each of them at catalog resolution
+ * ("sets compat ..., but its api is ..., which does not take it"), so the
+ * route serves nothing until the keys are gone.
+ *
+ * Only routes that NAME a wire protocol are swept: a route without `api`
+ * resolves each model's protocol from the installed catalog, which this
+ * builder cannot see, so touching it could strip a key a catalog model
+ * legitimately takes. Returns the partial providers patch, or undefined when
+ * nothing is dirty -- the common case, so a caller never writes speculatively.
+ * Pure data logic like {@link buildAutofillPatch}: shared by BOTH halves.
+ */
+export function buildCompatCleanupPatch(providers: unknown): JsonObject | undefined {
+  if (!isRecord(providers)) return undefined
+  const patchRoutes: JsonObject = {}
+  for (const [route, profile] of Object.entries(providers)) {
+    if (!isRecord(profile)) continue
+    const api = typeof profile['api'] === 'string' ? profile['api'] : ''
+    if (api.length === 0) continue
+    const patchProfile: JsonObject = {}
+    // Route-level switches: under an explicit api every model speaks that one
+    // protocol, so a foreign key there is refused exactly as a model-level one.
+    const routeCompat = isRecord(profile['compat'])
+      ? stripForeignCompat(profile['compat'] as Record<string, unknown>, api)
+      : undefined
+    if (routeCompat !== undefined) patchProfile['compat'] = routeCompat
+    const rawModels = Array.isArray(profile['models']) ? profile['models'] : undefined
+    if (rawModels !== undefined && rawModels.length > 0) {
+      const nextModels: unknown[] = []
+      let changed = false
+      for (const row of rawModels) {
+        // A row this builder cannot represent rides along verbatim -- the
+        // array is rebuilt whole, never silently shortened.
+        if (!isRecord(row) || !isRecord(row['compat'])) {
+          nextModels.push(row)
+          continue
+        }
+        const cleaned = stripForeignCompat(row['compat'] as Record<string, unknown>, api)
+        if (cleaned === undefined) {
+          nextModels.push(row)
+          continue
+        }
+        changed = true
+        nextModels.push({ ...row, compat: cleaned })
+      }
+      if (changed) patchProfile['models'] = nextModels
+    }
+    if (Object.keys(patchProfile).length > 0) patchRoutes[route] = patchProfile
+  }
+  return Object.keys(patchRoutes).length === 0 ? undefined : { providers: patchRoutes }
+}
+
+/** Strip newer-only compat keys from an autofill patch (older-kernel downgrade). */export function stripNewCompatKeysDeep(patch: JsonObject): JsonObject | undefined {
   const providers = isRecord(patch['providers']) ? (patch['providers'] as JsonObject) : undefined
   if (providers === undefined) return undefined
   let strippedAny = false

@@ -63,8 +63,16 @@ export interface ProviderBalanceState {
   readonly inflight: Set<string>
   /** Routes invalidated while a read was in flight (re-read on settle). */
   readonly pending: Set<string>
+  /** Reads waiting for a concurrency slot; discarded when the page closes. */
+  readonly queued: PendingBalanceRead[]
   /** Whether the provider list was present in the previous pass. */
   visible: boolean
+}
+
+/** A read waiting for a slot: the row that asked and the route it asked for. */
+interface PendingBalanceRead {
+  readonly head: HTMLElement
+  readonly route: string
 }
 
 /** What the chip needs from its host. */
@@ -92,9 +100,19 @@ export function createProviderBalanceState(): ProviderBalanceState {
     requested: new Set(),
     inflight: new Set(),
     pending: new Set(),
+    queued: [],
     visible: false,
   }
 }
+
+/**
+ * Reads on the wire at once. The page opening fires one read per provider and
+ * the list may hold dozens; uncapped, they all arrive as simultaneous host
+ * requests, each of which pins a socket for a full timeout window and queues
+ * behind the host's serialised settings reads. Three at a time spreads the
+ * same total work without the pile-up — the same limit the key prefetch runs.
+ */
+const BALANCE_READ_CONCURRENCY = 3
 
 /**
  * Visit every provider row: paint what is known, and ask once per page opening
@@ -103,17 +121,22 @@ export function createProviderBalanceState(): ProviderBalanceState {
  * A missing provider list means the Models page is closed (or not rendered):
  * the opening is over, so the next presence starts a new read session. No
  * request is made from this function while the list is absent.
+ * @param list - the provider list already resolved by the caller's scan (see
+ *   `reconcileProviderOrder`); re-deriving it here costs a document-wide walk
+ *   per pass, and one burst runs several passes.
  */
 export function reconcileProviderBalance(
   root: HTMLElement,
   deps: ProviderBalanceDeps,
   state: ProviderBalanceState,
+  list: HTMLElement | undefined = rowsListOf(root),
 ): void {
-  const list = rowsListOf(root)
   if (list === undefined) {
     // The provider list (and with it the Models page) is gone: nothing may be
-    // fetched until it is opened again.
+    // fetched until it is opened again. Reads still queued behind a slot go
+    // with the opening — the next one asks afresh.
     state.visible = false
+    state.queued.length = 0
     return
   }
   if (!state.visible) {
@@ -146,6 +169,11 @@ export function invalidateProviderBalance(state: ProviderBalanceState, route: st
   // remove its own marker; the next pass must then read the NEW url, so mark
   // the route for one immediate follow-up.
   if (state.inflight.has(route)) state.pending.add(route)
+  // A read still WAITING for a slot goes instead: it has not been asked yet,
+  // and its ask would have carried the URL this invalidation just retired.
+  for (let i = state.queued.length - 1; i >= 0; i -= 1) {
+    if (state.queued[i]?.route === route) state.queued.splice(i, 1)
+  }
 }
 
 /** Remove every chip (the fiber is going away). */
@@ -327,7 +355,9 @@ function removeChip(head: HTMLElement): void {
 /**
  * Ask the host for one route's balance when this page opening has not asked yet,
  * then paint the answer into the head it was asked for (the head may be gone by
- * then; the state still carries the answer to the next one).
+ * then; the state still carries the answer to the next one). Beyond the
+ * concurrency cap the read waits in the queue — see
+ * {@link BALANCE_READ_CONCURRENCY}.
  */
 function maybeRead(
   head: HTMLElement,
@@ -337,6 +367,41 @@ function maybeRead(
 ): void {
   if (state.requested.has(id) || state.inflight.has(id)) return
   state.requested.add(id)
+  enqueueRead(head, id, deps, state)
+}
+
+/** Put a read on the wire, or hold it until a slot frees up. */
+function enqueueRead(
+  head: HTMLElement,
+  id: string,
+  deps: ProviderBalanceDeps,
+  state: ProviderBalanceState,
+): void {
+  if (state.inflight.size >= BALANCE_READ_CONCURRENCY) {
+    if (!state.queued.some(read => read.route === id)) state.queued.push({ head, route: id })
+    return
+  }
+  startRead(head, id, deps, state)
+}
+
+/** Free a slot and start the next queued read, if any. */
+function drainBalanceReads(
+  deps: ProviderBalanceDeps,
+  state: ProviderBalanceState,
+): void {
+  while (state.inflight.size < BALANCE_READ_CONCURRENCY && state.queued.length > 0) {
+    const next = state.queued.shift()
+    if (next === undefined) return
+    startRead(next.head, next.route, deps, state)
+  }
+}
+
+function startRead(
+  head: HTMLElement,
+  id: string,
+  deps: ProviderBalanceDeps,
+  state: ProviderBalanceState,
+): void {
   state.inflight.add(id)
   setRefreshing(head, id, true)
   const client = deps.client ?? httpBalanceClient
@@ -382,7 +447,8 @@ function maybeRead(
     // ask again now, for the row that asked, instead of waiting for a reopen.
     if (state.pending.delete(id)) {
       state.requested.delete(id)
-      maybeRead(head, id, deps, state)
+      enqueueRead(head, id, deps, state)
     }
+    drainBalanceReads(deps, state)
   })
 }

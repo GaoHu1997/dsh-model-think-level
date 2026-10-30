@@ -1,10 +1,9 @@
 // @vitest-environment jsdom
 /**
- * The config pane (配置页浮层): the params row, the default-model select under
- * it, the derived model list with per-row endpoint badges and params, the empty
- * state's one-click marking (through the settings write channel, never a raw
- * file edit), the built-in-tool status card driven by the host-reported
- * registration state, and the close paths + z-index fence.
+ * The config pane (配置页浮层): the params row and the default-model select
+ * under it — the marked models surface as that select's options — plus the
+ * close paths + z-index fence. The old model list, empty state and
+ * built-in-tool card are gone; a guard test keeps them from coming back.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,7 +13,7 @@ import { act } from 'react'
 import { ConfigPane } from '../src/client/ConfigPane.js'
 import { clearImageConfigCache } from '../src/client/image-config-client.js'
 import { STYLES } from '../src/client/styles.js'
-import { IMAGE_CONFIG_PATH, IMAGE_GENERATE_PATH } from '../src/constants.js'
+import { IMAGE_CONFIG_PATH } from '../src/constants.js'
 import type { RemoteApi } from '../src/client/types.js'
 
 /** The config the host answers a GET with. */
@@ -42,7 +41,7 @@ const CONFIG_VIEW = {
   tool: { registered: true, name: 'generate_image' },
 }
 
-/** The settings Remote face the marking write goes through. */
+/** The settings Remote face the pane reads provider display names through. */
 function fakeApi(providers: Record<string, unknown>): { api: RemoteApi; mutates: unknown[] } {
   const mutates: unknown[] = []
   const api = {
@@ -109,46 +108,38 @@ async function flush(): Promise<void> {
 }
 
 describe('ConfigPane', () => {
-  it('renders the model display name with the provider display name under it (no key details)', async () => {
+  it('the card head is the 「生图」 title alone — no auto-fetch sub, no model count', async () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
-    const text = document.body.textContent ?? ''
-    // Head: the model label alone — no route prefix, no key reference, no id.
-    const heads = [...document.querySelectorAll('.bre-config-name-main')].map(node => node.firstChild?.textContent)
-    expect(heads).toEqual(['GPT-Image-1', 'CogView-3-Plus'])
-    // Second line: the provider's displayName; a profile without one falls back
-    // to the route, so the line is never empty.
-    const subs = [...document.querySelectorAll('.bre-config-name-sub')].map(node => node.firstChild?.textContent)
-    expect(subs).toEqual(['OpenAI', 'zhipu'])
-    expect(text).not.toContain('OPENAI_API_KEY')
-    expect(text).not.toContain('openai/gpt-image-1')
-    expect(text).toContain('imagegenEndpointOk') // the verified badge
-    expect(text).toContain('imagegenEndpointUnverified') // the honest default
-    expect(document.querySelectorAll('.bre-config-row')).toHaveLength(2)
+    const head = document.querySelector('.bre-config-card-head')!
+    expect(head.textContent).toBe('imagegenSectionTitle')
+    expect(document.querySelectorAll('.bre-config-card-sub, .bre-config-card-head .bre-config-badge')).toHaveLength(0)
   })
 
-  it('falls back to the live settings displayName when the view has no providerLabel', async () => {
-    const view = {
-      ...CONFIG_VIEW,
-      models: CONFIG_VIEW.models.map((model, index) => index === 0 ? { ...model, providerLabel: undefined } : model),
-    }
-    handleFetch = () => new Response(JSON.stringify(view), { status: 200, headers: { 'content-type': 'application/json' } })
-    const { api } = fakeApi({ openai: { displayName: 'OpenAI 官方' } })
+  it('no model list, empty state or built-in-tool card renders anymore', async () => {
+    const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
-    const subs = [...document.querySelectorAll('.bre-config-name-sub')].map(node => node.firstChild?.textContent)
-    expect(subs[0]).toBe('OpenAI 官方')
+    expect(document.querySelectorAll('.bre-config-rows, .bre-config-row, .bre-config-tool, .bre-config-empty')).toHaveLength(0)
+    const text = document.body.textContent ?? ''
+    expect(text).not.toContain('imagegenTestEndpoint')
+    expect(text).not.toContain('imagegenProbe')
+    expect(text).not.toContain('imagegenToolTitle')
+    expect(text).not.toContain('imagegenSectionSub')
+    expect(text).not.toContain('configPaneFoot')
   })
 
-  it('shows the default model in the second-row select and marks the row with the 「默认」 badge', async () => {
+  it('shows the default model in the select, options carrying no key details', async () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
     const select = document.querySelector<HTMLSelectElement>('.bre-config-default-select')!
     expect(select.value).toBe('openai/gpt-image-1')
     expect([...select.options].map(option => option.text)).toEqual(['GPT-Image-1', 'CogView-3-Plus'])
-    expect(document.body.textContent).toContain('imagegenDefaultBadge')
+    // The options are labels only — no route prefix, no key reference, no id.
+    expect(document.body.textContent).not.toContain('OPENAI_API_KEY')
+    expect(document.body.textContent).not.toContain('openai/gpt-image-1')
   })
 
   it('the params row comes first and the default-model select sits under it', async () => {
@@ -158,10 +149,8 @@ describe('ConfigPane', () => {
     const children = [...document.querySelector('.bre-config-card')!.children]
     const paramsAt = children.findIndex(node => node.classList.contains('bre-config-defaults'))
     const defaultAt = children.findIndex(node => node.classList.contains('bre-config-default-row'))
-    const rowsAt = children.findIndex(node => node.classList.contains('bre-config-rows'))
     expect(paramsAt).toBeGreaterThanOrEqual(0)
     expect(defaultAt).toBe(paramsAt + 1)
-    expect(rowsAt).toBeGreaterThan(defaultAt)
     // The params themselves (size / quality / n / timeout) stay in row one.
     expect(children[paramsAt]!.querySelectorAll('select')).toHaveLength(4)
   })
@@ -190,6 +179,23 @@ describe('ConfigPane', () => {
     expect(optionTexts).toEqual(['CogView-3-Plus · zhipu', 'CogView-3-Plus · OpenAI'])
   })
 
+  it('falls back to the live settings displayName before the route for colliding labels', async () => {
+    const view = {
+      ...CONFIG_VIEW,
+      models: [
+        { ...CONFIG_VIEW.models[0]!, label: 'Same Label', providerLabel: undefined },
+        { ...CONFIG_VIEW.models[1]!, label: 'Same Label' },
+      ],
+    }
+    handleFetch = () => new Response(JSON.stringify(view), { status: 200 })
+    const { api } = fakeApi({ openai: { displayName: 'OpenAI 官方' } })
+    mountPane(api, () => {})
+    await flush()
+    const optionTexts = [...document.querySelector('.bre-config-default-select')!.querySelectorAll('option')]
+      .map(option => option.textContent)
+    expect(optionTexts).toEqual(['Same Label · OpenAI 官方', 'Same Label · zhipu'])
+  })
+
   it('picking another default saves through the route and re-renders', async () => {
     const { api } = fakeApi({})
     const posts: { url: string; body: unknown }[] = []
@@ -210,17 +216,6 @@ describe('ConfigPane', () => {
     await flush()
     expect(posts).toHaveLength(1)
     expect(posts[0]!.body).toMatchObject({ op: 'save', defaultModel: 'zhipu/cogview-3-plus' })
-  })
-
-  it('a model row carries only its own actions — no per-row param selects', async () => {
-    const { api } = fakeApi({})
-    mountPane(api, () => {})
-    await flush()
-    // The params live in one row above; a model row must not repeat them.
-    expect(document.querySelectorAll('.bre-config-row select')).toHaveLength(0)
-    const firstRow = document.querySelector('.bre-config-row')!
-    expect([...firstRow.querySelectorAll('button')].map(button => button.textContent))
-      .toEqual(['imagegenTestEndpoint', 'imagegenProbe'])
   })
 
   it('the defaults size select offers the same ladder and saves the pixel value', async () => {
@@ -293,113 +288,6 @@ describe('ConfigPane', () => {
     expect(timeoutSelect.value).toBe('120000')
     expect(Array.from(timeoutSelect.options).map(option => option.value).slice(0, 2))
       .toEqual(['120000', '300000'])
-  })
-
-  it('the built-in tool card reports the registered tool name from the host', async () => {
-    const { api } = fakeApi({})
-    mountPane(api, () => {})
-    await flush()
-    expect(document.body.textContent).toContain('imagegenToolTitle')
-    expect(document.body.textContent).toContain('generate_image')
-    expect(document.body.textContent).toContain('imagegenToolRegistered')
-    // The test button is enabled with a default model present.
-    const test = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenToolTest')!
-    expect(test.disabled).toBe(false)
-  })
-
-  it('the tool card says unregistered when the host carries no tools service', async () => {
-    const { api } = fakeApi({})
-    handleFetch = () => new Response(JSON.stringify({ ...CONFIG_VIEW, tool: { registered: false, name: null } }), { status: 200 })
-    mountPane(api, () => {})
-    await flush()
-    expect(document.body.textContent).toContain('imagegenToolUnregistered')
-    // The test button still works: it exercises the shared core through the
-    // route, which exists even where the tools service does not.
-    const test = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenToolTest')!
-    expect(test.disabled).toBe(false)
-  })
-
-  it("the tool card's test button runs one real generation through the shared core", async () => {
-    const { api } = fakeApi({})
-    const posts: { url: string; body: Record<string, unknown> }[] = []
-    handleFetch = (url, init) => {
-      if (init?.method === 'POST' && url === IMAGE_GENERATE_PATH) {
-        posts.push({ url, body: JSON.parse(String(init.body)) })
-        return new Response(JSON.stringify({ ok: true, images: ['/out/a.png'], model: 'openai/gpt-image-1', paramsUsed: { size: '1024x1024', quality: 'high', n: 1 } }), { status: 200 })
-      }
-      return new Response(JSON.stringify(CONFIG_VIEW), { status: 200 })
-    }
-    mountPane(api, () => {})
-    await flush()
-    const test = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenToolTest')!
-    await act(async () => { test.click() })
-    await flush()
-    // The defaults apply: no model/size/quality/n in the body.
-    expect(posts).toHaveLength(1)
-    expect(posts[0]!.body).toEqual({ prompt: 'a red apple on a white table' })
-    expect(document.body.textContent).toContain('imagegenProbeDone')
-    expect(document.body.textContent).toContain('/out/a.png')
-  })
-
-  it('a multi-image test generation names the count and every path', async () => {
-    const { api } = fakeApi({})
-    handleFetch = (url, init) => {
-      if (init?.method === 'POST' && url === IMAGE_GENERATE_PATH) {
-        return new Response(JSON.stringify({ ok: true, images: ['/out/a.png', '/out/a-2.png'], model: 'openai/gpt-image-1', paramsUsed: { size: '1024x1024', quality: 'high', n: 2 } }), { status: 200 })
-      }
-      return new Response(JSON.stringify(CONFIG_VIEW), { status: 200 })
-    }
-    mountPane(api, () => {})
-    await flush()
-    const test = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenToolTest')!
-    await act(async () => { test.click() })
-    await flush()
-    expect(document.body.textContent).toContain('imagegenProbeDoneMulti')
-    expect(document.body.textContent).toContain('/out/a.png')
-    expect(document.body.textContent).toContain('/out/a-2.png')
-  })
-
-  it('the empty state offers one-click marking through the settings write channel', async () => {
-    const { api, mutates } = fakeApi({
-      aliyun: { models: [{ id: 'flux-dev', name: 'FLUX.1 dev' }, { id: 'qwen-max' }] },
-    })
-    handleFetch = () => new Response(JSON.stringify({ ...CONFIG_VIEW, models: [], defaultModel: null }), { status: 200 })
-    mountPane(api, () => {})
-    await flush()
-    expect(document.body.textContent).toContain('imagegenEmptyText')
-    // Step 1: find suspects — the suspected row appears, the chat one does not.
-    const find = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenFindSuspects')!
-    await act(async () => { find.click() })
-    await flush()
-    expect(document.body.textContent).toContain('aliyun · FLUX.1 dev')
-    expect(document.body.textContent).not.toContain('qwen-max')
-    // Step 2: mark them — a settings mutate lands (inputImageGen marker).
-    const mark = [...document.querySelectorAll('button')].find(button => button.textContent?.startsWith('imagegenMarkSuspects'))!
-    await act(async () => { mark.click() })
-    await flush()
-    expect(mutates).toHaveLength(1)
-    const ops = mutates[0] as { op: string; path: string[]; value: unknown }[]
-    const modelsOp = ops.find(op => op.path[2] === 'models')
-    const row = (modelsOp!.value as { id: string; inputImageGen?: boolean }[]).find(model => model.id === 'flux-dev')!
-    expect(row.inputImageGen).toBe(true)
-    expect(document.body.textContent).toContain('imagegenMarked')
-  })
-
-  it('the 「试一张」 probe calls the direct generate route and reports the path', async () => {
-    const { api } = fakeApi({})
-    handleFetch = (url, init) => {
-      if (init?.method === 'POST' && url === IMAGE_GENERATE_PATH) {
-        return new Response(JSON.stringify({ ok: true, images: ['/out/x.png'], model: 'openai/gpt-image-1', paramsUsed: { size: '1024x1024', quality: 'high', n: 1 } }), { status: 200 })
-      }
-      return new Response(JSON.stringify(CONFIG_VIEW), { status: 200 })
-    }
-    mountPane(api, () => {})
-    await flush()
-    const probe = [...document.querySelectorAll('button')].find(button => button.textContent === 'imagegenProbe')!
-    await act(async () => { probe.click() })
-    await flush()
-    expect(document.body.textContent).toContain('imagegenProbeDone')
-    expect(document.body.textContent).toContain('/out/x.png')
   })
 
   it('closes on ✕, on Escape, and on a backdrop click — never on an inside click', async () => {

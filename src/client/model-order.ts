@@ -125,6 +125,26 @@ export function syncModelOrders(next: ModelOrderMap): void {
   notify()
 }
 
+/**
+ * Replace the whole map with `next` AND persist it — the boot adoption of the
+ * synced order document (`order-sync.ts`). Like `syncModelOrders` it is a
+ * wholesale replace; unlike it, the map also lands in localStorage, because
+ * the writer here is the file sync, not another tab's own persisting store.
+ * Entries with no nameable model left are dropped, exactly as `parseModelOrders`
+ * drops them, so an adopted map is a parsed-map shape.
+ */
+export function adoptModelOrders(next: ModelOrderMap): void {
+  const map: Record<string, readonly string[]> = {}
+  for (const [provider, value] of Object.entries(next)) {
+    if (provider.length === 0) continue
+    const ids = dedupe(value)
+    if (ids.length > 0) map[provider] = ids
+  }
+  orders = map
+  persist()
+  notify()
+}
+
 /** Subscribe to order changes; returns the disposer. */
 export function subscribeModelOrders(listener: () => void): () => void {
   listeners.add(listener)

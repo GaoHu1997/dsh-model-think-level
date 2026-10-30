@@ -8,7 +8,7 @@
  * shape the built-in command plugins use (the dsh-command-goal precedent).
  *
  * The handler is a thin argument parser over the SHARED generation core —
- * the same `generateImage` the dispatch and the `/image-generate` route call.
+ * the same `generateImage` the native `generate_image` tool calls.
  *
  * @module dsh-model-think-level/image/command
  */
