@@ -280,6 +280,35 @@ describe('apply() image wiring', () => {
     expect(body.tool).toMatchObject({ registered: true, name: 'generate_image' })
   })
 
+  it('saving the switch off unregisters the tool; saving it on brings it back', async () => {
+    upstreamUrl = await startUpstream()
+    const settings = fakeSettings()
+    const { ctx, routes, toolsRegistry } = fakeHost(settings, { withToolServices: true })
+    const { apply } = await import('../src/index.js')
+    apply(ctx)
+    const handler = routes.get(IMAGE_CONFIG_PATH)!
+    const read = async (): Promise<{ enabled: boolean; tool: { registered: boolean; name: string | null } }> => {
+      const { req, res } = reqRes('GET')
+      await handler(req, res)
+      return JSON.parse(res.body) as { enabled: boolean; tool: { registered: boolean; name: string | null } }
+    }
+    expect(await read()).toMatchObject({ enabled: true, tool: { registered: true, name: 'generate_image' } })
+    const off = reqRes('POST', { op: 'save', enabled: false })
+    await handler(off.req, off.res)
+    expect(JSON.parse(off.res.body)).toEqual({ ok: true })
+    // Gone from the session's registry at once — a model cannot call it.
+    expect(toolsRegistry.size).toBe(0)
+    // Stored, with the models and params still there for the next enable.
+    const stored = readImageConfig(imageConfigFilePath(home))
+    expect(stored.enabled).toBe(false)
+    expect(stored.models.map(model => model.id)).toEqual(['openai/gpt-image-1'])
+    expect(await read()).toMatchObject({ enabled: false, tool: { registered: false, name: null } })
+    const on = reqRes('POST', { op: 'save', enabled: true })
+    await handler(on.req, on.res)
+    expect([...toolsRegistry.keys()]).toEqual(['generate_image'])
+    expect(await read()).toMatchObject({ enabled: true, tool: { registered: true, name: 'generate_image' } })
+  })
+
   it('disposing the tool unregisters it and the status flips back', async () => {
     upstreamUrl = await startUpstream()
     const settings = fakeSettings()

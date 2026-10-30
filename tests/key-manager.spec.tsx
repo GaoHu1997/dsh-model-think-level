@@ -477,6 +477,40 @@ describe('the probe button', () => {
     expect(buttonByText(panel.root, COPY.keysProbing)).toBeDefined()
   })
 
+  it('keeps the portalled header action interactive and cleans it up on unmount', async () => {
+    const probeHost = document.createElement('span')
+    document.body.appendChild(probeHost)
+    const pair = [row({ ref: 'A' }), row({ ref: 'B' })]
+    const { client, calls } = recorder({
+      list: async () => state({ entries: pair }),
+      probe: async () => state({ probing: true, entries: pair }),
+    })
+    const panel = mount({ client, probeHost })
+    await flush()
+
+    expect(panel.root.querySelector('.bre-keys-probe-row')).toBeNull()
+    expect(panel.root.querySelector('.bre-keys-probe')).toBeNull()
+    const action = buttonByText(probeHost, COPY.keysProbe)
+    expect(action.disabled).toBe(false)
+    action.click()
+    await flush()
+    expect(calls).toContainEqual({ op: 'probe', args: ['ofox'] })
+    expect(buttonByText(probeHost, COPY.keysProbing).disabled).toBe(true)
+
+    unmountReact(panel.mount)
+    mounted = undefined
+    expect(probeHost.childNodes).toHaveLength(0)
+  })
+
+  it('does not populate a header probe seat for a draft', async () => {
+    const probeHost = document.createElement('span')
+    document.body.appendChild(probeHost)
+    const panel = mount({ draft: true, probeHost })
+    await flush()
+    expect(probeHost.childNodes).toHaveLength(0)
+    expect(panel.root.querySelector('.bre-keys-probe')).toBeNull()
+  })
+
   it('does not offer the probe on a draft list', async () => {
     const panel = mount({ draft: true })
     await flush()

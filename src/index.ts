@@ -1900,32 +1900,53 @@ export function apply(ctx: Context, config: Config = {}): void {
   // The registration state feeds the client's keyed image-card registration,
   // which reads the name back over the config route.
   const imageToolState: { name: string | undefined; error: string | undefined } = { name: undefined, error: undefined }
+  // The route saves the switch, so it needs a way to make the registry follow:
+  // without it the pane would claim "on" while the session still has no tool
+  // (or still has one it should no longer see).
+  let reconcileImageTool: (() => void) | undefined
   ctx.inject(['tools', 'attachments'], (toolCtx: Context) => {
+    let registered: { readonly name: string; readonly dispose: () => void } | undefined
+    const release = (): void => {
+      const current = registered
+      registered = undefined
+      imageToolState.name = undefined
+      if (current === undefined) return
+      try {
+        current.dispose()
+      } catch {
+        // A registry that refuses the removal still drops the tool with the
+        // plugin scope; the switch has done all it can.
+      }
+    }
+    const acquire = (): void => {
+      if (registered !== undefined) return
+      // A throwing registration must not throw out of the route either: record
+      // the message so the pane can show why, exactly like the boot path did.
+      try {
+        registered = registerGenerateImageTool(toolCtx, {
+          generateDeps: imageGenerateDeps,
+          attachments: (toolCtx as unknown as { attachments: unknown }).attachments as Parameters<typeof registerGenerateImageTool>[1]['attachments'],
+          readConfig: () => readImageConfig(),
+        })
+        imageToolState.name = registered.name
+        imageToolState.error = undefined
+      } catch (error) {
+        imageToolState.name = undefined
+        imageToolState.error = error instanceof Error ? error.message : String(error)
+        console.warn(`[dsh-model-think-level] 内建生图工具注册失败（诊断路由 ${IMAGE_CONFIG_PATH} 的 tool.error 会带回这条原因）：${imageToolState.error}`)
+      }
+    }
+    const reconcile = (): void => {
+      if (readImageConfig().enabled) acquire()
+      else release()
+    }
+    reconcileImageTool = reconcile
     toolCtx.effect(
       () => {
-        // A throwing effect is logged and swallowed by the host, leaving the
-        // pane with a bare "未注册" and no reason. Record the message as well:
-        // the config route reports it, so a schema/host-version mismatch is
-        // diagnosable from the UI instead of only from a startup log line.
-        let registered: { readonly name: string; readonly dispose: () => void }
-        try {
-          registered = registerGenerateImageTool(toolCtx, {
-            generateDeps: imageGenerateDeps,
-            attachments: (toolCtx as unknown as { attachments: unknown }).attachments as Parameters<typeof registerGenerateImageTool>[1]['attachments'],
-            readConfig: () => readImageConfig(),
-          })
-        } catch (error) {
-          imageToolState.name = undefined
-          imageToolState.error = error instanceof Error ? error.message : String(error)
-          console.warn(`[dsh-model-think-level] 内建生图工具注册失败（诊断路由 ${IMAGE_CONFIG_PATH} 的 tool.error 会带回这条原因）：${imageToolState.error}`)
-          throw error
-        }
-        const { name, dispose } = registered
-        imageToolState.name = name
-        imageToolState.error = undefined
+        reconcile()
         return () => {
-          imageToolState.name = undefined
-          dispose()
+          reconcileImageTool = undefined
+          release()
         }
       },
       'dsh-model-think-level: generate_image tool',
@@ -3519,6 +3540,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               const config = readImageConfig()
               sendJson(res, 200, {
                 ok: true,
+                enabled: config.enabled,
                 models: config.models,
                 defaultModel: config.defaultModel,
                 defaults: config.defaults,
@@ -3543,6 +3565,9 @@ export function apply(ctx: Context, config: Config = {}): void {
             try {
               updateImageConfig(document => {
                 let next: ImageConfig = document
+                // The service switch: off unregisters the tool and refuses
+                // every generation entry, while the models and params stay put.
+                if (typeof body['enabled'] === 'boolean') next = { ...next, enabled: body['enabled'] }
                 if (typeof body['defaultModel'] === 'string' && body['defaultModel'].length > 0) {
                   next = { ...next, defaultModel: body['defaultModel'] }
                 }
@@ -3571,6 +3596,13 @@ export function apply(ctx: Context, config: Config = {}): void {
                 return next
               })
               syncImageConfigNow()
+              // Make the registry follow the saved switch before answering, so
+              // the pane's next read reports the truth the session already has.
+              try {
+                reconcileImageTool?.()
+              } catch {
+                // A registry hiccup is reported through tool.error on the GET.
+              }
               sendJson(res, 200, { ok: true })
             } catch (error) {
               sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })

@@ -2530,6 +2530,33 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-key-managed > input,
 .bre-key-managed .bre-key-eye { display: none; }
 
+/* Hiding just the input leaves newer hosts' input wrapper (height/padding)
+   behind. Collapse that wrapper too without removing host-owned form nodes. */
+.bre-key-managed > :is(div, span):has(input) { display: none; }
+
+/* The official label/help and the scope probe share a compact header. Grid
+   keeps the action on the first line and validation copy on its own line;
+   unlike a negative offset, it also works as fonts and card widths change. */
+.bre-key-managed {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 12px;
+  min-height: 0;
+}
+
+.bre-key-managed > :first-child { grid-column: 1; grid-row: 1; }
+.bre-key-managed > p { grid-column: 1 / -1; }
+
+.bre-keys-probe-host {
+  grid-column: 2;
+  grid-row: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
 /* A field that failed validation grows a message line under the input; the eye
    rides above it so it stays on the input it belongs to (18px line + 6px gap). */
 .bre-key-field:has(> p) .bre-key-eye { bottom: 24px; }
@@ -4248,7 +4275,8 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 .bre-config-pane {
   width: min(560px, calc(100vw - 48px));
-  max-height: min(640px, calc(100vh - 48px));
+  /* Fixed height: expanding/collapsing the image-gen card must not resize the dialog. */
+  height: min(320px, calc(100vh - 48px));
   display: flex;
   flex-direction: column;
   border-radius: 12px;
@@ -4258,6 +4286,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   overflow: hidden;
 }
 .bre-config-head {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4285,6 +4314,8 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 .bre-config-close:hover { background: var(--bre-accent-weak); color: var(--bre-ink-1); }
 .bre-config-body {
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 14px 16px;
   overflow-y: auto;
 }
@@ -4318,16 +4349,122 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   .bre-config-skeleton-row { animation: none; }
 }
 
+/* One settings entry: a bordered card whose head line stays visible while the
+   body folds away, so the pane reads as a list of services rather than a form. */
+.bre-config-card {
+  padding: 10px 12px;
+  border: 1px solid var(--bre-line-1);
+  border-radius: 12px;
+  background: var(--bre-sunken-2);
+}
 .bre-config-card-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
+}
+/* The whole name is the fold control; the switch keeps its own hit area. */
+.bre-config-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 2px 4px 2px 2px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.bre-config-expand:hover { background: var(--bre-accent-weak); }
+.bre-config-expand:focus-visible { outline: 2px solid var(--bre-accent-line); outline-offset: 1px; }
+.bre-config-caret {
+  flex: none;
+  width: 11px;
+  color: var(--bre-ink-3);
+  font-size: 11px;
+  line-height: 1;
 }
 .bre-config-card-title {
   font-size: 13.5px;
   font-weight: 600;
   color: var(--bre-ink-1);
+}
+.bre-config-card-state {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--bre-ink-3);
+  white-space: nowrap;
+}
+/* Switch: a real checkbox for a11y, hidden over a track + knob that follow it. */
+.bre-config-switch {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  width: 34px;
+  height: 20px;
+  cursor: pointer;
+}
+.bre-config-switch-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+.bre-config-switch-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  border: 1px solid var(--bre-line-1);
+  background: var(--bre-track);
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.bre-config-switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bre-ink-4);
+  transition: transform 140ms ease, background 140ms ease;
+}
+.bre-config-switch-input:checked + .bre-config-switch-track {
+  border-color: var(--bre-accent);
+  background: var(--bre-accent);
+}
+.bre-config-switch-input:checked + .bre-config-switch-track::after {
+  transform: translateX(14px);
+  background: #fff;
+}
+.bre-config-switch-input:focus-visible + .bre-config-switch-track {
+  outline: 2px solid var(--bre-accent-line);
+  outline-offset: 2px;
+}
+.bre-config-switch-input:disabled { cursor: default; }
+.bre-config-switch-input:disabled + .bre-config-switch-track { opacity: 0.55; }
+@media (prefers-reduced-motion: reduce) {
+  .bre-config-switch-track,
+  .bre-config-switch-track::after { transition: none; }
+}
+/* The state in words under the head: what off/on actually means here. */
+.bre-config-card-hint {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--bre-ink-3);
+}
+.bre-config-card-body {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--bre-line-1);
 }
 .bre-config-notice {
   margin: 0 0 10px;

@@ -183,6 +183,15 @@ describe('n clamp and config errors', () => {
     await expect(generateImage(deps, { prompt: 'x' })).rejects.toThrow(/没有已配置的生图模型/)
   })
 
+  it('a switched-off service refuses before the wire, with the way back named', async () => {
+    writeImageConfig({ ...syncImageConfig(emptyImageConfig(), PROVIDERS), enabled: false }, file)
+    const captured: Captured[] = []
+    const deps = depsWith({ send: jsonSend(200, { data: [{ b64_json: PNG_B64 }] }, captured) })
+    await expect(generateImage(deps, { prompt: 'x' })).rejects.toThrow(/生图服务已关闭/)
+    await expect(generateImage(deps, { prompt: 'x' })).rejects.toMatchObject({ kind: 'config' })
+    expect(captured).toHaveLength(0)
+  })
+
   it('missing key → names the route and the reference, never a fake 401', async () => {
     writeImageConfig(syncImageConfig(emptyImageConfig(), PROVIDERS), file)
     const deps = depsWith({ resolveKey: async () => undefined, send: jsonSend(200, {}) })

@@ -261,6 +261,9 @@ export function registerGenerateImageTool(ctx: Context, deps: ImageToolDeps): { 
       // Snapshot once so references, generation and saves share the SAME budget
       // and config, rather than starting another full timeout inside the core.
       const config = deps.generateDeps.config?.() ?? deps.readConfig()
+      // A stale tool definition (or an in-flight call after the switch went
+      // off) fails on the switch before touching the credentials or the wire.
+      if (!config.enabled) throw new Error('生图服务已关闭——可在「高级设置 → 生图」里重新开启')
       const deadline = createGenerateDeadline(deps.generateDeps.timeoutMs ?? config.defaults.timeoutMs, exec.signal)
       try {
         deadline.check()
@@ -364,6 +367,9 @@ export function registerGenerateImageTool(ctx: Context, deps: ImageToolDeps): { 
  * naming a model there is a promise the call cannot keep.
  */
 export function imageToolHint(config: ImageConfig): string {
+  // Switched off: the tool is unregistered too, so the prompt must say nothing
+  // about a callable it no longer has.
+  if (!config.enabled) return ''
   if (config.models.length === 0) return ''
   const defaults = `size ${config.defaults.size}，quality ${config.defaults.quality}，n ${config.defaults.n}`
   const resolved = resolveImageModel(config)

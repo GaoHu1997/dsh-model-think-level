@@ -61,6 +61,9 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
   const [loadError, setLoadError] = useState<string | undefined>(undefined)
   const [busyId, setBusyId] = useState<string | undefined>(undefined)
   const [notice, setNotice] = useState<string | undefined>(undefined)
+  // Folded by default: this card is one entry in a list of settings, not the
+  // whole pane. The switch sits on the head line, outside the folded body.
+  const [open, setOpen] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -111,6 +114,19 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
   }, [reload])
 
   /**
+   * The service switch. Off unregisters the tool and refuses every generation
+   * entry on the host, while the models and params stay stored — the pane only
+   * flips the single field and re-reads the truth afterwards.
+   */
+  const setEnabled = useCallback((enabled: boolean): void => {
+    setBusyId('enabled')
+    void saveImageConfig({ enabled }).then(answer => {
+      setBusyId(undefined)
+      if (answer.ok) { setNotice(undefined); reload() } else setNotice(answer.error)
+    })
+  }, [reload])
+
+  /**
    * The per-request timeout. Stored in milliseconds; edited as one of five
    * minute steps (5/10/15/30/60), the range the host clamps to. Committed when
    * the pick changes — a half-typed value can no longer become a setting.
@@ -138,10 +154,15 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
 
   const models = view.models
   const empty = models.length === 0
+  // The card is ONE settings entry that starts folded: closed, it is a single
+  // line — the name, its state and the switch. The model/params controls only
+  // exist while it is open, so the pane stays a short list as it grows.
+  const bodyId = 'bre-config-imagegen-body'
   // The host records why a failed `tools.register` threw; without it the only
   // symptom is a model that never asks for a picture, so the card says it out
   // loud. A registered tool (or one never attempted) leaves this undefined.
-  const toolError = view.tool.error
+  // A switched-off service registers nothing on purpose, which is not a fault.
+  const toolError = view.enabled ? view.tool.error : undefined
   // A label shared by two routes (the same model behind two providers) would
   // read as one row in the menu; the provider name disambiguates only those.
   const labelCounts = new Map<string, number>()
@@ -152,70 +173,101 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     return `${model.label} · ${provider}`
   }
   return createElement('div', { className: 'bre-config-card' },
+    // One line while folded: caret + name, the state word, and the switch. The
+    // switch is a sibling of the expand button, so flipping it never toggles.
     createElement('div', { className: 'bre-config-card-head' },
-      createElement('span', { className: 'bre-config-card-title' }, t('imagegenSectionTitle')),
-    ),
-    notice !== undefined && createElement('div', { className: 'bre-config-notice' }, notice),
-    toolError !== undefined && createElement('div', { className: 'bre-config-notice bre-config-notice-warn' },
-      createElement('div', null, t('imagegenToolMissing')),
-      createElement('div', { className: 'bre-config-notice-why' }, t('imagegenToolMissingWhy', { reason: toolError }))),
-    createElement('div', { className: 'bre-config-defaults' },
-      createElement('label', null, t('imagegenDefaultsLabel')),
-      createElement('select', {
-        className: 'bre-config-select',
-        value: canonicalSize(view.defaults.size),
-        'aria-label': t('imagegenSizeLabel'),
-        onChange: (event: ChangeEvent<HTMLSelectElement>) => {
-          void saveImageConfig({ defaults: { size: (event.target as HTMLSelectElement).value } }).then(reload)
-        },
-      }, IMAGE_SIZE_TIERS.map(tier => createElement('option', { key: tier.label, value: tier.value }, tier.label))),
-      createElement('select', {
-        className: 'bre-config-select',
-        value: view.defaults.quality,
-        'aria-label': t('imagegenQualityLabel'),
-        onChange: (event: ChangeEvent<HTMLSelectElement>) => {
-          void saveImageConfig({ defaults: { quality: (event.target as HTMLSelectElement).value } }).then(reload)
-        },
-      }, ['low', 'medium', 'high', 'auto'].map(quality => createElement('option', { key: quality, value: quality }, quality))),
-      createElement('select', {
-        className: 'bre-config-select',
-        value: String(view.defaults.n),
-        'aria-label': t('imagegenCountLabel'),
-        onChange: (event: ChangeEvent<HTMLSelectElement>) => {
-          void saveImageConfig({ defaults: { n: Number((event.target as HTMLSelectElement).value) } }).then(reload)
-        },
-      }, [1, 2, 3, 4].map(count => createElement('option', { key: count, value: String(count) }, `n=${count}`))),
-      // The timeout the failure copy already pointed at: the value lives in
-      // `defaults.timeoutMs` (ms) and is picked here from five minute steps.
-      createElement('label', { className: 'bre-config-timeout', title: t('imagegenTimeoutHint') },
-        createElement('span', { className: 'bre-config-timeout-label' }, t('imagegenTimeoutLabel')),
-        createElement('select', {
-          className: 'bre-config-select',
-          value: String(view.defaults.timeoutMs),
-          'aria-label': t('imagegenTimeoutLabel'),
-          onChange: (event: ChangeEvent<HTMLSelectElement>) => {
-            commitTimeout((event.target as HTMLSelectElement).value)
-          },
-        }, timeoutOptions(view.defaults.timeoutMs).map(ms => createElement(
-          'option',
-          { key: ms, value: String(ms) },
-          t('imagegenTimeoutMinutes', { minutes: Math.round(ms / 60_000) }),
-        ))),
+      createElement('button', {
+        type: 'button',
+        className: 'bre-config-expand',
+        'aria-expanded': open,
+        'aria-controls': bodyId,
+        title: open ? t('imagegenCollapse') : t('imagegenExpand'),
+        onClick: () => setOpen(current => !current),
+      },
+        createElement('span', { className: 'bre-config-caret', 'aria-hidden': true }, open ? '▾' : '▸'),
+        createElement('span', { className: 'bre-config-card-title' }, t('imagegenSectionTitle')),
+      ),
+      createElement('span', { className: 'bre-config-card-state' }, view.enabled ? t('imagegenEnabled') : t('imagegenDisabled')),
+      createElement('label', { className: 'bre-config-switch', title: t('imagegenEnable') },
+        createElement('input', {
+          type: 'checkbox',
+          className: 'bre-config-switch-input',
+          role: 'switch',
+          'aria-label': t('imagegenEnable'),
+          checked: view.enabled,
+          disabled: busyId === 'enabled',
+          onChange: (event: ChangeEvent<HTMLInputElement>) => setEnabled((event.target as HTMLInputElement).checked),
+        }),
+        createElement('span', { className: 'bre-config-switch-track', 'aria-hidden': true }),
       ),
     ),
-    // The default-model picker: its own row under the params, so the choice is
-    // one menu instead of a radio buried among the per-row controls.
-    !empty && createElement('div', { className: 'bre-config-default-row' },
-      createElement('label', { className: 'bre-config-default-label' }, t('imagegenDefaultModelLabel')),
-      createElement('select', {
-        className: 'bre-config-select bre-config-default-select',
-        value: view.defaultModel ?? '',
-        'aria-label': t('imagegenDefaultModelLabel'),
-        disabled: busyId === 'default',
-        onChange: (event: ChangeEvent<HTMLSelectElement>) => setDefault((event.target as HTMLSelectElement).value),
-      },
-      view.defaultModel === null && createElement('option', { value: '', disabled: true }, t('imagegenDefaultModelNone')),
-      models.map(model => createElement('option', { key: model.id, value: model.id }, modelOptionText(model)))),
+    // A save failure must stay visible while the card is folded: the switch is
+    // on the head line, so its error cannot live in the body.
+    notice !== undefined && createElement('div', { className: 'bre-config-notice' }, notice),
+    createElement('div', { className: 'bre-config-card-hint' },
+      view.enabled ? t('imagegenEnabledHint') : t('imagegenDisabledHint')),
+    open && createElement('div', { className: 'bre-config-card-body', id: bodyId },
+      toolError !== undefined && createElement('div', { className: 'bre-config-notice bre-config-notice-warn' },
+        createElement('div', null, t('imagegenToolMissing')),
+        createElement('div', { className: 'bre-config-notice-why' }, t('imagegenToolMissingWhy', { reason: toolError }))),
+      createElement('div', { className: 'bre-config-defaults' },
+        createElement('label', null, t('imagegenDefaultsLabel')),
+        createElement('select', {
+          className: 'bre-config-select',
+          value: canonicalSize(view.defaults.size),
+          'aria-label': t('imagegenSizeLabel'),
+          onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+            void saveImageConfig({ defaults: { size: (event.target as HTMLSelectElement).value } }).then(reload)
+          },
+        }, IMAGE_SIZE_TIERS.map(tier => createElement('option', { key: tier.label, value: tier.value }, tier.label))),
+        createElement('select', {
+          className: 'bre-config-select',
+          value: view.defaults.quality,
+          'aria-label': t('imagegenQualityLabel'),
+          onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+            void saveImageConfig({ defaults: { quality: (event.target as HTMLSelectElement).value } }).then(reload)
+          },
+        }, ['low', 'medium', 'high', 'auto'].map(quality => createElement('option', { key: quality, value: quality }, quality))),
+        createElement('select', {
+          className: 'bre-config-select',
+          value: String(view.defaults.n),
+          'aria-label': t('imagegenCountLabel'),
+          onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+            void saveImageConfig({ defaults: { n: Number((event.target as HTMLSelectElement).value) } }).then(reload)
+          },
+        }, [1, 2, 3, 4].map(count => createElement('option', { key: count, value: String(count) }, `n=${count}`))),
+        // The timeout the failure copy already pointed at: the value lives in
+        // `defaults.timeoutMs` (ms) and is picked here from five minute steps.
+        createElement('label', { className: 'bre-config-timeout', title: t('imagegenTimeoutHint') },
+          createElement('span', { className: 'bre-config-timeout-label' }, t('imagegenTimeoutLabel')),
+          createElement('select', {
+            className: 'bre-config-select',
+            value: String(view.defaults.timeoutMs),
+            'aria-label': t('imagegenTimeoutLabel'),
+            onChange: (event: ChangeEvent<HTMLSelectElement>) => {
+              commitTimeout((event.target as HTMLSelectElement).value)
+            },
+          }, timeoutOptions(view.defaults.timeoutMs).map(ms => createElement(
+            'option',
+            { key: ms, value: String(ms) },
+            t('imagegenTimeoutMinutes', { minutes: Math.round(ms / 60_000) }),
+          ))),
+        ),
+      ),
+      // The default-model picker: its own row under the params, so the choice
+      // is one menu instead of a radio buried among the per-row controls.
+      !empty && createElement('div', { className: 'bre-config-default-row' },
+        createElement('label', { className: 'bre-config-default-label' }, t('imagegenDefaultModelLabel')),
+        createElement('select', {
+          className: 'bre-config-select bre-config-default-select',
+          value: view.defaultModel ?? '',
+          'aria-label': t('imagegenDefaultModelLabel'),
+          disabled: busyId === 'default',
+          onChange: (event: ChangeEvent<HTMLSelectElement>) => setDefault((event.target as HTMLSelectElement).value),
+        },
+        view.defaultModel === null && createElement('option', { value: '', disabled: true }, t('imagegenDefaultModelNone')),
+        models.map(model => createElement('option', { key: model.id, value: model.id }, modelOptionText(model)))),
+      ),
     ),
   )
 }

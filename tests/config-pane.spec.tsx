@@ -19,6 +19,7 @@ import type { RemoteApi } from '../src/client/types.js'
 /** The config the host answers a GET with. */
 const CONFIG_VIEW = {
   ok: true,
+  enabled: true,
   models: [
     {
       id: 'openai/gpt-image-1', route: 'openai', modelId: 'gpt-image-1', label: 'GPT-Image-1', providerLabel: 'OpenAI',
@@ -107,14 +108,105 @@ async function flush(): Promise<void> {
   await act(async () => { await Promise.resolve() })
 }
 
+/** The card starts folded; the model and param controls live in its body. */
+async function expand(): Promise<void> {
+  const head = document.querySelector<HTMLButtonElement>('.bre-config-expand')!
+  await act(async () => { head.click() })
+  await flush()
+}
+
 describe('ConfigPane', () => {
-  it('the card head is the 「生图」 title alone — no auto-fetch sub, no model count', async () => {
+  it('the card head is the 「生图」 title and its state — no auto-fetch sub, no model count', async () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
     const head = document.querySelector('.bre-config-card-head')!
-    expect(head.textContent).toBe('imagegenSectionTitle')
+    expect(head.querySelector('.bre-config-card-title')!.textContent).toBe('imagegenSectionTitle')
+    expect(head.querySelector('.bre-config-card-state')!.textContent).toBe('imagegenEnabled')
     expect(document.querySelectorAll('.bre-config-card-sub, .bre-config-card-head .bre-config-badge')).toHaveLength(0)
+  })
+
+  it('starts folded with the switch on the head, and expands on the title', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const head = document.querySelector<HTMLButtonElement>('.bre-config-expand')!
+    expect(head.getAttribute('aria-expanded')).toBe('false')
+    expect(document.querySelector('.bre-config-card-body')).toBeNull()
+    expect(document.querySelector('.bre-config-card-hint')!.textContent).toBe('imagegenEnabledHint')
+    await expand()
+    expect(head.getAttribute('aria-expanded')).toBe('true')
+    expect(document.querySelector('.bre-config-card-body')).not.toBeNull()
+    // The switch is on the head line, outside the folded body.
+    expect(document.querySelector('.bre-config-card-body .bre-config-switch')).toBeNull()
+  })
+
+  it('the switch is a labelled checkbox and flipping it never unfolds the card', async () => {
+    const { api } = fakeApi({})
+    const posts: unknown[] = []
+    handleFetch = (url, init) => {
+      if (init?.method === 'POST' && url === IMAGE_CONFIG_PATH) {
+        posts.push(JSON.parse(String(init.body)))
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      }
+      return new Response(JSON.stringify(CONFIG_VIEW), { status: 200 })
+    }
+    mountPane(api, () => {})
+    await flush()
+    const toggle = document.querySelector<HTMLInputElement>('.bre-config-switch-input')!
+    expect(toggle.getAttribute('role')).toBe('switch')
+    expect(toggle.getAttribute('aria-label')).toBe('imagegenEnable')
+    expect(toggle.checked).toBe(true)
+    await act(async () => { toggle.click() })
+    await flush()
+    expect(posts).toEqual([{ op: 'save', enabled: false }])
+    expect(document.querySelector('.bre-config-card-body')).toBeNull()
+    expect(document.querySelector<HTMLButtonElement>('.bre-config-expand')!.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('off says so in the head and hint, and keeps the models and params configured', async () => {
+    let enabled = false
+    handleFetch = (url, init) => {
+      if (init?.method === 'POST' && url === IMAGE_CONFIG_PATH) {
+        const body = JSON.parse(String(init.body)) as { enabled?: boolean }
+        if (typeof body.enabled === 'boolean') enabled = body.enabled
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        ...CONFIG_VIEW,
+        enabled,
+        // A switched-off service registers no tool: not a failure worth a warning.
+        tool: { registered: false, name: null },
+      }), { status: 200 })
+    }
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    expect(document.querySelector('.bre-config-card-state')!.textContent).toBe('imagegenDisabled')
+    expect(document.querySelector('.bre-config-card-hint')!.textContent).toBe('imagegenDisabledHint')
+    expect(document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.checked).toBe(false)
+    expect(document.querySelector('.bre-config-notice-warn')).toBeNull()
+    // The stored choice survives: opening still shows the same model menu.
+    await expand()
+    const select = document.querySelector<HTMLSelectElement>('.bre-config-default-select')!
+    expect(select.value).toBe('openai/gpt-image-1')
+    expect(document.querySelectorAll('.bre-config-defaults select')).toHaveLength(4)
+  })
+
+  it('a failed switch write shows the reason and leaves the switch where it was', async () => {
+    handleFetch = (url, init) => {
+      if (init?.method === 'POST' && url === IMAGE_CONFIG_PATH) {
+        return new Response(JSON.stringify({ ok: false, error: 'settings are read-only' }), { status: 500 })
+      }
+      return new Response(JSON.stringify(CONFIG_VIEW), { status: 200 })
+    }
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const toggle = document.querySelector<HTMLInputElement>('.bre-config-switch-input')!
+    await act(async () => { toggle.click() })
+    await flush()
+    expect(document.querySelector('.bre-config-notice')!.textContent).toContain('settings are read-only')
   })
 
   it('no model list, empty state or built-in-tool card renders anymore', async () => {
@@ -134,6 +226,7 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
+    await expand()
     const select = document.querySelector<HTMLSelectElement>('.bre-config-default-select')!
     expect(select.value).toBe('openai/gpt-image-1')
     expect([...select.options].map(option => option.text)).toEqual(['GPT-Image-1', 'CogView-3-Plus'])
@@ -150,6 +243,7 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
+    await expand()
     const warn = document.querySelector('.bre-config-notice-warn')!
     expect(warn).not.toBeNull()
     expect(warn.textContent).toContain('imagegenToolMissing')
@@ -160,6 +254,7 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
+    await expand()
     expect(document.querySelector('.bre-config-notice-warn')).toBeNull()
   })
 
@@ -167,7 +262,8 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
-    const children = [...document.querySelector('.bre-config-card')!.children]
+    await expand()
+    const children = [...document.querySelector('.bre-config-card-body')!.children]
     const paramsAt = children.findIndex(node => node.classList.contains('bre-config-defaults'))
     const defaultAt = children.findIndex(node => node.classList.contains('bre-config-default-row'))
     expect(paramsAt).toBeGreaterThanOrEqual(0)
@@ -181,6 +277,7 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
+    await expand()
     const select = document.querySelector<HTMLSelectElement>('.bre-config-default-select')!
     expect(select.value).toBe('')
     expect(select.options[0]!.text).toBe('imagegenDefaultModelNone')
@@ -195,6 +292,7 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
+    await expand()
     const optionTexts = [...document.querySelector('.bre-config-default-select')!.querySelectorAll('option')]
       .map(option => option.textContent)
     expect(optionTexts).toEqual(['CogView-3-Plus · zhipu', 'CogView-3-Plus · OpenAI'])
@@ -212,6 +310,7 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({ openai: { displayName: 'OpenAI 官方' } })
     mountPane(api, () => {})
     await flush()
+    await expand()
     const optionTexts = [...document.querySelector('.bre-config-default-select')!.querySelectorAll('option')]
       .map(option => option.textContent)
     expect(optionTexts).toEqual(['Same Label · OpenAI 官方', 'Same Label · zhipu'])
@@ -229,6 +328,7 @@ describe('ConfigPane', () => {
     }
     mountPane(api, () => {})
     await flush()
+    await expand()
     const select = document.querySelector<HTMLSelectElement>('.bre-config-default-select')!
     await act(async () => {
       select.value = 'zhipu/cogview-3-plus'
@@ -251,6 +351,7 @@ describe('ConfigPane', () => {
     }
     mountPane(api, () => {})
     await flush()
+    await expand()
     const selects = [...document.querySelectorAll<HTMLSelectElement>('.bre-config-defaults select')]
     expect([...selects[0]!.options].map(option => option.text)).toEqual(['1K', '2K', '4K'])
     await act(async () => {
@@ -279,6 +380,7 @@ describe('ConfigPane', () => {
     }
     mountPane(api, () => {})
     await flush()
+    await expand()
     const timeoutSelect = (): HTMLSelectElement => document.querySelector<HTMLSelectElement>('.bre-config-timeout select')!
     // 5/10/15/30/60 minutes, carried as the milliseconds the host stores.
     expect(Array.from(timeoutSelect().options).map(option => option.value))
@@ -305,6 +407,7 @@ describe('ConfigPane', () => {
     }), { status: 200 })
     mountPane(api, () => {})
     await flush()
+    await expand()
     const timeoutSelect = document.querySelector<HTMLSelectElement>('.bre-config-timeout select')!
     expect(timeoutSelect.value).toBe('120000')
     expect(Array.from(timeoutSelect.options).map(option => option.value).slice(0, 2))

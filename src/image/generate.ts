@@ -419,6 +419,10 @@ export async function generateImage(deps: GenerateDeps, request: GenerateRequest
 }
 
 async function generateWithinDeadline(deps: GenerateDeps, request: GenerateRequest, config: ImageConfig, deadline: ImageDeadline): Promise<GenerateResult> {
+  // The switch is authoritative for EVERY entry (tool, `/生图`, any cached
+  // execute): a generation that starts after the user turned the service off
+  // must not spend a paid request on a model that is no longer offered.
+  if (!config.enabled) throw new GenerateError('config', '生图服务已关闭——可在「高级设置 → 生图」里重新开启')
   const prompt = request.prompt.trim()
   if (prompt.length === 0) throw new GenerateError('param', '提示词为空')
   const model = resolveImageModel(config, request.model)

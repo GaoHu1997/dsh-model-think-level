@@ -47,6 +47,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import {
   endpointFamilyOf,
   isLegalKeyValue,
@@ -75,6 +76,9 @@ export interface KeyManagerProps {
   readonly t: Translate
   /** Transport; injectable for tests. */
   readonly client?: KeyManagerClient | undefined
+  /** Plugin-owned seat beside the official API-key label; standalone lists
+   * keep their own probe row when no field seat is supplied. */
+  readonly probeHost?: HTMLElement | undefined
   /**
    * Draft mode — the create-provider card's list over an in-memory store
    * instead of the host's. Rows read as "saved on create" rather than probed,
@@ -769,26 +773,26 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   // answering a click with the host's refusal.
   const enabledCount = rows.reduce((count, entry) => (entry.enabled ? count + 1 : count), 0)
 
+  // The field seat puts this action beside the official label, rather than
+  // spending another line between the label and the list. Keep the fallback
+  // for standalone lists; a draft has no saved route to probe.
+  const probeAction = draft === true ? null : (
+    <button
+      type="button"
+      className="bre-link-button bre-keys-probe"
+      disabled={busy || probing || rows.length < 2}
+      title={rows.length < 2 ? t('keysProbeSingle') : t('keysProbeHint')}
+      onClick={() => void run(() => client.probe(route), undefined)}
+    >
+      {probing ? t('keysProbing') : t('keysProbe')}
+    </button>
+  )
+
   return (
     <div className="bre-keys">
-      {/* The scope probe's seat, on the key section's own line: a multi-key
-          route may ask every key what it actually serves and have the answers
-          ticked into the rows. A single-key route has nothing to divide — the
-          button stands down rather than answering with the host's refusal —
-          and a draft list has no route to probe at all. */}
-      {draft === true ? null : (
-        <div className="bre-keys-probe-row">
-          <button
-            type="button"
-            className="bre-link-button bre-keys-probe"
-            disabled={busy || probing || rows.length < 2}
-            title={rows.length < 2 ? t('keysProbeSingle') : t('keysProbeHint')}
-            onClick={() => void run(() => client.probe(route), undefined)}
-          >
-            {probing ? t('keysProbing') : t('keysProbe')}
-          </button>
-        </div>
-      )}
+      {probeAction === null ? null : props.probeHost === undefined ? (
+        <div className="bre-keys-probe-row">{probeAction}</div>
+      ) : createPortal(probeAction, props.probeHost)}
       <ul className="bre-keys-list">
         {rows.map(row => {
           const name = nameOf(row)

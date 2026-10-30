@@ -117,6 +117,25 @@ describe('parseImageConfig', () => {
     })
     expect(config.models).toHaveLength(1)
   })
+
+  it('the service switch defaults ON for documents that predate it', () => {
+    // Every stored image.json before this field meant "the tool is on"; a
+    // missing key must not silently disable generation after an upgrade.
+    expect(parseImageConfig(undefined).enabled).toBe(true)
+    expect(parseImageConfig({ version: 2, models: [] }).enabled).toBe(true)
+    // Only an explicit `false` turns it off; junk values fall back to on.
+    expect(parseImageConfig({ enabled: false }).enabled).toBe(false)
+    expect(parseImageConfig({ enabled: 'no' }).enabled).toBe(true)
+    expect(parseImageConfig({ enabled: 0 }).enabled).toBe(true)
+  })
+
+  it('the switch round-trips through the file', () => {
+    writeImageConfig({ ...emptyImageConfig(), enabled: false }, fileOf())
+    expect(readImageConfig(fileOf()).enabled).toBe(false)
+    const next = updateImageConfig(document => ({ ...document, enabled: true }), fileOf())
+    expect(next.enabled).toBe(true)
+    expect(readImageConfig(fileOf()).enabled).toBe(true)
+  })
 })
 
 describe('writeImageConfig / readImageConfig', () => {

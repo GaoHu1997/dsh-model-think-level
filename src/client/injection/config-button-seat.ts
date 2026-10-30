@@ -1,5 +1,5 @@
 /**
- * The Models-page title-row seat: the 「生图服务」 button at the right end of
+ * The Models-page title-row seat: the 「高级设置」 button at the right end of
  * the 「模型」 heading line, opening the plugin's image-service config pane.
  *
  * The official `settings.action` slot lands in the DIALOG's top bar (beside
@@ -295,14 +295,8 @@ export function teardownConfigButtonSeats(state: ConfigButtonSeatState): void {
   titleRowCache = undefined
 }
 
-/**
- * The service icon: a picture frame with a sun and a mountain line — the
- * 「生图服务」 button opens the image-generation service, so the gear that used
- * to stand for "settings" is replaced by the thing being configured (16px on a
- * 24px grid, the plugin's shared stroke style). Decorative here: the button
- * carries the only label, so the glyph would otherwise be announced twice.
- */
-function imageServiceIcon(): ReturnType<typeof createElement> {
+/** Decorative sliders glyph for the advanced-settings entry. */
+function advancedSettingsIcon(): ReturnType<typeof createElement> {
   return createElement(
     'svg',
     {
@@ -318,14 +312,15 @@ function imageServiceIcon(): ReturnType<typeof createElement> {
       'aria-hidden': 'true',
       focusable: 'false',
     },
-    createElement('rect', { x: 3, y: 4, width: 18, height: 16, rx: 2.5 }),
-    createElement('circle', { cx: 8.5, cy: 9.5, r: 1.6 }),
-    createElement('path', { d: 'M3.6 17.6 9 12.2l4.4 4.4 3-3 4 4' }),
+    createElement('path', { d: 'M4 6h8m4 0h4M4 12h2m4 0h10M4 18h10m4 0h2' }),
+    createElement('circle', { cx: 14, cy: 6, r: 2 }),
+    createElement('circle', { cx: 8, cy: 12, r: 2 }),
+    createElement('circle', { cx: 16, cy: 18, r: 2 }),
   )
 }
 
 /**
- * The 「生图服务」 button: a round icon-only seat. The copy lives only in the
+ * The 「高级设置」 button: a round icon-only seat. The copy lives only in the
  * button's attributes (`title` tooltip + `aria-label`), never as a text node —
  * the Models page heading line is tight, and a labelled pill there competed
  * with the host's own title. The circle keeps the same hit area as the pills
@@ -335,7 +330,7 @@ function imageServiceIcon(): ReturnType<typeof createElement> {
 export function ConfigButton(props: { t: (key: string) => string; onOpen: () => void }): ReturnType<typeof createElement> {
   // The button only exists while the Models page is on screen, which is exactly
   // the moment the user is a click away from the pane: warm the config snapshot
-  // here so 「生图服务」 paints from cache instead of waiting for the host.
+  // here so 「高级设置」 paints from cache instead of waiting for the host.
   useEffect(() => { prefetchImageConfigView() }, [])
   return createElement(
     'button',
@@ -348,6 +343,6 @@ export function ConfigButton(props: { t: (key: string) => string; onOpen: () => 
       'aria-label': props.t('configButton'),
       onClick: () => props.onOpen(),
     },
-    imageServiceIcon(),
+    advancedSettingsIcon(),
   )
 }

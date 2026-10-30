@@ -15,6 +15,7 @@ import {
   invalidateImagegenModels,
   registerImagegenCompletion,
 } from '../src/client/injection/imagegen-entry.js'
+import { clearImageConfigCache, saveImageConfig } from '../src/client/image-config-client.js'
 import { modelTags } from '../src/client/ComposerSlider.js'
 import { createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -123,6 +124,40 @@ describe('registerImagegenCompletion', () => {
     invalidateImagegenModels()
     payload = { models: [{ id: 'a/x', label: 'A' }, { id: 'b/y', label: 'B' }], defaultModel: null }
     expect(await candidatesOf({ text: '/生图 ' })).toHaveLength(2)
+  })
+
+  it('a switched-off service offers no model candidates', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      enabled: false,
+      models: [{ id: 'a/x', label: 'A', route: 'a', modelId: 'x' }],
+      defaultModel: null,
+      defaults: {}, outputDir: '', tool: { registered: false, name: null },
+    }), { status: 200 })) as unknown as typeof globalThis.fetch)
+    const sources: Record<string, unknown>[] = []
+    registerImagegenCompletion({ inputTriggers: { registerSource: (s: Record<string, unknown>) => { sources.push(s) } } } as never)
+    const candidatesOf = sources[0]!['candidates'] as (projection: { text?: string }) => Promise<unknown[]>
+    expect(await candidatesOf({ text: '/生图 ' })).toEqual([])
+  })
+
+  it('a saved switch drops the cached rows at once (no manual invalidate)', async () => {
+    clearImageConfigCache()
+    let payload = { models: [{ id: 'a/x', label: 'A', route: 'a', modelId: 'x' }], defaultModel: null }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      return new Response(JSON.stringify({
+        ok: true, enabled: true, ...payload, defaults: {}, outputDir: '',
+        tool: { registered: false, name: null },
+      }), { status: 200 })
+    }) as unknown as typeof globalThis.fetch)
+    const sources: Record<string, unknown>[] = []
+    const dispose = registerImagegenCompletion({ inputTriggers: { registerSource: (s: Record<string, unknown>) => { sources.push(s) } } } as never)
+    const candidatesOf = sources[0]!['candidates'] as (projection: { text?: string }) => Promise<unknown[]>
+    expect(await candidatesOf({ text: '/生图 ' })).toHaveLength(1)
+    payload = { models: [{ id: 'a/x', label: 'A', route: 'a', modelId: 'x' }, { id: 'b/y', label: 'B', route: 'b', modelId: 'y' }], defaultModel: null }
+    expect(await saveImageConfig({ enabled: true })).toEqual({ ok: true, data: undefined })
+    expect(await candidatesOf({ text: '/生图 ' })).toHaveLength(2)
+    dispose()
   })
 })
 

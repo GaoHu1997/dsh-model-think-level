@@ -24,6 +24,7 @@ export interface ImageToolView {
 
 /** GET image-config 的应答体（结构声明：浏览器不 import host-only 模块）。 */
 export interface ImageConfigView {
+  enabled: boolean
   models: ImageModel[]
   defaultModel: string | null
   defaults: { size: string; quality: string; n: number; timeoutMs: number }
@@ -60,6 +61,24 @@ async function jsonPost(path: string, payload: unknown): Promise<TransportAnswer
 
 /** 上一份读成功的配置：配置页先用它立刻开画，再在后台刷新。 */
 let cachedView: ImageConfigView | undefined
+let configRevision = 0
+
+/** Completion caches must not outlive a successful settings write. */
+export function imageConfigRevision(): number {
+  return configRevision
+}
+
+/** Everything that caches a config-derived answer subscribes here. */
+const configListeners = new Set<() => void>()
+
+/**
+ * Listen for a successful config write (the switch changes what other surfaces
+ * may offer). @returns the unsubscribe.
+ */
+export function onImageConfigChanged(listener: () => void): () => void {
+  configListeners.add(listener)
+  return () => { configListeners.delete(listener) }
+}
 
 /** 画配置页之前就能拿到的快照（没有过就读不到）。 */
 export function cachedImageConfigView(): ImageConfigView | undefined {
@@ -69,6 +88,7 @@ export function cachedImageConfigView(): ImageConfigView | undefined {
 /** 丢掉缓存：测试重置用，登出/换账号时也可以先清一次。 */
 export function clearImageConfigCache(): void {
   cachedView = undefined
+  configRevision += 1
 }
 
 /**
@@ -87,7 +107,9 @@ export async function readImageConfigView(): Promise<TransportAnswer<ImageConfig
     const response = await fetch(IMAGE_CONFIG_PATH, { method: 'GET' })
     const body = (await response.json()) as Record<string, unknown>
     if (response.ok && body['ok'] === true && typeof body['models'] !== 'undefined') {
-      const view = body as unknown as ImageConfigView
+      // A host older than the switch never sends `enabled`: the shipped
+      // behaviour there was "on", so the view keeps that default.
+      const view = { ...(body as unknown as ImageConfigView), enabled: body['enabled'] !== false }
       cachedView = view
       return { ok: true, data: view }
     }
@@ -99,10 +121,23 @@ export async function readImageConfigView(): Promise<TransportAnswer<ImageConfig
 
 /** 保存默认模型/默认参数/输出目录。 */
 export async function saveImageConfig(patch: {
+  enabled?: boolean
   defaultModel?: string | null
   defaults?: Partial<{ size: string; quality: string; n: number; timeoutMs: number }>
   outputDir?: string
 }): Promise<TransportAnswer<undefined>> {
   const answer = await jsonPost(IMAGE_CONFIG_PATH, { op: 'save', ...patch })
-  return answer.ok ? { ok: true, data: undefined } : answer
+  if (!answer.ok) return answer
+  configRevision += 1
+  if (cachedView !== undefined) {
+    cachedView = { ...cachedView, ...patch, defaults: { ...cachedView.defaults, ...patch.defaults } }
+  }
+  for (const listener of configListeners) {
+    try {
+      listener()
+    } catch {
+      // A stale subscriber must never fail a save that already happened.
+    }
+  }
+  return { ok: true, data: undefined }
 }

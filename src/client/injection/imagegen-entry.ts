@@ -17,7 +17,7 @@ import {
   imagegenCandidates,
   type CompletionModel,
 } from './imagegen-completion.js'
-import { readImageConfigView } from '../image-config-client.js'
+import { onImageConfigChanged, readImageConfigView } from '../image-config-client.js'
 import type { ClientContext } from '../types.js'
 
 /** The host input-trigger service, typed structurally. */
@@ -53,7 +53,9 @@ export function invalidateImagegenModels(): void {
 async function completionModels(): Promise<readonly CompletionModel[]> {
   if (modelCache !== undefined && Date.now() - modelCache.at < CONFIG_CACHE_MS) return modelCache.models
   const answer = await readImageConfigView()
-  const models: CompletionModel[] = answer.ok
+  // A switched-off service offers no model to complete: the command itself
+  // still runs (and reports the switch), the menu simply stops advertising it.
+  const models: CompletionModel[] = answer.ok && answer.data.enabled
     ? answer.data.models.map(model => ({
       id: model.id,
       label: model.label,
@@ -80,7 +82,11 @@ export function registerImagegenCompletion(ctx: ClientContext): () => void {
   } catch {
     inputTriggers = undefined
   }
-  if (inputTriggers === undefined || typeof inputTriggers.registerSource !== 'function') return () => {}
+  // A saved switch invalidates the 30s model cache immediately: the menu must
+  // not keep offering models the user just turned off (or hide the ones just
+  // turned on).
+  const unsubscribe = onImageConfigChanged(invalidateImagegenModels)
+  if (inputTriggers === undefined || typeof inputTriggers.registerSource !== 'function') return unsubscribe
   let registered = true
   try {
     inputTriggers.registerSource({
@@ -107,6 +113,6 @@ export function registerImagegenCompletion(ctx: ClientContext): () => void {
     // plain array push; the disposer therefore only marks the source dead —
     // its candidates answer [] once the fiber is gone.
     registered = false
-    void registered
+    unsubscribe()
   }
 }

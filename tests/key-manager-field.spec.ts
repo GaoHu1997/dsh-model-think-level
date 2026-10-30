@@ -89,7 +89,9 @@ function hostOf(field: HTMLElement): HTMLElement {
 
 /** The official children of the field, as a test can see them. */
 function childrenOf(field: HTMLElement): string[] {
-  return Array.from(field.children).map(child => child.className)
+  return Array.from(field.children)
+    .filter(child => !child.classList.contains('bre-keys-probe-host'))
+    .map(child => child.className)
 }
 
 /** Let a promise, React's effects and an observer's microtask all land. */
@@ -177,6 +179,8 @@ describe('enhanceKeyManagerField', () => {
 
     expect(hosts()).toEqual([first])
     expect(keyManagerRoute(field)).toBe('wb')
+    expect(field.querySelectorAll('.bre-keys-probe-host')).toHaveLength(1)
+    expect(field.querySelectorAll('.bre-keys-probe')).toHaveLength(1)
   })
 
   it('mounts a fresh host when the page took the old one away', async () => {
@@ -193,6 +197,69 @@ describe('enhanceKeyManagerField', () => {
     expect(second).not.toBe(first)
     expect(hosts()).toEqual([second])
     expect(second.querySelector('.bre-keys')).not.toBeNull()
+  })
+
+  it('seats the probe beside the title, not in a separate row above the list', async () => {
+    const { field, label, input } = keyField()
+    enhanceKeyManagerField(field, deps())
+    await flush()
+
+    const probeHost = field.querySelector('.bre-keys-probe-host')
+    expect(probeHost?.parentElement).toBe(field)
+    expect(probeHost?.querySelector('.bre-keys-probe')).not.toBeNull()
+    expect(hostOf(field).querySelector('.bre-keys-probe-row')).toBeNull()
+    expect(hostOf(field).querySelector('.bre-keys-probe')).toBeNull()
+    expect(label.parentElement).toBe(field)
+    expect(input.parentElement).toBe(field)
+    expect(field.querySelectorAll('.bre-keys-probe-host')).toHaveLength(1)
+  })
+
+  it('keeps a wrapped input and the label/help intact while collapsing only the input wrapper', async () => {
+    const { field, label, input } = keyField()
+    const help = document.createElement('button')
+    help.type = 'button'
+    help.textContent = '?'
+    label.appendChild(help)
+    const wrapper = document.createElement('div')
+    wrapper.className = 'inputWrap'
+    input.before(wrapper)
+    wrapper.appendChild(input)
+    const before = childrenOf(field)
+
+    enhanceKeyManagerField(field, deps())
+    await flush()
+
+    expect(childrenOf(field)).toEqual(before)
+    expect(input.parentElement).toBe(wrapper)
+    expect(help.parentElement).toBe(label)
+    const collapsed = '.bre-key-managed > :is(div, span):has(input)'
+    expect(wrapper.matches(collapsed)).toBe(true)
+    expect(label.matches(collapsed)).toBe(false)
+    expect(field.querySelector('.bre-keys-probe-host')?.matches(collapsed)).toBe(false)
+
+    resetKeyManagerField(field)
+    expect(childrenOf(field)).toEqual(before)
+    expect(wrapper.matches(collapsed)).toBe(false)
+    expect(field.querySelector('.bre-keys-probe-host')).toBeNull()
+  })
+
+  it('reattaches the same probe seat after an official child rerender without remounting the list', async () => {
+    const { field } = keyField()
+    const same = deps()
+    enhanceKeyManagerField(field, same)
+    await flush()
+    const list = hostOf(field)
+    const probeHost = field.querySelector('.bre-keys-probe-host')
+    const button = probeHost?.querySelector('.bre-keys-probe')
+    probeHost?.remove()
+
+    enhanceKeyManagerField(field, same)
+    await flush()
+
+    expect(hostOf(field)).toBe(list)
+    expect(field.querySelector('.bre-keys-probe-host')).toBe(probeHost)
+    expect(probeHost?.querySelector('.bre-keys-probe')).toBe(button)
+    expect(field.querySelectorAll('.bre-keys-probe-host')).toHaveLength(1)
   })
 
   it('leaves a field alone when it is not a key field', async () => {
@@ -277,6 +344,16 @@ describe('teardownKeyManager', () => {
 })
 
 describe('the key list contract with the stylesheet', () => {
+  it('uses a compact title/action grid and collapses the hidden input wrapper', () => {
+    expect(STYLES).toContain('.bre-key-managed > :is(div, span):has(input) { display: none; }')
+    expect(STYLES).toContain('.bre-key-managed {\n  display: grid;')
+    expect(STYLES).toContain('grid-template-columns: minmax(0, 1fr) auto;')
+    expect(STYLES).toContain('gap: 4px 12px;\n  min-height: 0;')
+    expect(STYLES).toContain('.bre-key-managed > :first-child { grid-column: 1; grid-row: 1; }')
+    expect(STYLES).toContain('.bre-key-managed > p { grid-column: 1 / -1; }')
+    expect(STYLES).toContain('.bre-keys-probe-host {\n  grid-column: 2;\n  grid-row: 1;')
+  })
+
   it('seats the host under the field without touching the field’s own box', () => {
     expect(STYLES).toContain('.bre-keys-host {')
     // The eye's own rules survive the seat: they are what the seat must not

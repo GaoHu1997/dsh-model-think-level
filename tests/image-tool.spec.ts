@@ -348,6 +348,24 @@ describe('generate_image execute', () => {
     expect(captured).toHaveLength(0)
   })
 
+  it('a switched-off service refuses the call before any wire work', async () => {
+    const fake = fakeTools()
+    const captured: Captured[] = []
+    registerGenerateImageTool(fake.ctx, toolDeps({
+      readConfig: () => ({ ...syncImageConfig(emptyImageConfig(), PROVIDERS), enabled: false }),
+      generateDeps: {
+        config: () => ({ ...syncImageConfig(emptyImageConfig(), PROVIDERS), enabled: false }),
+        resolveKey: async () => 'sk-test-key',
+        home: () => home,
+        send: jsonSend(captured, 1),
+      },
+    }))
+    const definition = fake.registry.get('generate_image') as { execute: (args: unknown, exec: { signal: AbortSignal }) => Promise<unknown> }
+    await expect(definition.execute({ prompt: 'x' }, { signal: new AbortController().signal }))
+      .rejects.toThrow(/生图服务已关闭/)
+    expect(captured).toHaveLength(0)
+  })
+
   it('a failed saveImage surfaces as a tool error, not a silent success', async () => {
     const fake = fakeTools()
     const failing: ImageAttachmentsLike = {
@@ -440,6 +458,11 @@ describe('imageToolHint', () => {
 
   it('is empty without models — no hint for a capability that does not exist', () => {
     expect(imageToolHint(emptyImageConfig())).toBe('')
+  })
+
+  it('is empty when the service is switched off (no hint for a tool that is gone)', () => {
+    const config = { ...syncImageConfig(emptyImageConfig(), PROVIDERS), enabled: false }
+    expect(imageToolHint(config)).toBe('')
   })
 
   /*

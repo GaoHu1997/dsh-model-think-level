@@ -79,6 +79,12 @@ export interface ImageDefaults {
 /** The whole config document, exactly as it sits on disk. */
 export interface ImageConfig {
   readonly version: 2
+  /**
+   * Whether the image-generation service is on. Off means the native tool is
+   * not registered and every generation entry refuses; the models and image
+   * params stay in the file untouched, so switching back on costs one click.
+   */
+  readonly enabled: boolean
   /** When `models[]` was last re-derived from the settings document. */
   readonly syncedAt: string
   /** `"<route>/<modelId>"` of the default model, when the user picked one. */
@@ -110,6 +116,7 @@ export function imageConfigFilePath(home: string = harnessHome()): string {
 export function emptyImageConfig(now: () => Date = () => new Date()): ImageConfig {
   return {
     version: 2,
+    enabled: true,
     syncedAt: now().toISOString(),
     defaultModel: null,
     defaults: { size: '1024x1024', quality: 'high', n: 1, timeoutMs: 300_000 },
@@ -190,6 +197,9 @@ export function parseImageConfig(raw: unknown, now: () => Date = () => new Date(
   }
   return {
     version: 2,
+    // A config written before the switch existed has no opinion on it: the
+    // shipped behaviour was "on", so only an explicit false turns it off.
+    enabled: raw['enabled'] !== false,
     syncedAt: typeof raw['syncedAt'] === 'string' ? raw['syncedAt'] : base.syncedAt,
     defaultModel: typeof raw['defaultModel'] === 'string' && raw['defaultModel'].length > 0 ? raw['defaultModel'] : null,
     defaults,

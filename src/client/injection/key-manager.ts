@@ -41,6 +41,10 @@ export const KEY_MANAGED_CLASS = 'bre-key-managed'
 /** The plugin's own element right after the field: the container of the list. */
 const KEY_HOST_CLASS = 'bre-keys-host'
 
+/** A portal leaf inside the field, beside its label. Official children stay
+ * in place; only this plugin-owned leaf is inserted and removed. */
+const KEY_PROBE_HOST_CLASS = 'bre-keys-probe-host'
+
 /** The route the host's list was built for; read by the pass and by tests. */
 const KEY_HOST_ATTR = 'data-bre-key-host'
 
@@ -69,6 +73,8 @@ interface FieldState {
   route: string
   /** The plugin's element after the field, holding the React root. */
   readonly host: HTMLElement
+  /** The portal target beside the official field label. */
+  readonly probeHost: HTMLElement
   /** The React root mounted into {@link host}. */
   readonly mount: ForeignMount
   /** The copy the list was last rendered with. */
@@ -140,14 +146,20 @@ export function enhanceKeyManagerField(field: HTMLElement, deps: KeyManagerField
     if (host.hasAttribute(KEY_REGION_ATTR)) host.removeAttribute(KEY_REGION_ATTR)
   } else setAttr(host, KEY_REGION_ATTR, region)
 
+  const state = FIELDS.get(field)
+  const probeHost = state?.probeHost ?? field.ownerDocument.createElement('span')
+  if (state === undefined) probeHost.className = KEY_PROBE_HOST_CLASS
+  // Reattach the SAME leaf if a host render removed it. React still owns its
+  // button, so this preserves probe/edit state without moving official DOM.
+  if (probeHost.parentElement !== field) field.appendChild(probeHost)
+
   const subtree = (): ReactNode =>
     createElement(
       EffortBoundary,
       { fallbackText: deps.t('keysPanelFailed') },
-      createElement(KeyManager, { route, t: deps.t, client: deps.client }),
+      createElement(KeyManager, { route, t: deps.t, client: deps.client, probeHost }),
     )
 
-  const state = FIELDS.get(field)
   if (state !== undefined && state.route === route) {
     // The same list for the same route: nothing the official page did can change
     // what it shows, so only a new language or transport is worth a render — and
@@ -165,13 +177,14 @@ export function enhanceKeyManagerField(field: HTMLElement, deps: KeyManagerField
     FIELDS.delete(field)
     state.mount.root.unmount()
   }
-  FIELDS.set(field, { route, host, mount: mountReact(host, subtree(), { sync: true }), t: deps.t, client: deps.client })
+  FIELDS.set(field, { route, host, probeHost, mount: mountReact(host, subtree(), { sync: true }), t: deps.t, client: deps.client })
 }
 
-/** Take one mounted list down and forget it; the state's host goes with it. */
+/** Take one mounted list down and forget it; the state's hosts go with it. */
 function drop(field: HTMLElement, state: FieldState): void {
   FIELDS.delete(field)
   unmountReact(state.mount)
+  state.probeHost.remove()
 }
 
 /**
@@ -186,6 +199,9 @@ export function resetKeyManagerField(field: HTMLElement): void {
   // Whatever the map knew, nothing of this module may stay in the field: both
   // the state's own host and any host the field picked up along the way go.
   hostOf(field)?.remove()
+  for (const child of Array.from(field.children)) {
+    if (child.classList.contains(KEY_PROBE_HOST_CLASS)) child.remove()
+  }
 }
 
 /** Drop every list this module mounted. */
