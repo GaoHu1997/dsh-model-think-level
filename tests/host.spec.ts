@@ -1226,6 +1226,7 @@ describe('apply() key-index route', () => {
   async function mounted(
     providers: Record<string, unknown>,
     credentials?: Store,
+    config?: { routeSweepGraceMs?: number },
   ): Promise<{
     handler: (req: unknown, res: unknown) => Promise<void>
     settings: ReturnType<typeof fakeSettings>
@@ -1235,7 +1236,7 @@ describe('apply() key-index route', () => {
     const settings = fakeSettings(providers)
     const { ctx, routes, emitUpdated } = fakeHost(settings, credentials === undefined ? undefined : { credentials })
     const { apply } = await import('../src/index.js')
-    apply(ctx)
+    apply(ctx, config)
     const handler = routes.get(INDEX_PATH)
     expect(handler).toBeDefined()
     return { handler: handler!, settings, emitUpdated }
@@ -1622,9 +1623,9 @@ describe('apply() key-index route', () => {
     expect(credentials.values['ALIYUN_KEY']).toBe('fake-held-value')
   })
 
-  it('sweeps a deleted provider route out of the key index on the next document update', async () => {
+  it('sweeps a deleted provider route only past its grace window', async () => {
     const credentials = credentialStore({ ALIYUN_KEY: 'sk-live', GHOST_API_KEY: 'sk-ghost' })
-    const { emitUpdated } = await mounted({ aliyun: profile }, credentials)
+    const { emitUpdated } = await mounted({ aliyun: profile }, credentials, { routeSweepGraceMs: 10 })
     // The provider `ghost` is gone from the settings document (it was deleted
     // on the official Models page); the plugin's own index still lists its
     // key, its extra endpoint and its balance URL.
@@ -1638,9 +1639,18 @@ describe('apply() key-index route', () => {
       balances: { ghost: 'https://ghost.example.com/balance' },
     }, indexFile())
     emitUpdated('llm-pi-ai')
-    await new Promise(resolve => setTimeout(resolve, 20))
+    // The first absent reading only records the observation: one update caught
+    // mid-write must not cost live metadata.
+    const kept = readKeyIndex(indexFile())
+    expect(kept.providers['ghost']).toEqual([{ ref: 'GHOST_API_KEY' }, { ref: 'ALIYUN_KEY' }])
+    expect(kept.endpoints?.['ghost']).toEqual({ openai: 'https://ghost.example.com/v1' })
+    expect(kept.balances?.['ghost']).toBe('https://ghost.example.com/balance')
+    expect(credentials.values['GHOST_API_KEY']).toBe('sk-ghost')
+    // Past the window the queued recheck pass does the sweeping.
+    await vi.waitFor(() => {
+      expect(readKeyIndex(indexFile()).providers['ghost']).toBeUndefined()
+    })
     const swept = readKeyIndex(indexFile())
-    expect(swept.providers['ghost']).toBeUndefined()
     expect(swept.endpoints?.['ghost']).toBeUndefined()
     expect(swept.balances?.['ghost']).toBeUndefined()
     expect(swept.providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY' }])
@@ -1650,10 +1660,54 @@ describe('apply() key-index route', () => {
     expect(credentials.values['ALIYUN_KEY']).toBe('sk-live')
   })
 
+  it('keeps every route when a document update arrives without a providers record', async () => {
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-live' })
+    const { emitUpdated, settings } = await mounted({ aliyun: profile }, credentials, { routeSweepGraceMs: 0 })
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
+    // A half-written write can park the providers record out (null, the shape
+    // catalogueSource already defends against); the sweep must read that as
+    // "not ready", never as "every provider left" — even at grace 0, where
+    // any absent reading sweeps at once.
+    settings.register('llm-pi-ai', null as unknown as Record<string, unknown>)
+    emitUpdated('llm-pi-ai')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY' }])
+    expect(credentials.values['ALIYUN_KEY']).toBe('sk-live')
+  })
+
+  it('keeps a route that reappears inside the grace window', async () => {
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-live', GHOST_API_KEY: 'sk-ghost' })
+    const { emitUpdated, settings } = await mounted(
+      { aliyun: profile },
+      credentials,
+      { routeSweepGraceMs: 10 },
+    )
+    writeKeyIndex({
+      version: 1,
+      providers: {
+        aliyun: [{ ref: 'ALIYUN_KEY' }],
+        ghost: [{ ref: 'GHOST_API_KEY' }],
+      },
+      balances: { ghost: 'https://ghost.example.com/balance' },
+    }, indexFile())
+    // One snapshot that missed the route (a mid-write read), then the route
+    // back in the very next update: the absence observation must lapse and
+    // the sweep must never fire.
+    settings.register('llm-pi-ai', { aliyun: profile })
+    emitUpdated('llm-pi-ai')
+    settings.register('llm-pi-ai', { aliyun: profile, ghost: profile })
+    emitUpdated('llm-pi-ai')
+    await new Promise(resolve => setTimeout(resolve, 40))
+    const index = readKeyIndex(indexFile())
+    expect(index.providers['ghost']).toEqual([{ ref: 'GHOST_API_KEY' }])
+    expect(index.balances?.['ghost']).toBe('https://ghost.example.com/balance')
+    expect(credentials.values['GHOST_API_KEY']).toBe('sk-ghost')
+  })
+
   it('sweeps route residue at boot, for deletions made while the plugin was off', async () => {
     const credentials = credentialStore({ GHOST_API_KEY: 'sk-ghost' })
     writeKeyIndex({ version: 1, providers: { ghost: [{ ref: 'GHOST_API_KEY' }] } }, indexFile())
-    await mounted({ aliyun: profile }, credentials)
+    await mounted({ aliyun: profile }, credentials, { routeSweepGraceMs: 10 })
     await vi.waitFor(() => {
       expect(readKeyIndex(indexFile()).providers['ghost']).toBeUndefined()
     })

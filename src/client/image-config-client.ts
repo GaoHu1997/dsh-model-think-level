@@ -92,7 +92,7 @@ export function clearImageConfigCache(): void {
 }
 
 /**
- * 预热配置：模型页一挂载就发一次 GET，用户点「生图服务」时缓存已经就位。
+ * 预热配置：模型页一挂载就发一次 GET，用户点「高级设置」时缓存已经就位。
  * 失败不管——真正打开时会再读一次并把错误显示出来。
  */
 export function prefetchImageConfigView(): void {

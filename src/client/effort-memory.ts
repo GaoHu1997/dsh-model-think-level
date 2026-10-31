@@ -36,6 +36,11 @@
  *   - an effort-less selection for the CURRENT model is an explicit "follow
  *     the provider default" and must pass through untouched — the session
  *     sighting dies with it;
+ *   - nothing is spoken over an IN-FLIGHT user pick: the restore watcher blocks
+ *     while the latest utterance has started but not yet settled, because the
+ *     host's last-submitter-wins generation would discard the user's response
+ *     with a fake-ok — the pick then silently does nothing ("选择后不切换",
+ *     fixed by refunding and re-kicking on the utterance's own settle);
  *   - nothing is injected while the slider preference (the seat the memory
  *     serves) is switched off.
  *
@@ -312,11 +317,23 @@ export function wireEffortMemory(directory: ModelDirectoryLike, deps?: EffortMem
   // newer user action always wins, whatever it said, and the superseded
   // submission is dropped entirely instead of overwriting it.
   let utterances = 0
+  // The latest utterance that has SETTLED: its wrapped call resolved —
+  // accepted, refused or dropped. `utterances` moves at wrapped ENTRY, but the
+  // utterance's own submit reaches the wire only after its chain wait, so a
+  // watcher run started during that park reads `utteranceAtAttempt` as "no
+  // newer utterance" and would submit right over the in-flight pick. The
+  // host's last-submitter-wins generation then discards the USER's response
+  // with a fake-ok — the pick evaporates with no error on any surface. The
+  // watcher therefore blocks on this marker and refunds; the utterance's own
+  // settle lands a store update that re-kicks it against the settled
+  // projection.
+  let settledUtterance = 0
 
-  const wrapped = async (
+  /** The utterance body: everything between the pick and its settlement. */
+  const runUtterance = async (
+    myUtterance: number,
     selection: Parameters<ModelDirectoryLike['select']>[0],
   ): Promise<unknown> => {
-    const myUtterance = ++utterances
     // An explicit level is the memory's source of truth — but only an
     // ACCEPTED one: a refused selection (host validation failed) must not
     // poison the memory and re-fail every later switch.
@@ -389,6 +406,21 @@ export function wireEffortMemory(directory: ModelDirectoryLike, deps?: EffortMem
     return original.call(directory, { ...selection, reasoningEffort: fallback })
   }
 
+  const wrapped = async (
+    selection: Parameters<ModelDirectoryLike['select']>[0],
+  ): Promise<unknown> => {
+    const myUtterance = ++utterances
+    try {
+      return await runUtterance(myUtterance, selection)
+    } finally {
+      // The utterance settles when its call resolves — accepted, refused or
+      // dropped. Monotonic on purpose: an older superseded utterance can
+      // settle after a newer one and must not drag the marker back below the
+      // latest.
+      if (myUtterance > settledUtterance) settledUtterance = myUtterance
+    }
+  }
+
   /** Re-apply the chain to a level-less durable projection (session restore). */
   const restoreProjection = (): void => {
     const snapshot = directory.store.getSnapshot()
@@ -431,10 +463,23 @@ export function wireEffortMemory(directory: ModelDirectoryLike, deps?: EffortMem
         // speaking. A newer user utterance (an explicit pick, or a
         // follow-the-default that landed mid-window) is final — this attempt
         // stays spent instead of overriding it.
+        if (utterances !== utteranceAtAttempt) return
+        // An utterance that has STARTED but not yet settled may still reach the
+        // wire, and the host's last-submitter-wins generation would then
+        // discard the USER's response with a fake-ok: the pick silently does
+        // nothing. The utterance counter moved before this run captured
+        // `utteranceAtAttempt`, so the fence above cannot see it — the settle
+        // marker can. Refund rather than stay spent: the utterance's own
+        // settle lands a store update that re-kicks this watcher against the
+        // settled projection (a refused pick, in particular, must leave the
+        // restore retryable).
+        if (utterances !== settledUtterance) {
+          attemptedRestores.delete(key)
+          return
+        }
         const fresh = directory.store.getSnapshot()
         const freshCurrent = fresh.current
-        if (utterances !== utteranceAtAttempt
-          || freshCurrent === null || freshCurrent.reasoningEffort !== undefined
+        if (freshCurrent === null || freshCurrent.reasoningEffort !== undefined
           || memoryKey(freshCurrent.provider, freshCurrent.model) !== key
           || !effortIdsOf(fresh, freshCurrent.provider, freshCurrent.model).includes(fallback)) {
           return

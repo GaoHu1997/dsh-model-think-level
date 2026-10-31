@@ -3,13 +3,13 @@
  * (z-index 1010 — the dialog's own opaque mask sits at 1000), opened from the
  * Models-page title-row button.
  *
- * One card today, 「生图」, per the design's card-list shape with room for
- * more: the params row and the default-model select under it. The marked
- * models surface as that select's options; marking itself lives on the Models
- * page (展开模型行 → 输入模态 → 勾选「生图」), so the pane keeps no list and
- * no empty state of its own. The one status line it does carry is the host's
- * verbatim reason when `tools.register` threw: a silently missing native tool
- * is otherwise indistinguishable from a model that simply never asks.
+ * Cards, per the design's folded card-list shape: 「生图」 (enable switch on
+ * the head line; the params row and the default-model select in the folded
+ * body, plus the host's verbatim reason when `tools.register` threw) and
+ * 「自动继续」 (the session watcher switch). The marked image models surface
+ * as the select's options; marking itself lives on the Models page (展开模型行
+ * → 输入模态 → 勾选「生图」), so the pane keeps no list and no empty state of
+ * its own.
  *
  * Esc / backdrop / ✕ close it; the wrapper unmounts and the page keeps
  * whatever the pane saved.
@@ -17,11 +17,17 @@
  * @module dsh-model-think-level/client/ConfigPane
  */
 
-import { createElement, useCallback, useEffect, useRef, useState } from 'react'
+import { createElement, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, MouseEvent as ReactMouseEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ReactNode } from 'react'
 import { canonicalSize, IMAGE_SIZE_TIERS } from '../image/sizes.js'
+import { MAX_CONSECUTIVE } from './auto-continue-rules.js'
+import {
+  autoContinueEnabled,
+  setAutoContinueEnabled,
+  subscribeAutoContinueEnabled,
+} from './auto-continue-pref.js'
 import { EffortBoundary, mountReact, unmountReact } from './injection/mount.js'
 import {
   cachedImageConfigView,
@@ -273,6 +279,53 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
 }
 
 /**
+ * The 「自动继续」 card: one folded settings entry — the switch sits on the
+ * head line (flipping it never unfolds the card). The one-line streak cap
+ * stays under the head, so the folded card keeps the same height as the
+ * 「生图」 card; the full what-triggers description folds into the body.
+ */
+export function AutoContinueCard(props: { t: (key: string, params?: Record<string, unknown>) => string }): ReactNode {
+  const { t } = props
+  const enabled = useSyncExternalStore(subscribeAutoContinueEnabled, autoContinueEnabled)
+  const [open, setOpen] = useState(false)
+  const bodyId = 'bre-config-auto-continue-body'
+  return createElement('div', { className: 'bre-config-card' },
+    createElement('div', { className: 'bre-config-card-head' },
+      createElement('button', {
+        type: 'button',
+        className: 'bre-config-expand',
+        'aria-expanded': open,
+        'aria-controls': bodyId,
+        title: open ? t('autoContinueCollapse') : t('autoContinueExpand'),
+        onClick: () => setOpen(current => !current),
+      },
+        createElement('span', { className: 'bre-config-caret', 'aria-hidden': true }, open ? '▾' : '▸'),
+        createElement('span', { className: 'bre-config-card-title' }, t('autoContinueSectionTitle')),
+      ),
+      createElement('span', { className: 'bre-config-card-state' }, enabled ? t('settingOn') : t('settingOff')),
+      createElement('label', { className: 'bre-config-switch', title: t('autoContinueAria') },
+        createElement('input', {
+          type: 'checkbox',
+          className: 'bre-config-switch-input',
+          role: 'switch',
+          'aria-label': t('autoContinueAria'),
+          checked: enabled,
+          onChange: (event: ChangeEvent<HTMLInputElement>) => {
+            setAutoContinueEnabled((event.target as HTMLInputElement).checked)
+          },
+        }),
+        createElement('span', { className: 'bre-config-switch-track', 'aria-hidden': true }),
+      ),
+    ),
+    createElement('div', { className: 'bre-config-card-hint' },
+      t('autoContinueHint', { count: MAX_CONSECUTIVE })),
+    open && createElement('div', { className: 'bre-config-card-body', id: bodyId },
+      createElement('div', { className: 'bre-config-card-hint' }, t('autoContinueDescription')),
+    ),
+  )
+}
+
+/**
  * The floating pane. Exported for tests: render it inside a chosen container.
  */
 export function ConfigPane(props: ConfigPaneProps): ReactNode {
@@ -304,6 +357,9 @@ export function ConfigPane(props: ConfigPaneProps): ReactNode {
     createElement('div', { className: 'bre-config-body' },
       createElement(EffortBoundary, { fallbackText: t('configPaneFailed') },
         createElement(ImageGenCard, { api: props.api, t: props.t }),
+      ),
+      createElement(EffortBoundary, { fallbackText: t('configPaneFailed') },
+        createElement(AutoContinueCard, { t: props.t }),
       ),
     ),
   ),

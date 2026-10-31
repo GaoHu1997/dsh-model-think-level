@@ -4316,6 +4316,11 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-config-body {
   flex: 1 1 auto;
   min-height: 0;
+  /* Column flex so the card list keeps an even gap; items keep their content
+     height (min-height auto), so the pane still scrolls instead of squashing. */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   padding: 14px 16px;
   overflow-y: auto;
 }

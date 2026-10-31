@@ -25,7 +25,7 @@ import type { ModelDirectoryLike } from '../types.js'
  * `current`; 0.1.6-alpha.2 dropped it (navigation moved to the view owner) and
  * reports rows as `byId`, each with its `retainedBy` source counts.
  */
-interface SessionsLike {
+export interface SessionsLike {
   list?: {
     getSnapshot(): {
       current?: string
@@ -38,7 +38,7 @@ interface SessionsLike {
  * The `ui-session` service face (0.1.6-alpha.2+): its scope adapter exposes the
  * main-view binding, whose `key` is the current session id.
  */
-interface UiSessionLike {
+export interface UiSessionLike {
   adapter?: { current?: { getSnapshot(): { key?: string } } }
 }
 
@@ -59,7 +59,7 @@ interface ModelDirectoriesLike {
  * @param uiSession - the ui-session service face, when mounted.
  * @returns the current session id, or undefined in the boot window.
  */
-function currentSessionId(
+export function currentSessionId(
   sessions: SessionsLike | undefined,
   uiSession: UiSessionLike | undefined,
 ): string | undefined {

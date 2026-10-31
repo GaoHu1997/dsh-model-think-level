@@ -718,6 +718,203 @@ describe('wireEffortMemory: configured per-model pick', () => {
   })
 })
 
+describe('wireEffortMemory: watcher vs an in-flight pick', () => {
+  /**
+   * A directory whose underlying select HANGS until the test releases it, with
+   * the real host's generation discipline: the LAST submitter wins, and an
+   * earlier in-flight response is discarded — returning a fake
+   * `{ok: true, value: undefined}` on success, indistinguishable from an
+   * accepted pick. That fake-ok is what let a watcher re-select silently
+   * swallow the user's pick (the session model switch that "did not switch").
+   */
+  function gatedDirectory(initial: ModelDirectoryStateLike, opts?: { refuseFirst?: number }) {
+    let state = initial
+    const submitted: Selection[] = []
+    const resolvers: Array<(value: unknown) => void> = []
+    const listeners = new Set<() => void>()
+    const notify = (): void => { for (const listener of [...listeners]) listener() }
+    const directory = {
+      store: {
+        getSnapshot: (): ModelDirectoryStateLike => state,
+        subscribe(listener: () => void): () => void {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+      },
+      load: async (): Promise<ModelDirectoryStateLike> => state,
+      select: async (selection: Selection): Promise<unknown> => {
+        const at = submitted.length
+        submitted.push(selection)
+        // Hold on the "wire": the caller settles each submission explicitly.
+        const outcome = await new Promise<unknown>(resolve => { resolvers[at] = resolve })
+        if (at < (opts?.refuseFirst ?? 0)) {
+          state = { ...state, status: 'error', error: 'session/invalid: refused' }
+          notify()
+          return { ok: false, error: { code: 'session/invalid', message: 'refused' } }
+        }
+        state = {
+          ...state,
+          current: {
+            provider: selection.provider,
+            model: selection.model,
+            ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+          },
+        }
+        notify()
+        return undefined
+      },
+    }
+    return {
+      directory: directory as unknown as ModelDirectoryLike,
+      submitted,
+      /** Settle the Nth (0-based) in-flight submission. */
+      settle(at: number, value: unknown = undefined): void { resolvers[at]?.(value) },
+      update(next: ModelDirectoryStateLike): void { state = next; notify() },
+      get current(): DirectoryCurrentLike | null { return state.current },
+    }
+  }
+
+  /** Flush every microtask the fixture chain needs before the next step. */
+  const tick = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 0) })
+
+  /** Per-call configured gates, in call order: the memory chain's pacing points. */
+  function configuredGates(): {
+    configuredEffort: (provider: string, model: string) => Promise<string | undefined>
+    release(at: number, level: string | undefined): void
+    calls(): number
+  } {
+    const gates: Array<(level: string | undefined) => void> = []
+    let calls = 0
+    return {
+      configuredEffort: () => new Promise<string | undefined>(resolve => { gates[calls] = resolve; calls += 1 }),
+      release: (at, level) => { gates[at]?.(level) },
+      calls: () => calls,
+    }
+  }
+
+  it('does not speak over an in-flight pick: the watcher refunds and waits for its settle', async () => {
+    // The reported sequence: the session's durable projection has not landed
+    // yet when the user picks (current null), the pick parks in the chain
+    // wait, the projection lands mid-flight (a level-less current with an
+    // unspent restore key), and the watcher's chain resolves while the pick is
+    // still on the wire. Speaking there won the host's generation race,
+    // discarded the user's response with a fake-ok and left the session on the
+    // old model — the pick looked accepted and did nothing.
+    const fake = gatedDirectory(stateWith(null))
+    const chain = configuredGates()
+    const restore = wireEffortMemory(fake.directory, { configuredEffort: chain.configuredEffort })
+    try {
+      // The user picks gpt-5.6; the chain parks on configured gate 0.
+      const pick = fake.directory.select({ provider: 'openai', model: 'gpt-5.6' })
+      await tick()
+      expect(chain.calls()).toBe(1)
+
+      // The projection lands mid-flight: kimi-k3, level-less, key unspent.
+      fake.update(stateWith({ provider: 'moonshot', model: 'kimi-k3' }, { restore: true }))
+      await tick()
+      expect(chain.calls()).toBe(2)
+
+      // The user's chain answers; the pick reaches the wire and hangs there.
+      chain.release(0, 'medium')
+      await tick()
+      expect(fake.submitted).toEqual([{ provider: 'openai', model: 'gpt-5.6', reasoningEffort: 'medium' }])
+
+      // The watcher's chain answers while the pick is unsettled: it must
+      // REFUND, not submit — a kimi-k3 re-select here would be the last
+      // submitter and silently discard the user's pick.
+      chain.release(1, 'max')
+      await tick()
+      expect(fake.submitted).toEqual([{ provider: 'openai', model: 'gpt-5.6', reasoningEffort: 'medium' }])
+
+      // The pick settles accepted; the re-kick finds a level-full current and
+      // stays quiet (no further configured read). The session rests on the
+      // user's model.
+      fake.settle(0)
+      await pick
+      await tick()
+      expect(fake.submitted).toEqual([{ provider: 'openai', model: 'gpt-5.6', reasoningEffort: 'medium' }])
+      expect(chain.calls()).toBe(2)
+      expect(fake.current).toEqual({ provider: 'openai', model: 'gpt-5.6', reasoningEffort: 'medium' })
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not speak over an in-flight EXPLICIT pick either (watcher started after it)', async () => {
+    // Same race, explicit-level shape: the pick skips the chain and is on the
+    // wire immediately, and the watcher starts afterwards — the older
+    // utterance fence cannot see it, so only the settle marker can.
+    const fake = gatedDirectory(stateWith(null))
+    const chain = configuredGates()
+    const restore = wireEffortMemory(fake.directory, { configuredEffort: chain.configuredEffort })
+    try {
+      const pick = fake.directory.select({ provider: 'openai', model: 'gpt-5.6', reasoningEffort: 'high' })
+      await tick()
+      expect(fake.submitted).toEqual([{ provider: 'openai', model: 'gpt-5.6', reasoningEffort: 'high' }])
+
+      // The projection lands while the pick is in flight; the watcher parks.
+      fake.update(stateWith({ provider: 'moonshot', model: 'kimi-k3' }, { restore: true }))
+      await tick()
+      expect(chain.calls()).toBe(1)
+
+      // The watcher's chain answers: the pick is unsettled → refund, silence.
+      chain.release(0, 'max')
+      await tick()
+      expect(fake.submitted).toHaveLength(1)
+
+      // The pick settles; the re-kick finds a level-full current, stays quiet.
+      fake.settle(0)
+      await pick
+      await tick()
+      expect(fake.submitted).toHaveLength(1)
+      expect(fake.current).toEqual({ provider: 'openai', model: 'gpt-5.6', reasoningEffort: 'high' })
+    } finally {
+      restore()
+    }
+  })
+
+  it('re-kicks after the in-flight pick settles refused and restores the level', async () => {
+    // The refund must not dead-end: a refused pick (a session still
+    // initializing) re-kicks the watcher, whose attempt was refunded, so the
+    // level still lands on the model the session actually rests on.
+    const fake = gatedDirectory(stateWith(null), { refuseFirst: 1 })
+    const chain = configuredGates()
+    const restore = wireEffortMemory(fake.directory, { configuredEffort: chain.configuredEffort })
+    try {
+      // The user's explicit pick is on the wire and will be refused.
+      const pick = fake.directory.select({ provider: 'openai', model: 'gpt-5.6', reasoningEffort: 'high' })
+      await tick()
+
+      // The projection lands mid-flight; the watcher starts and parks.
+      fake.update(stateWith({ provider: 'moonshot', model: 'kimi-k3' }, { restore: true }))
+      await tick()
+      expect(chain.calls()).toBe(1)
+
+      // The watcher's chain answers: the pick is unsettled → refund, silence.
+      chain.release(0, 'max')
+      await tick()
+      expect(fake.submitted).toHaveLength(1)
+
+      // The pick settles REFUSED: the error update re-kicks the watcher, whose
+      // refunded attempt now runs against the settled projection (the current
+      // is the level-less kimi-k3) and restores the level.
+      fake.settle(0)
+      await pick
+      await tick()
+      expect(chain.calls()).toBe(2)
+      chain.release(1, undefined)
+      await tick()
+      // No memory and no configured pick → the vendor default answers.
+      expect(fake.submitted[1]).toEqual({ provider: 'moonshot', model: 'kimi-k3', reasoningEffort: 'max' })
+      fake.settle(1)
+      await tick()
+      expect(fake.current).toEqual({ provider: 'moonshot', model: 'kimi-k3', reasoningEffort: 'max' })
+    } finally {
+      restore()
+    }
+  })
+})
+
 describe('wireEffortMemory: session sightings', () => {
   it('keeps a pick made in the session across switches, over the configured layer', async () => {
     const fake = fakeDirectory(stateWith({ provider: 'moonshot', model: 'kimi-k3' }))

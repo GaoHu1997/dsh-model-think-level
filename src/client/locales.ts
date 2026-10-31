@@ -254,6 +254,14 @@ export const en = {
   imagegenCardRunning: 'Generating image…',
   imagegenToolMissing: 'The built-in image tool is not registered, so a model cannot call it.',
   imagegenToolMissingWhy: 'Host said: {reason}',
+  autoContinueSectionTitle: 'Auto-continue',
+  autoContinueExpand: 'Configure auto-continue',
+  autoContinueCollapse: 'Collapse auto-continue settings',
+  autoContinueTitle: 'Continue interrupted turns',
+  autoContinueDescription: 'When a turn is cut off by a disconnect, a timeout or the output limit, reply “Continue” automatically. Clean finishes, your own stops and auth or quota errors are left alone.',
+  autoContinueHint: 'At most {count} automatic replies in a row; anything you send yourself resets the count.',
+  autoContinueAria: 'Enable auto-continue',
+  autoContinueMessage: 'Continue',
 }
 
 /** The plugin's locale key union. */
@@ -512,4 +520,12 @@ export const zh: { [Key in keyof typeof en]: string } = {
   imagegenCardRunning: '正在生成图片…',
   imagegenToolMissing: '内建生图工具没有注册成功，模型调不到它。',
   imagegenToolMissingWhy: '宿主说：{reason}',
+  autoContinueSectionTitle: '自动继续',
+  autoContinueExpand: '展开自动继续设置',
+  autoContinueCollapse: '收起自动继续设置',
+  autoContinueTitle: '自动继续被中断的会话',
+  autoContinueDescription: '会话因断线、超时或输出达到上限而中断时，自动回复「继续」。正常完成、手动停止、鉴权或额度类错误不会触发。',
+  autoContinueHint: '连续自动回复最多 {count} 次；你手动发送任何消息都会重新计数。',
+  autoContinueAria: '启用自动继续',
+  autoContinueMessage: '继续',
 }

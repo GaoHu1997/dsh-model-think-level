@@ -159,6 +159,17 @@ const PI_NS = PI_AI_NS as SettingsNamespace
  */
 const BOOT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const
 
+/**
+ * How long a key-index route must stay absent from the settings document
+ * before the vanish sweep deletes its metadata. One document update caught
+ * mid-write — or a first readable snapshot that predates a provider's
+ * arrival — reads as a deletion for a moment, and sweeping on that instant
+ * cost users their balance URLs, extra endpoints, keys and credentials. A
+ * route that reappears inside the window lapses back to kept; only a route
+ * still absent at the deadline is swept.
+ */
+const ROUTE_SWEEP_GRACE_MS = 30_000
+
 /** Probe fetch budget: a gateway that cannot answer /models in 15s will not answer the composer either. */
 const PROBE_TIMEOUT_MS = 15_000
 
@@ -296,6 +307,12 @@ export interface Config {
    */
   bootRetryDelaysMs?: number[]
   /**
+   * How long a key-index route must stay absent from the settings document
+   * before the vanish sweep deletes its residue, in milliseconds (default
+   * 30000). `0` sweeps on the first absent-reading pass.
+   */
+  routeSweepGraceMs?: number
+  /**
    * Rewrite effort-less calls to forced-thinking ladders into the ladder's
    * vendor default (default true). Only the request class that today becomes
    * `thinking: {type: disabled}` on a ladder that cannot switch thinking off
@@ -318,6 +335,7 @@ export const Config: Schema<Config> = Schema.object({
   modalityAutofill: Schema.boolean().default(true),
   probeTimeoutMs: Schema.natural().min(1).default(PROBE_TIMEOUT_MS),
   bootRetryDelaysMs: Schema.array(Schema.natural().min(1)).default([...BOOT_RETRY_DELAYS_MS]),
+  routeSweepGraceMs: Schema.natural().default(ROUTE_SWEEP_GRACE_MS),
   defaultGuard: Schema.boolean().default(true),
   uaOverride: Schema.boolean().default(true),
 })
@@ -968,6 +986,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     modalityAutofill: config.modalityAutofill !== false,
     probeTimeoutMs: config.probeTimeoutMs ?? PROBE_TIMEOUT_MS,
     bootRetryDelaysMs: config.bootRetryDelaysMs ?? [...BOOT_RETRY_DELAYS_MS],
+    routeSweepGraceMs: config.routeSweepGraceMs ?? ROUTE_SWEEP_GRACE_MS,
     defaultGuard: config.defaultGuard !== false,
     uaOverride: config.uaOverride !== false,
   }
@@ -1293,6 +1312,43 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   /**
+   * Per-route first-absence observation for the vanish sweep. A route enters
+   * the map the first pass that cannot find it in the settings document and
+   * leaves the moment the document names it again; only a route still absent
+   * `resolved.routeSweepGraceMs` after its first observation is swept.
+   */
+  const vanishedSince = new Map<string, number>()
+  /** Every timer the sweep owns: boot retries and grace rechecks. */
+  const sweepTimers = new Set<ReturnType<typeof setTimeout>>()
+  ctx.effect(() => () => {
+    for (const timer of sweepTimers) clearTimeout(timer)
+    sweepTimers.clear()
+  }, 'dsh-model-think-level: route-sweep timers')
+  /**
+   * One delayed sweep pass, for deadlines the document updates will not reach:
+   * a route observed absent on a quiet session would otherwise sit unswept for
+   * ever. The earliest pending deadline owns the single timer; a newer, later
+   * one waits for the pass already queued (which reschedules what remains).
+   */
+  let recheckTimer: ReturnType<typeof setTimeout> | undefined
+  let recheckAt = 0
+  const scheduleSweep = (at: number): void => {
+    if (recheckTimer !== undefined) {
+      if (recheckAt <= at) return
+      clearTimeout(recheckTimer)
+      sweepTimers.delete(recheckTimer)
+    }
+    recheckAt = at
+    const timer = setTimeout(() => {
+      sweepTimers.delete(timer)
+      if (recheckTimer === timer) recheckTimer = undefined
+      void Promise.resolve().then(() => sweepVanishedRoutes())
+    }, Math.max(0, at - Date.now()))
+    recheckTimer = timer
+    sweepTimers.add(timer)
+  }
+
+  /**
    * Retire every key-index route the settings document no longer has.
    *
    * The host deletes a provider by removing `providers.<route>` from the
@@ -1305,26 +1361,39 @@ export function apply(ctx: Context, config: Config = {}): void {
    * deletions that happened while this plugin was not running).
    *
    * Guards, in the order they matter:
-   * - the pi-ai section must be readable: before it registers, "the document
-   *   lists no providers" is the boot window, not a mass deletion, and this
-   *   must not read it as one (every route would be swept);
+   * - the pi-ai section AND its `providers` record must be readable: before
+   *   the namespace registers, or while a half-written write parks the record
+   *   out, "the document lists no providers" is a boot window, not a mass
+   *   deletion, and this must not read it as one (every route would be swept);
+   * - absence must outlast `routeSweepGraceMs`: the metadata goes on the first
+   *   pass at or past the route's deadline, so one update caught mid-write —
+   *   or a first readable snapshot that predates a provider's arrival — costs
+   *   the user nothing, and a route that reappears inside the window lapses;
    * - a malformed index fails closed — a sweep the user did not ask for never
    *   rewrites metadata it could not parse;
    * - a reference a SURVIVING route still names keeps its secret: two routes
    *   may point at one credential (a shared `apiKeyEnv` seat), and the index
-   *   is the only enumeration the store has.
+   *   is the only enumeration the store has. A route inside its grace window
+   *   still counts as surviving — its keys must not be unlisted while its
+   *   metadata is being kept.
    *
    * The index write is one synchronous read-modify-write per route — atomic
    * against a concurrent key POST the same way every other write here is —
    * and the credential forgets ride behind it fire-and-forget, each within
    * {@link CREDENTIAL_IPC_BUDGET_MS}, so a slow store cannot stall the
-   * document-update path this runs on.
+   * document-update path this runs on. A pass that actually sweeps says so on
+   * the console: a silent deletion of user state is indistinguishable from a
+   * bug, and this one has been reported as one.
    * @returns whether the pi-ai document was readable (the caller's boot
    *   backoff keeps retrying until it is).
    */
   const sweepVanishedRoutes = (): boolean => {
-    if (piSection() === undefined) return false
-    const live = providersOf()
+    const section = piSection()
+    // A section without a usable `providers` record says nothing about which
+    // routes exist. Reading it as "every provider left" would sweep live
+    // metadata off one half-written write.
+    if (!isRecord(section) || !isRecord(section['providers'])) return false
+    const live = section['providers'] as Record<string, Record<string, unknown>>
     const indexFile = keyIndexFilePath()
     let index: ReturnType<typeof readKeyIndex>
     try {
@@ -1332,14 +1401,40 @@ export function apply(ctx: Context, config: Config = {}): void {
     } catch {
       return true
     }
+    // Routes the document names again: their absence observation lapses.
+    for (const route of vanishedSince.keys()) if (route in live) vanishedSince.delete(route)
     const stale = new Set<string>()
     for (const route of Object.keys(index.providers)) if (!(route in live)) stale.add(route)
     for (const route of Object.keys(index.endpoints ?? {})) if (!(route in live)) stale.add(route)
     for (const route of Object.keys(index.balances ?? {})) if (!(route in live)) stale.add(route)
     if (stale.size === 0) return true
+    // Classify the absent routes against the grace window: a first observation
+    // is recorded (or, at grace 0, swept at once); a deadline reached is due;
+    // anything else waits, and one recheck is queued for the earliest pending
+    // deadline so a quiet session still cleans up.
+    const graceMs = resolved.routeSweepGraceMs
+    const now = Date.now()
+    const due = new Set<string>()
+    for (const route of stale) {
+      const since = vanishedSince.get(route)
+      if (since === undefined) {
+        if (graceMs <= 0) due.add(route)
+        else vanishedSince.set(route, now)
+      } else if (now - since >= graceMs) {
+        due.add(route)
+      }
+    }
+    let earliest = Infinity
+    for (const route of stale) {
+      if (due.has(route)) continue
+      const since = vanishedSince.get(route)
+      if (since !== undefined) earliest = Math.min(earliest, since + graceMs)
+    }
+    if (earliest !== Infinity) scheduleSweep(earliest)
+    if (due.size === 0) return true
     const survivors = new Set<string>()
     for (const [route, entries] of Object.entries(index.providers)) {
-      if (stale.has(route)) continue
+      if (due.has(route)) continue
       for (const entry of entries) survivors.add(entry.ref)
     }
     for (const profile of Object.values(live)) {
@@ -1349,15 +1444,19 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     const credentials = ctx.get('credentials') as CredentialsService | undefined
     let swept = false
-    for (const route of stale) {
+    for (const route of due) {
       const refs = keyEntriesOf(index, route).map(entry => entry.ref)
+      const hadEndpoints = index.endpoints?.[route] !== undefined
+      const hadBalance = index.balances?.[route] !== undefined
       try {
         updateKeyIndex(current => withoutRoute(current, route), indexFile)
       } catch (error) {
         console.error(`[dsh-model-think-level] key route cleanup for "${route}" failed: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
+      vanishedSince.delete(route)
       swept = true
+      console.info(`[dsh-model-think-level] provider "${route}" left the settings document past its grace window; swept key-index metadata (${refs.length} key(s)${hadEndpoints ? ', extra endpoints' : ''}${hadBalance ? ', balance URL' : ''})`)
       for (const ref of refs) {
         forgetServes(route, ref)
         const here = `${route}\u0000${ref}`
@@ -1590,7 +1689,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       // A provider deleted on the Models page is a removal from THIS document,
       // and the key index is plugin state that would otherwise keep the route
       // for ever: drop its keys, endpoints, balance URL and orphaned
-      // credentials now that the document is authoritative about what exists.
+      // credentials once the route has stayed absent past the sweep's grace
+      // window — the document is authoritative, but one update caught
+      // mid-write is not, and that distinction is what the window buys.
       sweepVanishedRoutes()
       // The image side rides the same events: the config file's derived
       // models[] re-derives from this document (config page, MCP, command).
@@ -1605,13 +1706,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Boot covers the deletions that happened while this plugin was not
   // running (disable, HMR, a crash): the same sweep, retried on the shared
   // backoff until the pi-ai document is readable. A settled index costs one
-  // file read and one comparison.
+  // file read and one comparison; a route genuinely gone waits out the same
+  // grace window the live path uses before its residue goes.
   {
-    const sweepTimers = new Set<ReturnType<typeof setTimeout>>()
-    ctx.effect(() => () => {
-      for (const timer of sweepTimers) clearTimeout(timer)
-      sweepTimers.clear()
-    }, 'dsh-model-think-level: route-sweep boot retries')
     const bootRouteSweep = (attempt: number): void => {
       void Promise.resolve().then(() => sweepVanishedRoutes()).then((ready) => {
         if (ready || attempt >= resolved.bootRetryDelaysMs.length) return

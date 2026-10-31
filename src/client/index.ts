@@ -18,6 +18,7 @@
  *   provider-toggle.ts      the Models-page per-provider enable switch
  *   provider-enabled.ts     the stored disabled providers (settings page + composer)
  *   autofill-run.ts         the running auto-fill complement (issue #7)
+ *   auto-continue-run.ts    the session watcher behind the pane's 自动继续 switch
  *   mount.tsx               foreign React roots and the render boundary
  *   model-menu.ts           locating the official composer model menu
  *
@@ -84,6 +85,7 @@ import { createCompatGuard } from './injection/compat-guard.js'
 import { createModelsPage } from './injection/models-page.js'
 import { teardownFingerprintRunners } from './fingerprint-runner.js'
 import { createSessionDirectoryTracker } from './injection/session-directory.js'
+import { createAutoContinue } from './injection/auto-continue-run.js'
 import { modelMenuOf, modelTriggerOf } from './injection/model-menu.js'
 import { registerProviderCardSlot } from './injection/provider-card-slot.js'
 import { registerSliderToggleSlot } from './injection/slider-toggle-slot.js'
@@ -386,6 +388,15 @@ export function apply(ctx: ClientContext): void {
   // The registration opens its own effect (it re-keys once the config route
   // names the tool), so there is no wrapping effect here.
   registerImageCard(ctx, t)
+
+  // The auto-continue watcher: replies 「继续」 to the current session's
+  // cut-off turns while the pane's switch is on (default OFF). The poll is
+  // memory-only while idle; the switch is consulted per turn end, so enabling
+  // it mid-session takes effect from the next ending.
+  ctx.effect(() => {
+    const runner = createAutoContinue({ ctx, t })
+    return () => runner.dispose()
+  }, 'dsh-model-think-level: auto-continue watcher')
 }
 
 export type { BreKey }

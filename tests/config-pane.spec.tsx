@@ -444,6 +444,11 @@ describe('ConfigPane', () => {
     expect(STYLES).toMatch(/\.bre-config-backdrop\s*{[^}]*z-index:\s*1010/s)
   })
 
+  it('the card list keeps an even gap between the cards', () => {
+    expect(STYLES).toMatch(/\.bre-config-body\s*{[^}]*display:\s*flex/s)
+    expect(STYLES).toMatch(/\.bre-config-body\s*{[^}]*gap:\s*10px/s)
+  })
+
   it('a failed GET renders the readable failure instead of an empty pane', async () => {
     handleFetch = () => new Response(JSON.stringify({ ok: false, error: 'boom' }), { status: 500 })
     const { api } = fakeApi({})
@@ -451,5 +456,34 @@ describe('ConfigPane', () => {
     await flush()
     expect(document.body.textContent).toContain('imagegenLoadFailed')
     expect(document.body.textContent).toContain('boom')
+  })
+
+  it('hosts the auto-continue card: folded, the switch reflects and flips the preference', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    // Two folded cards now: 生图 and 自动继续.
+    expect(document.querySelectorAll('.bre-config-card')).toHaveLength(2)
+    const card = [...document.querySelectorAll('.bre-config-card')]
+      .find(node => node.querySelector('.bre-config-card-title')!.textContent === 'autoContinueSectionTitle')!
+    // Same folded shape as the image card: switch on the head, body folded.
+    expect(card.querySelector('.bre-config-expand')).not.toBeNull()
+    expect(card.querySelector('.bre-config-card-body')).toBeNull()
+    expect(card.querySelector('.bre-config-card-state')!.textContent).toBe('settingOff')
+    // Folded, the one-line streak cap sits under the head and the full
+    // description stays folded away — the same collapsed height as 生图.
+    expect(card.querySelector('.bre-config-card-hint')!.textContent).toMatch(/^autoContinueHint/)
+    expect(card.textContent).not.toContain('autoContinueDescription')
+    const sw = card.querySelector<HTMLInputElement>('.bre-config-switch-input')!
+    expect(sw.checked).toBe(false)
+    await act(async () => { sw.click() })
+    expect(sw.checked).toBe(true)
+    expect(card.querySelector('.bre-config-card-state')!.textContent).toBe('settingOn')
+    // Leave the module-level preference as tests found it: OFF.
+    await act(async () => { sw.click() })
+    expect(sw.checked).toBe(false)
+    // Expanding reveals the body, which carries the full trigger description.
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
+    expect(card.querySelector('.bre-config-card-body')!.textContent).toContain('autoContinueDescription')
   })
 })
