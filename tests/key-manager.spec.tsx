@@ -10,6 +10,7 @@
  */
 
 // @vitest-environment jsdom
+import { setTimeout as nextTurn } from 'node:timers/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { KeyManager, type KeyManagerProps } from '../src/client/KeyManager.js'
@@ -201,7 +202,7 @@ function mount(props: Partial<KeyManagerProps> = {}): Panel {
  */
 async function flush(turns = 5): Promise<void> {
   for (let turn = 0; turn < turns; turn += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTurn(0)
   }
 }
 
@@ -267,6 +268,7 @@ beforeEach(() => {
 
 afterEach(() => {
   if (mounted !== undefined) unmountReact(mounted.mount)
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -288,16 +290,90 @@ describe('the list', () => {
     expect(panel.root.textContent).not.toContain('Cached')
   })
 
-  it('shows a loading status on first open and then shows the host list', async () => {
-    const { client } = recorder({ list: async () => state({ entries: [row({ ref: 'A' })] }) })
+  it.each([0, 199])('paints a cold list resolved at %d ms without flashing loading copy', async delay => {
+    vi.useFakeTimers()
+    let finish!: (answer: KeyAnswer) => void
+    const { client } = recorder({ list: () => new Promise(resolve => { finish = resolve }) })
     const panel = mount({ client })
-    expect(panel.root.querySelector('[role="status"]')?.textContent).toBe('Loading keys…')
+    expect(panel.root.querySelector('[role="status"]')).toBeNull()
     expect(panel.root.querySelector('.bre-keys')?.getAttribute('aria-busy')).toBe('true')
     expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(0)
     expect(panel.root.querySelector('.bre-keys-add-row')).toBeNull()
 
+    await vi.advanceTimersByTimeAsync(delay)
+    expect(panel.root.querySelector('[role="status"]')).toBeNull()
+    finish(state({ entries: [row({ ref: 'A' })] }))
     await flush()
     expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(1)
+    expect(panel.root.querySelector('[aria-busy="true"]')).toBeNull()
+    await vi.advanceTimersByTimeAsync(300)
+    expect(panel.root.textContent).not.toContain(COPY.keysLoading)
+  })
+
+  it('shows feedback after 200 ms only while a cold read is still pending', async () => {
+    vi.useFakeTimers()
+    let finish!: (answer: KeyAnswer) => void
+    const { client } = recorder({ list: () => new Promise(resolve => { finish = resolve }) })
+    const panel = mount({ client })
+    await vi.advanceTimersByTimeAsync(199)
+    expect(panel.root.querySelector('[role="status"]')).toBeNull()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(panel.root.querySelector('[role="status"]')?.textContent).toBe(COPY.keysLoading)
+    finish(state({ entries: [row({ ref: 'A' })] }))
+    await flush()
+    expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(1)
+    expect(panel.root.textContent).not.toContain(COPY.keysLoading)
+  })
+
+  it('reports a fast failure immediately instead of hiding it behind the loading delay', async () => {
+    vi.useFakeTimers()
+    const { client } = recorder({ list: async () => ({ ok: false, error: 'Read failed' }) })
+    const panel = mount({ client })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(panel.root.querySelector('[role="alert"]')?.textContent).toBe('Read failed')
+    expect(panel.root.querySelector('[aria-busy="true"]')).toBeNull()
+    await vi.advanceTimersByTimeAsync(300)
+    expect(panel.root.textContent).not.toContain(COPY.keysLoading)
+  })
+
+  it('cancels the delayed loading feedback when the panel unmounts', async () => {
+    vi.useFakeTimers()
+    let finish!: (answer: KeyAnswer) => void
+    const { client } = recorder({ list: () => new Promise(resolve => { finish = resolve }) })
+    const panel = mount({ client })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(vi.getTimerCount()).toBe(1)
+    unmountReact(panel.mount)
+    mounted = undefined
+    expect(vi.getTimerCount()).toBe(0)
+    finish(state())
+    await vi.advanceTimersByTimeAsync(300)
+    expect(panel.root.childNodes).toHaveLength(0)
+  })
+
+  it.each([false, true])('reopens a cached list without loading, including an empty list (%s)', async empty => {
+    const saved = state({ entries: empty ? [] : [row({ ref: 'A', alias: 'Cached' })] })
+    let cached: KeyState | undefined
+    let reads = 0
+    const { client } = recorder({
+      cached: () => cached,
+      list: async () => {
+        if (++reads > 1) return { ok: false, error: 'Background read failed' }
+        cached = saved
+        return saved
+      },
+    })
+    const first = mount({ client })
+    await flush()
+    unmountReact(first.mount)
+    const reopened = mount({ client })
+    expect(reopened.root.querySelectorAll('.bre-keys-row')).toHaveLength(empty ? 0 : 1)
+    expect(reopened.root.querySelector('.bre-keys-add-row')).not.toBeNull()
+    expect(reopened.root.querySelector('[aria-busy="true"]')).toBeNull()
+    await flush()
+    expect(reads).toBe(2)
+    expect(reopened.root.querySelector('[role="alert"]')).toBeNull()
+    expect(reopened.root.textContent).not.toContain(COPY.keysLoading)
   })
 
   it('names a row by its label, and follows the label with the masked key', async () => {
@@ -1398,7 +1474,8 @@ describe('the read-only list', () => {
     // Nothing that writes is offered until the list answers: no rows, and no
     // "add" entry either — a control whose write would race the read the host is
     // still running would be the only thing on screen while the panel is empty.
-    expect(panel.root.querySelector('.bre-keys')?.textContent).toBe('Loading keys…')
+    expect(panel.root.querySelector('.bre-keys')?.getAttribute('aria-busy')).toBe('true')
+    expect(panel.root.querySelector('.bre-keys')?.textContent).toBe('')
     expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(0)
     expect(panel.root.querySelector('.bre-keys-add-row')).toBeNull()
 

@@ -89,6 +89,9 @@ export interface KeyManagerProps {
   readonly draft?: boolean | undefined
 }
 
+/** Fast cold reads should paint their list, not flash a loading sentence first. */
+const KEY_LOADING_DELAY_MS = 200
+
 /** A transient line under the list: the host's refusal, or a confirmation. */
 interface Notice {
   readonly kind: 'error' | 'status'
@@ -252,6 +255,14 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   const [rows, setRows] = useState<readonly KeyRow[] | undefined>(() => client.cached?.(route)?.entries)
   const [routeModels, setRouteModels] = useState<readonly string[]>(() => client.cached?.(route)?.models ?? [])
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
+  const [showLoading, setShowLoading] = useState(false)
+  const loading = rows === undefined && notice === undefined
+  useEffect(() => {
+    setShowLoading(false)
+    if (!loading) return
+    const timer = setTimeout(() => setShowLoading(true), KEY_LOADING_DELAY_MS)
+    return () => clearTimeout(timer)
+  }, [loading, route])
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState<Editing | undefined>(undefined)
   const [nameDraft, setNameDraft] = useState('')
@@ -755,7 +766,11 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     protocolMenu === undefined ? undefined : rows?.find(row => row.ref === protocolMenu.ref)
 
   if (rows === undefined) {
-    if (notice === undefined) return <div className="bre-keys" aria-busy="true"><p role="status">{t('keysLoading')}</p></div>
+    if (notice === undefined) return (
+      <div className="bre-keys" aria-busy="true">
+        {showLoading ? <p role="status">{t('keysLoading')}</p> : null}
+      </div>
+    )
     return (
       <div className="bre-keys">
         <p className={'bre-effort-message bre-' + notice.kind} role={notice.kind === 'error' ? 'alert' : 'status'}>

@@ -18,14 +18,16 @@
  * sibling temp file, then `rename`), so a
  * crash mid-write cannot leave a half-parsed index behind.
  *
- * All of it is synchronous on purpose: the host is single-threaded, so a
- * read-modify-write inside one request handler cannot interleave with another
- * request's, which is the whole concurrency story this file needs.
+ * Writes also keep immutable, bounded metadata-only pre-write history. A
+ * synchronous read-modify-write cannot interleave in one JS thread; a detected
+ * stale snapshot is rejected, but other processes and external synchronizers
+ * still need a coordinated write/merge protocol.
  *
  * @module dsh-model-think-level/key-index
  */
 
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -101,6 +103,16 @@ export interface KeyIndexDocument {
   readonly balances?: Record<string, string>
 }
 
+/** JSON dictionaries treat every route, including __proto__, as an own key. */
+function setOwnRouteValue<T>(map: Record<string, T>, route: string, value: T): void {
+  Object.defineProperty(map, route, { value, enumerable: true, configurable: true, writable: true })
+}
+
+/** Missing route names must never resolve through Object.prototype. */
+function ownRouteValue<T>(map: Record<string, T> | undefined, route: string): T | undefined {
+  return map !== undefined && Object.hasOwn(map, route) ? map[route] : undefined
+}
+
 /** A fresh, empty index. */
 export function emptyKeyIndex(): KeyIndexDocument {
   return { version: 1, providers: {} }
@@ -154,7 +166,7 @@ export function parseKeyIndex(raw: unknown): KeyIndexDocument {
       const auto = normalizeKeyAuto(record['auto'])
       list.push(makeEntry(ref, alias, models, protocol, disabled, auto))
     }
-    if (list.length > 0) out[route] = list
+    if (list.length > 0) setOwnRouteValue(out, route, list)
   }
   const endpoints = parseEndpoints(root['endpoints'])
   const balances = parseBalances(root['balances'])
@@ -177,7 +189,7 @@ function parseBalances(raw: unknown): Record<string, string> | undefined {
   for (const [route, value] of Object.entries(raw as Record<string, unknown>)) {
     if (route.length === 0) continue
     const endpoint = normalizeBalanceEndpoint(value)
-    if (endpoint !== undefined) out[route] = endpoint
+    if (endpoint !== undefined) setOwnRouteValue(out, route, endpoint)
   }
   return Object.keys(out).length === 0 ? undefined : out
 }
@@ -194,7 +206,7 @@ function parseEndpoints(raw: unknown): Record<string, RouteEndpoints> | undefine
   for (const [route, value] of Object.entries(raw as Record<string, unknown>)) {
     if (route.length === 0) continue
     const pair = normalizeRouteEndpoints(value)
-    if (pair !== undefined) out[route] = pair
+    if (pair !== undefined) setOwnRouteValue(out, route, pair)
   }
   return Object.keys(out).length === 0 ? undefined : out
 }
@@ -239,21 +251,63 @@ export function readKeyIndex(file: string = keyIndexFilePath()): KeyIndexDocumen
   return parseKeyIndex(raw)
 }
 
-/** Write the index at one path, atomically. */
-export function writeKeyIndex(document: KeyIndexDocument, file: string = keyIndexFilePath()): void {
-  mkdirSync(dirname(file), { recursive: true })
-  const temporary = `${file}.${process.pid}.tmp`
-  writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, 'utf8')
+/** Metadata-only, immutable pre-write snapshots; never credential values. */
+export const KEY_INDEX_HISTORY_LIMIT = 64
+
+/** Directory beside the index, deliberately outside the synced config file. */
+export function keyIndexHistoryPath(file: string = keyIndexFilePath()): string {
+  return `${file}.history`
+}
+
+/** Keep a bounded history, without making a committed write fail on cleanup. */
+function trimKeyIndexHistory(file: string): void {
   try {
+    const directory = keyIndexHistoryPath(file)
+    const snapshots = readdirSync(directory, { withFileTypes: true })
+      .filter(entry => entry.isFile() && /^\d{13}-[0-9a-f-]{36}\.json$/.test(entry.name))
+      .map(entry => entry.name).sort()
+    for (const name of snapshots.slice(0, Math.max(0, snapshots.length - KEY_INDEX_HISTORY_LIMIT))) {
+      unlinkSync(join(directory, name))
+    }
+  } catch {
+    // Retaining extra snapshots is safer than reporting a successful commit
+    // as a failure (which could trigger credential compensation).
+  }
+}
+
+/** Write atomically, only after preserving the previous metadata successfully. */
+export function writeKeyIndex(document: KeyIndexDocument, file: string = keyIndexFilePath()): void {
+  const text = `${JSON.stringify(document, null, 2)}\n`
+  let previous: string | undefined
+  try {
+    previous = readFileSync(file, 'utf8')
+  } catch (error) {
+    if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')) throw error
+  }
+  if (previous === text) return
+  mkdirSync(dirname(file), { recursive: true })
+  if (previous !== undefined) {
+    // Never wash a malformed existing file into a fresh valid document.
+    readKeyIndex(file)
+    const directory = keyIndexHistoryPath(file)
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    writeFileSync(join(directory, `${Date.now()}-${randomUUID()}.json`), previous,
+      { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    // Backup errors intentionally stop the overwrite; the original stays put.
+  }
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(temporary, text, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
     renameSync(temporary, file)
   } catch (error) {
     try {
       unlinkSync(temporary)
     } catch {
-      // The temp file is best-effort cleanup; the rename failure is the news.
+      // The temp file is best-effort cleanup; the write failure is the news.
     }
     throw error
   }
+  if (previous !== undefined) trimKeyIndexHistory(file)
 }
 
 /**
@@ -265,15 +319,31 @@ export function updateKeyIndex(
   mutate: (document: KeyIndexDocument) => KeyIndexDocument,
   file: string = keyIndexFilePath(),
 ): KeyIndexDocument {
-  const next = mutate(readKeyIndex(file))
+  const current = readKeyIndex(file)
+  const next = mutate(current)
+  // A pure transform may overlap a different process or a re-entrant writer.
+  // Refuse a detected stale snapshot instead of silently deleting its changes.
+  if (JSON.stringify(readKeyIndex(file)) !== JSON.stringify(current)) {
+    throw new Error('the key index changed while updating; retry the operation')
+  }
   writeKeyIndex(next, file)
   return next
 }
 
-/** One route's keys, or an empty list. */
+/** One route's keys, or an empty list; inherited names are never entries. */
 export function keyEntriesOf(document: KeyIndexDocument, route: string): readonly KeyIndexEntry[] {
-  const entries = document.providers[route]
+  const entries = ownRouteValue(document.providers, route)
   return Array.isArray(entries) ? entries : []
+}
+
+/** One route's extra endpoints, without inherited prototype members. */
+export function routeEndpointsOf(document: KeyIndexDocument, route: string): RouteEndpoints | undefined {
+  return ownRouteValue(document.endpoints, route)
+}
+
+/** One route's balance URL, without inherited prototype members. */
+export function routeBalanceOf(document: KeyIndexDocument, route: string): string | undefined {
+  return ownRouteValue(document.balances, route)
 }
 
 /** Whether one route's list names this reference. */
@@ -456,7 +526,7 @@ export function withRouteEndpoints(
   const map: Record<string, RouteEndpoints> = { ...(document.endpoints ?? {}) }
   const cleaned = normalizeRouteEndpoints(endpoints)
   if (cleaned === undefined) delete map[route]
-  else map[route] = cleaned
+  else setOwnRouteValue(map, route, cleaned)
   const next: KeyIndexDocument = { version: 1, providers: document.providers, ...balancesOf(document) }
   return Object.keys(map).length === 0 ? next : { ...next, endpoints: map }
 }
@@ -479,7 +549,7 @@ export function withRouteBalance(
   const map: Record<string, string> = { ...(document.balances ?? {}) }
   const cleaned = normalizeBalanceEndpoint(endpoint)
   if (cleaned === undefined) delete map[route]
-  else map[route] = cleaned
+  else setOwnRouteValue(map, route, cleaned)
   const next: KeyIndexDocument = { version: 1, providers: document.providers, ...endpointsOf(document) }
   return Object.keys(map).length === 0 ? next : { ...next, balances: map }
 }
@@ -517,7 +587,7 @@ export function withoutKeyEntry(document: KeyIndexDocument, route: string, ref: 
   const list = keyEntriesOf(document, route).filter(entry => entry.ref !== ref)
   const providers: Record<string, readonly KeyIndexEntry[]> = { ...document.providers }
   if (list.length === 0) delete providers[route]
-  else providers[route] = list
+  else setOwnRouteValue(providers, route, list)
   return { version: 1, providers, ...endpointsOf(document), ...balancesOf(document) }
 }
 

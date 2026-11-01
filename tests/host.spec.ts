@@ -6,6 +6,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as keyIndex from '../src/key-index.js'
+import * as keyMutationQueue from '../src/key-mutation-queue.js'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -1226,20 +1227,21 @@ describe('apply() key-index route', () => {
   async function mounted(
     providers: Record<string, unknown>,
     credentials?: Store,
-    config?: { routeSweepGraceMs?: number },
+    config?: { routeSweepGraceMs?: number; autofill?: boolean },
   ): Promise<{
     handler: (req: unknown, res: unknown) => Promise<void>
     settings: ReturnType<typeof fakeSettings>
     /** Fire a settings event, as the host does after any document move. */
     emitUpdated: (ns: unknown) => void
+    dispose: () => void
   }> {
     const settings = fakeSettings(providers)
-    const { ctx, routes, emitUpdated } = fakeHost(settings, credentials === undefined ? undefined : { credentials })
+    const { ctx, routes, emitUpdated, dispose } = fakeHost(settings, credentials === undefined ? undefined : { credentials })
     const { apply } = await import('../src/index.js')
     apply(ctx, config)
     const handler = routes.get(INDEX_PATH)
     expect(handler).toBeDefined()
-    return { handler: handler!, settings, emitUpdated }
+    return { handler: handler!, settings, emitUpdated, dispose }
   }
 
   it('leaves a switched-off key out of the key pool entirely', async () => {
@@ -1623,105 +1625,201 @@ describe('apply() key-index route', () => {
     expect(credentials.values['ALIYUN_KEY']).toBe('fake-held-value')
   })
 
-  it('sweeps a deleted provider route only past its grace window', async () => {
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-live', GHOST_API_KEY: 'sk-ghost' })
-    const { emitUpdated } = await mounted({ aliyun: profile }, credentials, { routeSweepGraceMs: 10 })
-    // The provider `ghost` is gone from the settings document (it was deleted
-    // on the official Models page); the plugin's own index still lists its
-    // key, its extra endpoint and its balance URL.
-    writeKeyIndex({
-      version: 1,
-      providers: {
-        aliyun: [{ ref: 'ALIYUN_KEY' }],
-        ghost: [{ ref: 'GHOST_API_KEY' }, { ref: 'ALIYUN_KEY' }],
-      },
-      endpoints: { ghost: { openai: 'https://ghost.example.com/v1' } },
-      balances: { ghost: 'https://ghost.example.com/balance' },
-    }, indexFile())
-    emitUpdated('llm-pi-ai')
-    // The first absent reading only records the observation: one update caught
-    // mid-write must not cost live metadata.
-    const kept = readKeyIndex(indexFile())
-    expect(kept.providers['ghost']).toEqual([{ ref: 'GHOST_API_KEY' }, { ref: 'ALIYUN_KEY' }])
-    expect(kept.endpoints?.['ghost']).toEqual({ openai: 'https://ghost.example.com/v1' })
-    expect(kept.balances?.['ghost']).toBe('https://ghost.example.com/balance')
-    expect(credentials.values['GHOST_API_KEY']).toBe('sk-ghost')
-    // Past the window the queued recheck pass does the sweeping.
-    await vi.waitFor(() => {
-      expect(readKeyIndex(indexFile()).providers['ghost']).toBeUndefined()
+  describe('absent-provider-retention', () => {
+    beforeEach(() => { vi.useFakeTimers() })
+
+    /** Rich metadata and fake values must survive every non-user deletion path. */
+    function retainedFixture(): {
+      credentials: ReturnType<typeof credentialStore>
+      expectUnchanged: () => void
+    } {
+      const document: keyIndex.KeyIndexDocument = {
+        version: 1,
+        providers: {
+          aliyun: [{ ref: 'ALIYUN_KEY', alias: 'Live seat', models: ['qwen-max'], protocol: 'openai-completions' }],
+          ghost: [
+            { ref: 'GHOST_API_KEY', alias: 'Ghost primary', models: ['ghost-large'], protocol: 'anthropic-messages', auto: true },
+            { ref: 'GHOST_SPARE', alias: 'Ghost spare', models: [], disabled: true },
+            { ref: 'ALIYUN_KEY', alias: 'Shared seat', models: ['shared-model'] },
+          ],
+        },
+        endpoints: {
+          ghost: { openai: 'https://ghost.example.com/v1', anthropic: 'https://ghost.example.com' },
+        },
+        balances: { ghost: 'https://ghost.example.com/balance' },
+      }
+      const held = {
+        ALIYUN_KEY: 'fake-retained-live',
+        GHOST_API_KEY: 'fake-retained-primary',
+        GHOST_SPARE: 'fake-retained-spare',
+      }
+      const credentials = credentialStore(held)
+      const unset = vi.spyOn(credentials, 'unset')
+      const set = vi.spyOn(credentials, 'set')
+      writeKeyIndex(document, indexFile())
+      const original = readFileSync(indexFile(), 'utf8')
+      return {
+        credentials,
+        expectUnchanged: () => {
+          expect(readKeyIndex(indexFile())).toEqual(document)
+          expect(readFileSync(indexFile(), 'utf8')).toBe(original)
+          expect(credentials.values).toEqual(held)
+          expect(unset).not.toHaveBeenCalled()
+          expect(set).not.toHaveBeenCalled()
+        },
+      }
+    }
+
+    it('keeps a provider removed from settings beyond the old grace window', async () => {
+      const fixture = retainedFixture()
+      const { settings, emitUpdated } = await mounted(
+        { aliyun: profile, ghost: profile },
+        fixture.credentials,
+        { routeSweepGraceMs: 10, autofill: false },
+      )
+      // Even a live-to-missing update is not an explicit key-manager removal.
+      settings.register('llm-pi-ai', { aliyun: profile })
+      emitUpdated('llm-pi-ai')
+      fixture.expectUnchanged()
+      await vi.advanceTimersByTimeAsync(100)
+      fixture.expectUnchanged()
     })
-    const swept = readKeyIndex(indexFile())
-    expect(swept.endpoints?.['ghost']).toBeUndefined()
-    expect(swept.balances?.['ghost']).toBeUndefined()
-    expect(swept.providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY' }])
-    // The ghost-only secret went with the route; the reference the surviving
-    // route still names (its own seat, listed under ghost as well) stayed.
-    expect(credentials.values['GHOST_API_KEY']).toBeUndefined()
-    expect(credentials.values['ALIYUN_KEY']).toBe('sk-live')
+
+    it('keeps every route when an update lacks a providers record', async () => {
+      const fixture = retainedFixture()
+      const { settings, emitUpdated } = await mounted(
+        { aliyun: profile, ghost: profile },
+        fixture.credentials,
+        { routeSweepGraceMs: 0, autofill: false },
+      )
+      settings.register('llm-pi-ai', null as unknown as Record<string, unknown>)
+      emitUpdated('llm-pi-ai')
+      await vi.advanceTimersByTimeAsync(60_000)
+      fixture.expectUnchanged()
+    })
+
+    it('keeps a route that reappears within the old grace window', async () => {
+      const fixture = retainedFixture()
+      const { settings, emitUpdated } = await mounted(
+        { aliyun: profile, ghost: profile },
+        fixture.credentials,
+        { routeSweepGraceMs: 10, autofill: false },
+      )
+      settings.register('llm-pi-ai', { aliyun: profile })
+      emitUpdated('llm-pi-ai')
+      await vi.advanceTimersByTimeAsync(5)
+      settings.register('llm-pi-ai', { aliyun: profile, ghost: profile })
+      emitUpdated('llm-pi-ai')
+      await vi.advanceTimersByTimeAsync(100)
+      fixture.expectUnchanged()
+    })
+
+    it('keeps routes absent at boot even after the old grace window', async () => {
+      const fixture = retainedFixture()
+      await mounted({ aliyun: profile }, fixture.credentials, { routeSweepGraceMs: 10, autofill: false })
+      await vi.advanceTimersByTimeAsync(100)
+      fixture.expectUnchanged()
+    })
+
+    it.each([undefined, 0, 10])('keeps a legal empty providers snapshot beyond grace (%s)', async grace => {
+      const fixture = retainedFixture()
+      const { emitUpdated } = await mounted(
+        {},
+        fixture.credentials,
+        { ...(grace === undefined ? {} : { routeSweepGraceMs: grace }), autofill: false },
+      )
+      emitUpdated('llm-pi-ai')
+      await vi.advanceTimersByTimeAsync(60_000)
+      fixture.expectUnchanged()
+    })
+
+    it('keeps partial-startup metadata until a supplier arrives after grace', async () => {
+      const fixture = retainedFixture()
+      const { settings, emitUpdated } = await mounted(
+        { aliyun: profile },
+        fixture.credentials,
+        { routeSweepGraceMs: 10, autofill: false },
+      )
+      await vi.advanceTimersByTimeAsync(60_000)
+      fixture.expectUnchanged()
+      settings.register('llm-pi-ai', { aliyun: profile, ghost: profile })
+      emitUpdated('llm-pi-ai')
+      await vi.advanceTimersByTimeAsync(60_000)
+      fixture.expectUnchanged()
+    })
+
+    it.each(['no event', 'wrong namespace'])('keeps a restored route with %s', async event => {
+      const fixture = retainedFixture()
+      const { settings, emitUpdated } = await mounted(
+        { aliyun: profile },
+        fixture.credentials,
+        { routeSweepGraceMs: 10, autofill: false },
+      )
+      await vi.advanceTimersByTimeAsync(5)
+      settings.register('llm-pi-ai', { aliyun: profile, ghost: profile })
+      if (event === 'wrong namespace') emitUpdated('another-plugin')
+      await vi.advanceTimersByTimeAsync(100)
+      fixture.expectUnchanged()
+    })
+
+    it.each([undefined, 0])('keeps boot metadata when immediately disposed (%s)', async grace => {
+      const fixture = retainedFixture()
+      const settings = fakeSettings({})
+      const { ctx, dispose } = fakeHost(settings, { credentials: fixture.credentials })
+      const { apply } = await import('../src/index.js')
+      apply(ctx, { ...(grace === undefined ? {} : { routeSweepGraceMs: grace }), autofill: false })
+      // Dispose synchronously, before any boot microtask can create a timer.
+      dispose()
+      await vi.advanceTimersByTimeAsync(60_000)
+      fixture.expectUnchanged()
+    })
+
+    it('never rewrites a malformed index on boot or settings updates', async () => {
+      const held = { ALIYUN_KEY: 'fake-retained-malformed' }
+      const credentials = credentialStore(held)
+      const unset = vi.spyOn(credentials, 'unset')
+      mkdirSync(dirname(indexFile()), { recursive: true })
+      writeFileSync(indexFile(), '{ not json', 'utf8')
+      const { emitUpdated } = await mounted({ aliyun: profile }, credentials, { autofill: false })
+      expect(() => emitUpdated('llm-pi-ai')).not.toThrow()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(readFileSync(indexFile(), 'utf8')).toBe('{ not json')
+      expect(credentials.values).toEqual(held)
+      expect(unset).not.toHaveBeenCalled()
+    })
   })
 
-  it('keeps every route when a document update arrives without a providers record', async () => {
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-live' })
-    const { emitUpdated, settings } = await mounted({ aliyun: profile }, credentials, { routeSweepGraceMs: 0 })
+  it('marks the key-index response with the exact integrity bundle header', async () => {
     writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY' }] } }, indexFile())
-    // A half-written write can park the providers record out (null, the shape
-    // catalogueSource already defends against); the sweep must read that as
-    // "not ready", never as "every provider left" — even at grace 0, where
-    // any absent reading sweeps at once.
-    settings.register('llm-pi-ai', null as unknown as Record<string, unknown>)
-    emitUpdated('llm-pi-ai')
-    await new Promise(resolve => setTimeout(resolve, 20))
-    expect(readKeyIndex(indexFile()).providers['aliyun']).toEqual([{ ref: 'ALIYUN_KEY' }])
-    expect(credentials.values['ALIYUN_KEY']).toBe('sk-live')
+    const { handler } = await mounted({ aliyun: profile }, credentialStore({ ALIYUN_KEY: 'fixture-value' }), { autofill: false })
+    const { res, headers, out } = fakeRes()
+    await handler(fakeReq(), res)
+    expect(out().status).toBe(200)
+    expect(headers['cache-control']).toBe('no-store')
+    expect(headers['x-dsh-key-integrity']).toBe('20261101-explicit-delete+history64+shared-lease-drain')
+    expect(out().body).not.toHaveProperty('integrity')
   })
 
-  it('keeps a route that reappears inside the grace window', async () => {
-    const credentials = credentialStore({ ALIYUN_KEY: 'sk-live', GHOST_API_KEY: 'sk-ghost' })
-    const { emitUpdated, settings } = await mounted(
-      { aliyun: profile },
-      credentials,
-      { routeSweepGraceMs: 10 },
-    )
+  it.each(['__proto__', 'constructor', 'toString'])('reads own index dictionaries for the special route %s', async route => {
+    const prototype = Object.getOwnPropertyDescriptors(Object.prototype)
     writeKeyIndex({
       version: 1,
-      providers: {
-        aliyun: [{ ref: 'ALIYUN_KEY' }],
-        ghost: [{ ref: 'GHOST_API_KEY' }],
-      },
-      balances: { ghost: 'https://ghost.example.com/balance' },
+      providers: { [route]: [{ ref: 'SPECIAL_REF', alias: 'special label' }] },
+      endpoints: { [route]: { openai: 'https://own.example/v1' } },
+      balances: { [route]: 'https://own.example/balance' },
     }, indexFile())
-    // One snapshot that missed the route (a mid-write read), then the route
-    // back in the very next update: the absence observation must lapse and
-    // the sweep must never fire.
-    settings.register('llm-pi-ai', { aliyun: profile })
-    emitUpdated('llm-pi-ai')
-    settings.register('llm-pi-ai', { aliyun: profile, ghost: profile })
-    emitUpdated('llm-pi-ai')
-    await new Promise(resolve => setTimeout(resolve, 40))
-    const index = readKeyIndex(indexFile())
-    expect(index.providers['ghost']).toEqual([{ ref: 'GHOST_API_KEY' }])
-    expect(index.balances?.['ghost']).toBe('https://ghost.example.com/balance')
-    expect(credentials.values['GHOST_API_KEY']).toBe('sk-ghost')
-  })
-
-  it('sweeps route residue at boot, for deletions made while the plugin was off', async () => {
-    const credentials = credentialStore({ GHOST_API_KEY: 'sk-ghost' })
-    writeKeyIndex({ version: 1, providers: { ghost: [{ ref: 'GHOST_API_KEY' }] } }, indexFile())
-    await mounted({ aliyun: profile }, credentials, { routeSweepGraceMs: 10 })
-    await vi.waitFor(() => {
-      expect(readKeyIndex(indexFile()).providers['ghost']).toBeUndefined()
-    })
-    await new Promise(resolve => setTimeout(resolve, 20))
-    expect(credentials.values['GHOST_API_KEY']).toBeUndefined()
-  })
-
-  it('never rewrites a malformed index from a sweep', async () => {
-    mkdirSync(indexFile() === '' ? '.' : dirname(indexFile()), { recursive: true })
-    writeFileSync(indexFile(), '{ not json', 'utf8')
-    const { emitUpdated } = await mounted({ aliyun: profile }, credentialStore())
-    expect(() => emitUpdated('llm-pi-ai')).not.toThrow()
-    await new Promise(resolve => setTimeout(resolve, 20))
-    expect(readFileSync(indexFile(), 'utf8')).toBe('{ not json')
+    const { handler } = await mounted({ [route]: { ...profile, apiKeyEnv: 'SPECIAL_REF' } }, credentialStore({ SPECIAL_REF: 'fixture-value' }), { autofill: false })
+    const listed = fakeRes()
+    await handler(fakeReq({ url: INDEX_PATH + '?route=' + encodeURIComponent(route) }), listed.res)
+    expect(listed.out().status).toBe(200)
+    expect(listed.out().body['entries']).toMatchObject([{ ref: 'SPECIAL_REF', alias: 'special label' }])
+    const endpoints = fakeRes()
+    await handler(fakeReq({ url: INDEX_PATH + '?op=endpoints&route=' + encodeURIComponent(route) }), endpoints.res)
+    expect(endpoints.out().body['endpoints']).toEqual({ openai: 'https://own.example/v1', anthropic: null })
+    const balance = fakeRes()
+    await handler(fakeReq({ url: INDEX_PATH + '?op=balance&route=' + encodeURIComponent(route) }), balance.res)
+    expect(balance.out().body['endpoint']).toBe('https://own.example/balance')
+    expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototype)
   })
 
   it('refuses a remove when the precondition read outlives the IPC budget', async () => {
@@ -1742,26 +1840,104 @@ describe('apply() key-index route', () => {
     expect(credentials.values['ALIYUN_KEY']).toBe('sk-live')
   })
 
-  it('rolls a remove back when the credential forget outlives the IPC budget', async () => {
+  it.each(['success', 'rejection'])('drains a late credential unset (%s) before filling the same ref in another apply', async outcome => {
     vi.useFakeTimers()
     const credentials = credentialStore({ ALIYUN_KEY: 'sk-live', SPARE: 'sk-spare' })
-    credentials.unset = () => new Promise(() => {})
+    const set = vi.fn(credentials.set)
+    credentials.set = set
+    let finishUnset!: () => void
+    const gate = new Promise<void>((resolve, reject) => {
+      finishUnset = () => outcome === 'success' ? resolve() : reject(new Error('fixture late unset rejection'))
+    })
+    credentials.unset = async ref => {
+      await gate
+      delete credentials.values[ref]
+      return { ok: true }
+    }
     writeKeyIndex(
-      { version: 1, providers: { aliyun: [{ ref: 'SPARE' }, { ref: 'ALIYUN_KEY' }] } },
+      { version: 1, providers: { aliyun: [{ ref: 'SPARE', alias: 'spare label' }, { ref: 'ALIYUN_KEY' }] } },
       indexFile(),
     )
-    const { handler } = await mounted({ aliyun: profile }, credentials)
+    const { handler } = await mounted({ aliyun: profile }, credentials, { autofill: false })
+    const { handler: otherHandler } = await mounted({ aliyun: profile }, credentials, { autofill: false })
     const removed = fakeRes()
-    const pending = handler(fakeReq({ method: 'POST', body: { op: 'remove', ref: 'SPARE' } }), removed.res)
-    await vi.advanceTimersByTimeAsync(10_000)
-    await pending
-    const reply = removed.out()
-    expect(reply.status).toBe(500)
-    expect(String(reply.body['error'])).toContain('did not answer')
-    // The metadata rolled back, so the row survives with its value; a retry
-    // (or fixing the store) is all the user needs.
-    expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun').map(entry => entry.ref)).toContain('SPARE')
-    expect(credentials.values['SPARE']).toBe('sk-spare')
+    const removing = handler(fakeReq({ method: 'POST', body: { op: 'remove', ref: 'SPARE' } }), removed.res)
+    let replacing: Promise<void> | undefined
+    try {
+      await vi.advanceTimersByTimeAsync(10_000)
+      await removing
+      expect(removed.out().status).toBe(500)
+      expect(String(removed.out().body['error'])).toContain('write result is unknown')
+      expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')[0]).toEqual({ ref: 'SPARE', alias: 'spare label' })
+      expect(credentials.values['SPARE']).toBe('sk-spare')
+      const replaced = fakeRes()
+      let replacedAnswered = false
+      replacing = otherHandler(fakeReq({ method: 'POST', body: { op: 'value', ref: 'SPARE', value: 'fixture-refilled' } }), replaced.res)
+        .then(() => { replacedAnswered = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(replacedAnswered).toBe(false)
+      expect(set).not.toHaveBeenCalled()
+      finishUnset()
+      await replacing
+      expect(replaced.out().status).toBe(200)
+      expect(set).toHaveBeenCalledTimes(1)
+      expect(credentials.values['SPARE']).toBe('fixture-refilled')
+      expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')[0]).toEqual({ ref: 'SPARE', alias: 'spare label' })
+      const release = await keyMutationQueue.acquireKeyMutation(indexFile())
+      release()
+    } finally {
+      finishUnset()
+      await removing
+      await replacing
+    }
+  })
+
+  it.each(['success', 'rejection'])('drains a late credential set (%s) before the next replacement', async outcome => {
+    vi.useFakeTimers()
+    const credentials = credentialStore({ ALIYUN_KEY: 'sk-live' })
+    let finishSet!: () => void
+    const gate = new Promise<void>((resolve, reject) => {
+      finishSet = () => outcome === 'success' ? resolve() : reject(new Error('fixture late set rejection'))
+    })
+    let calls = 0
+    credentials.set = async (ref, value) => {
+      calls += 1
+      if (calls === 1) await gate
+      credentials.values[ref] = value
+      return { ok: true }
+    }
+    writeKeyIndex({ version: 1, providers: { aliyun: [{ ref: 'ALIYUN_KEY', alias: 'live label' }] } }, indexFile())
+    const { handler } = await mounted({ aliyun: profile }, credentials, { autofill: false })
+    const { handler: otherHandler } = await mounted({ aliyun: profile }, credentials, { autofill: false })
+    const first = fakeRes()
+    const replacingFirst = handler(fakeReq({ method: 'POST', body: { op: 'value', ref: 'ALIYUN_KEY', value: 'fixture-first' } }), first.res)
+    let replacingNext: Promise<void> | undefined
+    try {
+      await vi.advanceTimersByTimeAsync(10_000)
+      await replacingFirst
+      expect(first.out().status).toBe(400)
+      expect(String(first.out().body['error'])).toContain('write result is unknown')
+      expect(credentials.values['ALIYUN_KEY']).toBe('sk-live')
+      const next = fakeRes()
+      let nextAnswered = false
+      replacingNext = otherHandler(fakeReq({ method: 'POST', body: { op: 'value', ref: 'ALIYUN_KEY', value: 'fixture-next' } }), next.res)
+        .then(() => { nextAnswered = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(nextAnswered).toBe(false)
+      expect(calls).toBe(1)
+      finishSet()
+      await replacingNext
+      expect(next.out().status).toBe(200)
+      expect(calls).toBe(2)
+      expect(credentials.values['ALIYUN_KEY']).toBe('fixture-next')
+      expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')).toEqual([{ ref: 'ALIYUN_KEY', alias: 'live label' }])
+      const release = await keyMutationQueue.acquireKeyMutation(indexFile())
+      release()
+    } finally {
+      finishSet()
+      await replacingFirst
+      await replacingNext
+    }
   })
 
   it('reads credential previews concurrently instead of adding one delay per key', async () => {
@@ -2948,6 +3124,201 @@ describe('apply() key-index route', () => {
       }))
       return { calls: () => calls }
     }
+
+    function stoppedProbeFixture(): {
+      credentials: ReturnType<typeof credentialStore>
+      observationsFile: string
+      beforeIndex: string
+      beforeObservations: string
+    } {
+      writeKeyIndex({
+        version: 1,
+        providers: { aliyun: [{ ref: 'ALIYUN_KEY', alias: 'first label' }, { ref: 'ALIYUN_KEY_2', alias: 'second label' }] },
+      }, indexFile())
+      const observationsFile = join(dirname(indexFile()), 'key-serves.json')
+      const beforeObservations = JSON.stringify({
+        version: 1,
+        providers: { aliyun: {
+          ALIYUN_KEY: { models: ['before-first'], at: 1 },
+          ALIYUN_KEY_2: { models: ['before-second'], at: 2 },
+        } },
+      }, null, 2) + '\n'
+      writeFileSync(observationsFile, beforeObservations, 'utf8')
+      const credentials = credentialStore({ ALIYUN_KEY: 'sk-first', ALIYUN_KEY_2: 'sk-second' })
+      vi.spyOn(credentials, 'set')
+      vi.spyOn(credentials, 'unset')
+      return { credentials, observationsFile, beforeIndex: readFileSync(indexFile(), 'utf8'), beforeObservations }
+    }
+
+    it('keeps index and observations unchanged when disposed while the probe waits for the shared lease', async () => {
+      vi.useFakeTimers()
+      const fixture = stoppedProbeFixture()
+      let releaseWire!: () => void
+      const wireGate = new Promise<void>(resolve => { releaseWire = resolve })
+      vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init?: RequestInit) => {
+        await wireGate
+        const auth = new Headers(init?.headers).get('authorization') ?? ''
+        const models = auth.endsWith('sk-second') ? ['m-a', 'm-b'] : ['m-a']
+        return new Response(JSON.stringify({ data: models.map(id => ({ id })) }), { status: 200 })
+      }))
+      const acquire = vi.spyOn(keyMutationQueue, 'acquireKeyMutation')
+      let releasePeer: (() => void) | undefined
+      let dispose = (): void => {}
+      try {
+        const mountedProbe = await mounted(
+          { aliyun: { ...profile, models: [{ id: 'm-a' }, { id: 'm-b' }] } }, fixture.credentials, { autofill: false },
+        )
+        dispose = mountedProbe.dispose
+        const response = fakeRes()
+        await mountedProbe.handler(fakeReq({ method: 'POST', body: { op: 'probe' } }), response.res)
+        expect(response.out().status).toBe(200)
+        releasePeer = await keyMutationQueue.acquireKeyMutation(indexFile())
+        releaseWire()
+        await vi.waitFor(() => { expect(acquire).toHaveBeenCalledTimes(3) })
+        // The wire has completed, but neither scopes nor observations may be
+        // published before this commit owns its lease and rechecks lifetime.
+        expect(readFileSync(indexFile(), 'utf8')).toBe(fixture.beforeIndex)
+        expect(readFileSync(fixture.observationsFile, 'utf8')).toBe(fixture.beforeObservations)
+        dispose()
+        releasePeer()
+        releasePeer = undefined
+        const release = await keyMutationQueue.acquireKeyMutation(indexFile())
+        release()
+        await vi.advanceTimersByTimeAsync(250)
+        expect(readFileSync(indexFile(), 'utf8')).toBe(fixture.beforeIndex)
+        expect(readFileSync(fixture.observationsFile, 'utf8')).toBe(fixture.beforeObservations)
+        expect(fixture.credentials.set).not.toHaveBeenCalled()
+        expect(fixture.credentials.unset).not.toHaveBeenCalled()
+      } finally {
+        dispose()
+        releaseWire()
+        releasePeer?.()
+        const release = await keyMutationQueue.acquireKeyMutation(indexFile())
+        release()
+        acquire.mockRestore()
+      }
+    })
+
+    it('ignores a disposed listing result and skips the route probe already queued behind it', async () => {
+      vi.useFakeTimers()
+      const fixture = stoppedProbeFixture()
+      let releaseWire!: () => void
+      const wireGate = new Promise<void>(resolve => { releaseWire = resolve })
+      const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+        await wireGate
+        const auth = new Headers(init?.headers).get('authorization') ?? ''
+        const models = auth.endsWith('sk-second') ? ['m-a', 'm-b'] : ['m-a']
+        return new Response(JSON.stringify({ data: models.map(id => ({ id })) }), { status: 200 })
+      })
+      vi.stubGlobal('fetch', fetch)
+      let dispose = (): void => {}
+      try {
+        const mountedProbe = await mounted(
+          { aliyun: { ...profile, models: [{ id: 'm-a' }, { id: 'm-b' }] } }, fixture.credentials, { autofill: false },
+        )
+        dispose = mountedProbe.dispose
+        const first = fakeRes()
+        await mountedProbe.handler(fakeReq({ method: 'POST', body: { op: 'probe' } }), first.res)
+        expect(first.out().status).toBe(200)
+        await vi.waitFor(() => { expect(fetch).toHaveBeenCalledTimes(2) })
+        const queued = fakeRes()
+        await mountedProbe.handler(fakeReq({ method: 'POST', body: { op: 'probe' } }), queued.res)
+        expect(queued.out().status).toBe(200)
+        expect(queued.out().body['probing']).toBe(true)
+        dispose()
+        releaseWire()
+        // The retained fake handler observes completion after unregistering;
+        // no promise claims to have cancelled either already-started listing.
+        await vi.waitFor(async () => {
+          const response = fakeRes()
+          await mountedProbe.handler(fakeReq(), response.res)
+          expect(response.out().body['probing']).toBeUndefined()
+        })
+        await vi.advanceTimersByTimeAsync(250)
+        expect(fetch).toHaveBeenCalledTimes(2)
+        expect(readFileSync(indexFile(), 'utf8')).toBe(fixture.beforeIndex)
+        expect(readFileSync(fixture.observationsFile, 'utf8')).toBe(fixture.beforeObservations)
+        expect(fixture.credentials.set).not.toHaveBeenCalled()
+        expect(fixture.credentials.unset).not.toHaveBeenCalled()
+        const release = await keyMutationQueue.acquireKeyMutation(indexFile())
+        release()
+      } finally {
+        dispose()
+        releaseWire()
+        const release = await keyMutationQueue.acquireKeyMutation(indexFile())
+        release()
+      }
+    })
+
+    it('waits for the shared index lease and preserves peer edits before a fresh scope commit', async () => {
+      writeKeyIndex({
+        version: 1,
+        providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
+      }, indexFile())
+      const credentials = credentialStore({ ALIYUN_KEY: 'sk-first', ALIYUN_KEY_2: 'sk-second' })
+      let releaseWire!: () => void
+      const wireGate = new Promise<void>(resolve => { releaseWire = resolve })
+      vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init?: RequestInit) => {
+        await wireGate
+        const auth = new Headers(init?.headers).get('authorization') ?? ''
+        const models = auth.endsWith('sk-second') ? ['m-a', 'm-b'] : ['m-a']
+        return new Response(JSON.stringify({ data: models.map(id => ({ id })) }), { status: 200 })
+      }))
+      const acquire = vi.spyOn(keyMutationQueue, 'acquireKeyMutation')
+      let releasePeer: (() => void) | undefined
+      try {
+        const { handler, settings } = await mounted(
+          { aliyun: { ...profile, models: [{ id: 'm-a' }, { id: 'm-b' }] } }, credentials, { autofill: false },
+        )
+        const probe = fakeRes()
+        // This POST must finish with probing=true even with the wire held: it
+        // never awaits a background commit while retaining its own lease.
+        await handler(fakeReq({ method: 'POST', body: { op: 'probe' } }), probe.res)
+        expect(probe.out().status).toBe(200)
+        expect(probe.out().body['probing']).toBe(true)
+        releasePeer = await keyMutationQueue.acquireKeyMutation(indexFile())
+        const before = readFileSync(indexFile(), 'utf8')
+        releaseWire()
+        // POST, peer and now the automatic commit have acquired/queued on the
+        // same function; the third cannot read or commit while the peer holds.
+        await vi.waitFor(() => { expect(acquire).toHaveBeenCalledTimes(3) })
+        expect(readFileSync(indexFile(), 'utf8')).toBe(before)
+        let peer = readKeyIndex(indexFile())
+        peer = keyIndex.withKeyAlias(peer, 'aliyun', 'ALIYUN_KEY', 'peer alias')
+        peer = keyIndex.withRouteEndpoints(peer, 'aliyun', { openai: 'https://peer.example/v1' })
+        peer = keyIndex.withRouteBalance(peer, 'aliyun', 'https://peer.example/balance')
+        peer = keyIndex.withKeyModels(peer, 'aliyun', 'ALIYUN_KEY_2', ['m-a'])
+        peer = keyIndex.withKeyEntry(peer, 'aliyun', 'PEER_ADDED', 'peer added')
+        writeKeyIndex(peer, indexFile())
+        // No invalidation event: a true fresh configuration read after waiting
+        // must scope the first key against m-b/m-c, not the cached m-a/m-b.
+        settings.register('llm-pi-ai', { aliyun: { ...profile, models: [{ id: 'm-b' }, { id: 'm-c' }] } })
+        releasePeer()
+        releasePeer = undefined
+        await vi.waitFor(() => {
+          expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')[0]?.models).toEqual([])
+        })
+        const current = readKeyIndex(indexFile())
+        expect(keyEntriesOf(current, 'aliyun')).toEqual([
+          { ref: 'ALIYUN_KEY', alias: 'peer alias', models: [], auto: true },
+          { ref: 'ALIYUN_KEY_2', models: ['m-a'] },
+          { ref: 'PEER_ADDED', alias: 'peer added' },
+        ])
+        expect(keyIndex.routeEndpointsOf(current, 'aliyun')).toEqual({ openai: 'https://peer.example/v1' })
+        expect(keyIndex.routeBalanceOf(current, 'aliyun')).toBe('https://peer.example/balance')
+        await vi.waitFor(async () => {
+          const response = fakeRes()
+          await handler(fakeReq(), response.res)
+          expect(response.out().body['probing']).toBeUndefined()
+        })
+        const release = await keyMutationQueue.acquireKeyMutation(indexFile())
+        release()
+      } finally {
+        releaseWire()
+        releasePeer?.()
+        acquire.mockRestore()
+      }
+    })
 
     it('checks each key to the models it serves when the button asks', async () => {
       writeKeyIndex({

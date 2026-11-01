@@ -56,6 +56,8 @@ import {
   keyEntriesOf,
   keyIndexFilePath,
   readKeyIndex,
+  routeBalanceOf,
+  routeEndpointsOf,
   updateKeyIndex,
   withKeyAlias,
   withKeyAutoScope,
@@ -66,10 +68,10 @@ import {
   withRouteBalance,
   withRouteEndpoints,
   withoutKeyEntry,
-  withoutRoute,
   writeKeyIndex,
   type KeyIndexEntry,
 } from './key-index.js'
+import { acquireKeyMutation } from './key-mutation-queue.js'
 import { keyRest, keysForModel, restKeyOf, type KeyCandidate, type ServingKnowledge } from './key-route-core.js'
 import { keyServesFilePath, readKeyServes, servesOfRoute, withServes, withoutServes, writeKeyServes, type KeyServesDocument } from './key-serves.js'
 import { commitUiOrderGuarded, readUiOrder, uiOrderFilePath } from './order-store.js'
@@ -159,15 +161,7 @@ const PI_NS = PI_AI_NS as SettingsNamespace
  */
 const BOOT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const
 
-/**
- * How long a key-index route must stay absent from the settings document
- * before the vanish sweep deletes its metadata. One document update caught
- * mid-write — or a first readable snapshot that predates a provider's
- * arrival — reads as a deletion for a moment, and sweeping on that instant
- * cost users their balance URLs, extra endpoints, keys and credentials. A
- * route that reappears inside the window lapses back to kept; only a route
- * still absent at the deadline is swept.
- */
+/** Legacy schema default only; absence no longer authorizes key deletion. */
 const ROUTE_SWEEP_GRACE_MS = 30_000
 
 /** Probe fetch budget: a gateway that cannot answer /models in 15s will not answer the composer either. */
@@ -306,11 +300,7 @@ export interface Config {
    * "try exactly once" (default [1000, 2000, 4000, 8000, 16000, 30000]).
    */
   bootRetryDelaysMs?: number[]
-  /**
-   * How long a key-index route must stay absent from the settings document
-   * before the vanish sweep deletes its residue, in milliseconds (default
-   * 30000). `0` sweeps on the first absent-reading pass.
-   */
+  /** Deprecated compatibility field; absent providers retain their keys. */
   routeSweepGraceMs?: number
   /**
    * Rewrite effort-less calls to forced-thinking ladders into the ladder's
@@ -408,7 +398,7 @@ function providerProfileOf(section: unknown, route: string): Record<string, unkn
   if (!isRecord(section)) return undefined
   const providers = section['providers']
   if (!isRecord(providers)) return undefined
-  const profile = providers[route]
+  const profile = Object.hasOwn(providers, route) ? providers[route] : undefined
   return isRecord(profile) ? profile : undefined
 }
 
@@ -435,17 +425,17 @@ function enabledRefOf(profile: Record<string, unknown> | undefined): string | un
 function readRouteKeyScopes(
   providers: Record<string, Record<string, unknown>>,
 ): Record<string, readonly RouteKeyScope[]> {
+  const scopes = Object.create(null) as Record<string, readonly RouteKeyScope[]>
   let document: ReturnType<typeof readKeyIndex>
   try {
     document = readKeyIndex(keyIndexFilePath())
   } catch {
-    return {}
+    return scopes
   }
-  const scopes: Record<string, readonly RouteKeyScope[]> = {}
   const routes = new Set<string>(Object.keys(document.providers))
   for (const route of Object.keys(providers)) routes.add(route)
   for (const route of routes) {
-    const endpoints = document.endpoints?.[route]
+    const endpoints = routeEndpointsOf(document, route)
     const listed = keyEntriesOf(document, route)
     // A switched-off key leaves the pool entirely: its metadata stays on the
     // list (so switching it back on restores exactly what it served), but no
@@ -512,11 +502,55 @@ function describeRecords(answer: unknown): Record<string, unknown> | undefined {
   return isRecord(candidate) ? candidate : undefined
 }
 
+/** A request may answer before IPC settles, but its index lease must not. */
+class PendingCredentialMutations {
+  private readonly pending = new Set<Promise<void>>()
+
+  track<T>(operation: Promise<T>): Promise<T> {
+    // Handle both outcomes here too: a late rejection after an HTTP timeout is
+    // observed, and a never-settling store deliberately keeps the lease closed.
+    const settled: Promise<void> = operation.then(
+      () => { this.pending.delete(settled) },
+      () => { this.pending.delete(settled) },
+    )
+    this.pending.add(settled)
+    return operation
+  }
+
+  releaseAfterSettled(release: () => void): void {
+    if (this.pending.size === 0) release()
+    else void Promise.all([...this.pending]).then(release, release)
+  }
+}
+
+/** The HTTP budget is not cancellation of the tracked credential mutation. */
+async function awaitCredentialMutation<T>(
+  operation: Promise<T>,
+  pending: PendingCredentialMutations,
+  budgetMs: number,
+): Promise<T> {
+  pending.track(operation)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          `the credential store did not answer within ${Math.round(budgetMs / 1000)}s; the write result is unknown until it settles`,
+        )), budgetMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 /** Store one value under one reference; the refusal text, or undefined. */
 async function storeCredential(
   credentials: CredentialsService | undefined,
   ref: string,
   value: string,
+  pending: PendingCredentialMutations,
 ): Promise<string | undefined> {
   const set = credentials?.set
   if (credentials === undefined || typeof set !== 'function') {
@@ -524,7 +558,9 @@ async function storeCredential(
   }
   invalidateCredentialDisplay(credentials, ref)
   try {
-    const answer = await set.call(credentials, ref, value)
+    const operation = Promise.resolve().then(() => set.call(credentials, ref, value))
+      .finally(() => { invalidateCredentialDisplay(credentials, ref) })
+    const answer = await awaitCredentialMutation(operation, pending, CREDENTIAL_IPC_BUDGET_MS)
     if (!isRefusal(answer)) return undefined
     return refusalMessage(answer) ?? `the credential store refused ${ref}`
   } catch (error) {
@@ -535,39 +571,30 @@ async function storeCredential(
 }
 
 /**
- * Forget one reference's value; the refusal text, or undefined.
- * @param budgetMs - when given, a store that has not answered within the
- *   budget reads as a refusal: the caller rolls its metadata back, exactly as
- *   for an explicit refusal. The underlying unset may still land after the
- *   timeout — the same uncertainty a mid-flight store error already carries —
- *   so the row keeps its reference and a later remove (or a re-save of the
- *   value) repairs it.
+ * Forget one reference's value; the refusal text, or undefined. A timeout is
+ * uncertain, not a cancelled unset: rollback retains metadata, while the
+ * request's lease stays held until the underlying operation actually settles.
  */
-async function forgetCredential(credentials: CredentialsService | undefined, ref: string, budgetMs?: number): Promise<string | undefined> {
+async function forgetCredential(
+  credentials: CredentialsService | undefined,
+  ref: string,
+  pending: PendingCredentialMutations,
+  budgetMs: number = CREDENTIAL_IPC_BUDGET_MS,
+): Promise<string | undefined> {
   const unset = credentials?.unset
   if (credentials === undefined || typeof unset !== 'function') {
     return 'this deployment cannot write the credential store'
   }
   invalidateCredentialDisplay(credentials, ref)
-  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const answer = await Promise.race([
-      unset.call(credentials, ref),
-      budgetMs === undefined
-        ? new Promise<never>(() => {})
-        : new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error(`the credential store did not answer within ${Math.round(budgetMs / 1000)}s`)),
-              budgetMs,
-            )
-          }),
-    ])
+    const operation = Promise.resolve().then(() => unset.call(credentials, ref))
+      .finally(() => { invalidateCredentialDisplay(credentials, ref) })
+    const answer = await awaitCredentialMutation(operation, pending, budgetMs)
     if (!isRefusal(answer)) return undefined
     return refusalMessage(answer) ?? `the credential store refused to forget ${ref}`
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   } finally {
-    if (timer !== undefined) clearTimeout(timer)
     invalidateCredentialDisplay(credentials, ref)
   }
 }
@@ -986,7 +1013,6 @@ export function apply(ctx: Context, config: Config = {}): void {
     modalityAutofill: config.modalityAutofill !== false,
     probeTimeoutMs: config.probeTimeoutMs ?? PROBE_TIMEOUT_MS,
     bootRetryDelaysMs: config.bootRetryDelaysMs ?? [...BOOT_RETRY_DELAYS_MS],
-    routeSweepGraceMs: config.routeSweepGraceMs ?? ROUTE_SWEEP_GRACE_MS,
     defaultGuard: config.defaultGuard !== false,
     uaOverride: config.uaOverride !== false,
   }
@@ -1311,169 +1337,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
   }
 
-  /**
-   * Per-route first-absence observation for the vanish sweep. A route enters
-   * the map the first pass that cannot find it in the settings document and
-   * leaves the moment the document names it again; only a route still absent
-   * `resolved.routeSweepGraceMs` after its first observation is swept.
-   */
-  const vanishedSince = new Map<string, number>()
-  /** Every timer the sweep owns: boot retries and grace rechecks. */
-  const sweepTimers = new Set<ReturnType<typeof setTimeout>>()
-  ctx.effect(() => () => {
-    for (const timer of sweepTimers) clearTimeout(timer)
-    sweepTimers.clear()
-  }, 'dsh-model-think-level: route-sweep timers')
-  /**
-   * One delayed sweep pass, for deadlines the document updates will not reach:
-   * a route observed absent on a quiet session would otherwise sit unswept for
-   * ever. The earliest pending deadline owns the single timer; a newer, later
-   * one waits for the pass already queued (which reschedules what remains).
-   */
-  let recheckTimer: ReturnType<typeof setTimeout> | undefined
-  let recheckAt = 0
-  const scheduleSweep = (at: number): void => {
-    if (recheckTimer !== undefined) {
-      if (recheckAt <= at) return
-      clearTimeout(recheckTimer)
-      sweepTimers.delete(recheckTimer)
-    }
-    recheckAt = at
-    const timer = setTimeout(() => {
-      sweepTimers.delete(timer)
-      if (recheckTimer === timer) recheckTimer = undefined
-      void Promise.resolve().then(() => sweepVanishedRoutes())
-    }, Math.max(0, at - Date.now()))
-    recheckTimer = timer
-    sweepTimers.add(timer)
-  }
-
-  /**
-   * Retire every key-index route the settings document no longer has.
-   *
-   * The host deletes a provider by removing `providers.<route>` from the
-   * settings document; the key index is this plugin's own file and hears
-   * nothing about it, so the route's keys, extra endpoints and balance URL
-   * would otherwise sit in the file for ever — reappearing wholesale if the
-   * user ever re-creates a provider under the same id, and feeding stale
-   * endpoints to a route that can no longer serve. The document update that
-   * the deletion commits is the sweep's trigger (and boot its second one, for
-   * deletions that happened while this plugin was not running).
-   *
-   * Guards, in the order they matter:
-   * - the pi-ai section AND its `providers` record must be readable: before
-   *   the namespace registers, or while a half-written write parks the record
-   *   out, "the document lists no providers" is a boot window, not a mass
-   *   deletion, and this must not read it as one (every route would be swept);
-   * - absence must outlast `routeSweepGraceMs`: the metadata goes on the first
-   *   pass at or past the route's deadline, so one update caught mid-write —
-   *   or a first readable snapshot that predates a provider's arrival — costs
-   *   the user nothing, and a route that reappears inside the window lapses;
-   * - a malformed index fails closed — a sweep the user did not ask for never
-   *   rewrites metadata it could not parse;
-   * - a reference a SURVIVING route still names keeps its secret: two routes
-   *   may point at one credential (a shared `apiKeyEnv` seat), and the index
-   *   is the only enumeration the store has. A route inside its grace window
-   *   still counts as surviving — its keys must not be unlisted while its
-   *   metadata is being kept.
-   *
-   * The index write is one synchronous read-modify-write per route — atomic
-   * against a concurrent key POST the same way every other write here is —
-   * and the credential forgets ride behind it fire-and-forget, each within
-   * {@link CREDENTIAL_IPC_BUDGET_MS}, so a slow store cannot stall the
-   * document-update path this runs on. A pass that actually sweeps says so on
-   * the console: a silent deletion of user state is indistinguishable from a
-   * bug, and this one has been reported as one.
-   * @returns whether the pi-ai document was readable (the caller's boot
-   *   backoff keeps retrying until it is).
-   */
-  const sweepVanishedRoutes = (): boolean => {
-    const section = piSection()
-    // A section without a usable `providers` record says nothing about which
-    // routes exist. Reading it as "every provider left" would sweep live
-    // metadata off one half-written write.
-    if (!isRecord(section) || !isRecord(section['providers'])) return false
-    const live = section['providers'] as Record<string, Record<string, unknown>>
-    const indexFile = keyIndexFilePath()
-    let index: ReturnType<typeof readKeyIndex>
-    try {
-      index = readKeyIndex(indexFile)
-    } catch {
-      return true
-    }
-    // Routes the document names again: their absence observation lapses.
-    for (const route of vanishedSince.keys()) if (route in live) vanishedSince.delete(route)
-    const stale = new Set<string>()
-    for (const route of Object.keys(index.providers)) if (!(route in live)) stale.add(route)
-    for (const route of Object.keys(index.endpoints ?? {})) if (!(route in live)) stale.add(route)
-    for (const route of Object.keys(index.balances ?? {})) if (!(route in live)) stale.add(route)
-    if (stale.size === 0) return true
-    // Classify the absent routes against the grace window: a first observation
-    // is recorded (or, at grace 0, swept at once); a deadline reached is due;
-    // anything else waits, and one recheck is queued for the earliest pending
-    // deadline so a quiet session still cleans up.
-    const graceMs = resolved.routeSweepGraceMs
-    const now = Date.now()
-    const due = new Set<string>()
-    for (const route of stale) {
-      const since = vanishedSince.get(route)
-      if (since === undefined) {
-        if (graceMs <= 0) due.add(route)
-        else vanishedSince.set(route, now)
-      } else if (now - since >= graceMs) {
-        due.add(route)
-      }
-    }
-    let earliest = Infinity
-    for (const route of stale) {
-      if (due.has(route)) continue
-      const since = vanishedSince.get(route)
-      if (since !== undefined) earliest = Math.min(earliest, since + graceMs)
-    }
-    if (earliest !== Infinity) scheduleSweep(earliest)
-    if (due.size === 0) return true
-    const survivors = new Set<string>()
-    for (const [route, entries] of Object.entries(index.providers)) {
-      if (due.has(route)) continue
-      for (const entry of entries) survivors.add(entry.ref)
-    }
-    for (const profile of Object.values(live)) {
-      if (!isRecord(profile)) continue
-      const seat = enabledRefOf(profile)
-      if (seat !== undefined) survivors.add(seat)
-    }
-    const credentials = ctx.get('credentials') as CredentialsService | undefined
-    let swept = false
-    for (const route of due) {
-      const refs = keyEntriesOf(index, route).map(entry => entry.ref)
-      const hadEndpoints = index.endpoints?.[route] !== undefined
-      const hadBalance = index.balances?.[route] !== undefined
-      try {
-        updateKeyIndex(current => withoutRoute(current, route), indexFile)
-      } catch (error) {
-        console.error(`[dsh-model-think-level] key route cleanup for "${route}" failed: ${error instanceof Error ? error.message : String(error)}`)
-        continue
-      }
-      vanishedSince.delete(route)
-      swept = true
-      console.info(`[dsh-model-think-level] provider "${route}" left the settings document past its grace window; swept key-index metadata (${refs.length} key(s)${hadEndpoints ? ', extra endpoints' : ''}${hadBalance ? ', balance URL' : ''})`)
-      for (const ref of refs) {
-        forgetServes(route, ref)
-        const here = `${route}\u0000${ref}`
-        lastKnownScopes.delete(here)
-        lastKnownRecords.delete(here)
-        if (survivors.has(ref)) continue
-        void forgetCredential(credentials, ref, CREDENTIAL_IPC_BUDGET_MS).then(refused => {
-          if (refused !== undefined) {
-            console.error(`[dsh-model-think-level] credential cleanup for "${ref}" failed: ${refused}`)
-          }
-        })
-      }
-      invalidateListings(route)
-    }
-    if (swept) refreshKeyScopes()
-    return true
-  }
+  // A missing provider is not a credential-deletion instruction. Boot,
+  // reload and sync can all publish an incomplete (even valid empty) profile.
+  // Keep its key metadata, endpoints and balance URL until an explicit key
+  // operation removes them; never infer permission to unset a secret here.
 
   // ---- Scope probe: what each key serves, asked on demand ----
   //
@@ -1494,6 +1361,8 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   /** In-flight probe runs, by route; the list payload reports this as `probing`. */
   const keyProbeRuns = new Map<string, Promise<void>>()
+  let probeStopped = false
+  ctx.effect(() => () => { probeStopped = true })
 
   /**
    * Probe one route now: resolve every listed key (and the profile's own seat,
@@ -1504,6 +1373,8 @@ export function apply(ctx: Context, config: Config = {}): void {
    * the sweep is refused before the wire is touched.
    */
   const probeRouteKeys = async (route: string): Promise<void> => {
+    if (probeStopped) return
+    const indexFile = keyIndexFilePath()
     let profile: Record<string, unknown> | undefined
     try {
       profile = providerProfileOf(piSection(true), route)
@@ -1516,12 +1387,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (api === undefined || !LISTABLE_PROTOCOLS.has(api) || baseURL.length === 0) return
     let document: ReturnType<typeof readKeyIndex>
     try {
-      document = readKeyIndex(keyIndexFilePath())
+      document = readKeyIndex(indexFile)
     } catch {
       // A malformed index is the key route's complaint to make, not the probe's.
       return
     }
-    const endpoints = document.endpoints?.[route]
+    const endpoints = routeEndpointsOf(document, route)
     const listed = keyEntriesOf(document, route)
     const seat = enabledRefOf(profile)
     const keys: { ref: string; entry: KeyIndexEntry | undefined }[] = listed.map(entry => ({ ref: entry.ref, entry }))
@@ -1537,6 +1408,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         return undefined
       }
     }))
+    if (probeStopped) return
     const askable = keys.flatMap((key, index) => {
       const value = values[index]
       return value === undefined || value.length === 0 ? [] : [{ ...key, value }]
@@ -1557,6 +1429,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       keys: askable,
       refOf: key => key.ref,
       probe: async key => {
+        if (probeStopped) return { ref: key.ref, models: undefined }
         // A key's targets are independent listings; they run together and fold
         // in target order, exactly as the catalogue overlay folds them.
         const listings = await Promise.all(targetsOf(key.entry).map(target => probeListing({
@@ -1567,6 +1440,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           timeoutMs,
           send,
         })))
+        if (probeStopped) return { ref: key.ref, models: undefined }
         const ids: string[] = []
         for (const listing of listings) {
           if (listing === undefined) continue
@@ -1575,60 +1449,65 @@ export function apply(ctx: Context, config: Config = {}): void {
           }
         }
         if (ids.length === 0) return { ref: key.ref, models: undefined }
+        // Keep wire results local until the live commit owns the shared lease.
         served.set(key.ref, ids)
-        // The observations are the routing half of the answer: a later listing
-        // keeps them, and the pool prefers a key that listed the model.
-        lastKnownScopes.set(`${route}\u0000${key.ref}`, ids)
-        recordServes(route, key.ref, ids)
         return { ref: key.ref, models: ids }
       },
     })
-    if (served.size === 0) return
-    // The declared set is the universe a scope may name — the models already
-    // added to the provider, never its whole catalogue. Without it there is
-    // nothing to check the observations against.
-    const declared = Array.isArray(profile['models'])
-      ? profile['models'].filter(isRecord).map(model => typeof model['id'] === 'string' ? model['id'].trim() : '').filter(Boolean)
-      : []
-    if (declared.length === 0) return
-    // Re-read before writing: keys may have been added or replaced while the
-    // listings were on the wire.
-    let next = readKeyIndex(keyIndexFilePath())
-    let mutated = false
-    for (const [ref, ids] of served) {
-      const entry = keyEntriesOf(next, route).find(candidate => candidate.ref === ref)
-      // The unlisted seat has no entry to scope; it keeps its catch-all and
-      // its recorded observations.
-      if (entry === undefined) continue
-      // A manual assignment is a claim: the user chose what this key serves,
-      // and the probe never rewrites it.
-      if (entry.models !== undefined && entry.auto !== true) continue
-      const target = declared.filter(id => ids.includes(id))
-      // A key that serves every declared model keeps the catch-all it already
-      // reads as — the assignment that keeps serving models added later.
-      const scope = target.length === declared.length ? undefined : target
-      const unchanged = scope === undefined
-        ? entry.models === undefined
-        : entry.models !== undefined && entry.models.length === scope.length && scope.every(id => entry.models?.includes(id))
-      if (unchanged) continue
-      next = withKeyAutoScope(next, route, ref, scope)
-      mutated = true
-    }
-    if (!mutated) return
+    if (probeStopped || served.size === 0) return
+    // The POST only queues this probe; it never awaits it while holding a
+    // mutation lease. Network work stays outside the shared commit lease.
+    const releaseMutation = await acquireKeyMutation(indexFile)
     try {
-      writeKeyIndex(next, keyIndexFilePath())
-    } catch {
-      // A failed write costs one round of re-probing after the next save.
-      return
+      if (probeStopped) return
+      const currentProfile = providerProfileOf(settings.describe().find(entry => entry.ns === PI_NS)?.value, route)
+      if (currentProfile === undefined) return
+      // Scope only the models still declared after acquiring the lease.
+      const declared = Array.isArray(currentProfile['models'])
+        ? currentProfile['models'].filter(isRecord).map(model => typeof model['id'] === 'string' ? model['id'].trim() : '').filter(Boolean)
+        : []
+      if (declared.length === 0) return
+      // Keys, aliases, endpoints and manual claims may have changed on the wire
+      // or while this commit waited for another writer. Read only now.
+      let next = readKeyIndex(indexFile)
+      let mutated = false
+      for (const [ref, ids] of served) {
+        // Publish observations only while this live commit owns the lease.
+        lastKnownScopes.set(`${route}\u0000${ref}`, ids)
+        recordServes(route, ref, ids)
+        const entry = keyEntriesOf(next, route).find(candidate => candidate.ref === ref)
+        // An unlisted seat keeps its catch-all and recorded observations.
+        if (entry === undefined) continue
+        // A manual assignment is a claim the probe never rewrites.
+        if (entry.models !== undefined && entry.auto !== true) continue
+        const target = declared.filter(id => ids.includes(id))
+        const scope = target.length === declared.length ? undefined : target
+        const unchanged = scope === undefined
+          ? entry.models === undefined
+          : entry.models !== undefined && entry.models.length === scope.length && scope.every(id => entry.models?.includes(id))
+        if (unchanged) continue
+        next = withKeyAutoScope(next, route, ref, scope)
+        mutated = true
+      }
+      if (!mutated) return
+      try {
+        writeKeyIndex(next, indexFile)
+      } catch {
+        // A failed write costs one round of re-probing after the next save.
+        return
+      }
+      refreshKeyScopes()
+    } finally {
+      releaseMutation()
     }
-    refreshKeyScopes()
   }
 
   /** Probe one route, queueing behind the run already in flight, if any. */
   const runKeyProbe = (route: string): Promise<void> => {
+    if (probeStopped) return Promise.resolve()
     const previous = keyProbeRuns.get(route) ?? Promise.resolve()
     const run = previous
-      .then(() => probeRouteKeys(route))
+      .then(() => probeStopped ? undefined : probeRouteKeys(route))
       .catch(() => {
         // A probe never surfaces: the panel's next button press is the retry.
       })
@@ -1686,13 +1565,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (ns === PI_NS) {
       refreshHeaders()
       refreshKeyScopes()
-      // A provider deleted on the Models page is a removal from THIS document,
-      // and the key index is plugin state that would otherwise keep the route
-      // for ever: drop its keys, endpoints, balance URL and orphaned
-      // credentials once the route has stayed absent past the sweep's grace
-      // window — the document is authoritative, but one update caught
-      // mid-write is not, and that distinction is what the window buys.
-      sweepVanishedRoutes()
+      // Refresh routing, but retain metadata and secrets for absent providers.
+      // A settings snapshot is not an explicit key-removal request.
       // The image side rides the same events: the config file's derived
       // models[] re-derives from this document (config page, MCP, command).
       syncImageConfigNow()
@@ -1703,26 +1577,6 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     }
   })
-  // Boot covers the deletions that happened while this plugin was not
-  // running (disable, HMR, a crash): the same sweep, retried on the shared
-  // backoff until the pi-ai document is readable. A settled index costs one
-  // file read and one comparison; a route genuinely gone waits out the same
-  // grace window the live path uses before its residue goes.
-  {
-    const bootRouteSweep = (attempt: number): void => {
-      void Promise.resolve().then(() => sweepVanishedRoutes()).then((ready) => {
-        if (ready || attempt >= resolved.bootRetryDelaysMs.length) return
-        const timer = setTimeout(() => {
-          sweepTimers.delete(timer)
-          bootRouteSweep(attempt + 1)
-        }, resolved.bootRetryDelaysMs[attempt])
-        sweepTimers.add(timer)
-      }, (error: unknown) => {
-        console.error(`[dsh-model-think-level] route sweep failed: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    }
-    bootRouteSweep(0)
-  }
   /**
    * Resolve the ordered keys that may sign one matched request. The preference
    * order is the key index's list order; `keysForModel` narrows to the keys
@@ -2100,7 +1954,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // Serializes fingerprint store writes (POST and DELETE) so two clicks cannot
   // interleave a read-modify-write. Reads stay unqueued, exactly like
-  // `keyMutationTail` below.
+  // `acquireKeyMutation` below.
   let fingerprintMutationTail = Promise.resolve()
 
   // Same-origin probe route: the browser half's Auto-adapt asks the endpoint's
@@ -2396,7 +2250,6 @@ export function apply(ctx: Context, config: Config = {}): void {
     // writes and the browser half only ever handles references, labels and
     // booleans. That is the same surface the official page works with, and it
     // needs no new Remote face to get it.
-    let keyMutationTail = Promise.resolve()
     ctx.effect(
       () =>
         webServerCtx.webServer.register({
@@ -2404,6 +2257,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           path: KEY_INDEX_PATH,
           handler: async (req, res) => {
             res.setHeader('cache-control', 'no-store')
+            res.setHeader('x-dsh-key-integrity', '20261101-explicit-delete+history64+shared-lease-drain')
             if (!isTrustedRequest(req)) {
               sendJson(res, 403, { ok: false, error: 'forbidden' })
               return
@@ -2414,14 +2268,20 @@ export function apply(ctx: Context, config: Config = {}): void {
             }
             const url = new URL(req.url ?? '/', 'http://x')
             const route = url.searchParams.get('route') ?? ''
+            const indexFile = keyIndexFilePath()
+            const pendingMutations = new PendingCredentialMutations()
             let releaseMutation: (() => void) | undefined
             try {
               if (req.method === 'POST') {
                 // Routes can share credential refs, including normalized names.
                 // Keep each write/rollback sequence together; reads never queue.
-                const previous = keyMutationTail
-                keyMutationTail = new Promise<void>(resolve => { releaseMutation = resolve })
-                await previous
+                const release = await acquireKeyMutation(indexFile)
+                let finished = false
+                releaseMutation = () => {
+                  if (finished) return
+                  finished = true
+                  pendingMutations.releaseAfterSettled(release)
+                }
               }
               // The endpoint pair a provider card paints, answered from the index
               // file alone.
@@ -2437,7 +2297,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                   sendJson(res, 400, { ok: false, error: 'a route is required' })
                   return
                 }
-                const endpoints = readKeyIndex(keyIndexFilePath()).endpoints?.[route]
+                const endpoints = routeEndpointsOf(readKeyIndex(indexFile), route)
                 sendJson(res, 200, {
                   ok: true,
                   route,
@@ -2453,7 +2313,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                   sendJson(res, 400, { ok: false, error: 'a route is required' })
                   return
                 }
-                const endpoint = readKeyIndex(keyIndexFilePath()).balances?.[route]
+                const endpoint = routeBalanceOf(readKeyIndex(indexFile), route)
                 sendJson(res, 200, { ok: true, route, endpoint: endpoint ?? null })
                 return
               }
@@ -2496,7 +2356,6 @@ export function apply(ctx: Context, config: Config = {}): void {
                 return
               }
               const credentials = ctx.get('credentials') as CredentialsService | undefined
-              const indexFile = keyIndexFilePath()
 
               /** The reference the profile names right now, read fresh. */
               const enabledNow = (): string | undefined => enabledRefOf(providerProfileOf(entryOf()?.value, route))
@@ -2601,7 +2460,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                   }
                   return view
                 })
-                const endpoints = document.endpoints?.[route]
+                const endpoints = routeEndpointsOf(document, route)
                 // The models this route actually offers — the universe a key's
                 // scope is chosen from (user rule: pick from the models already
                 // added, never the provider's whole catalog).
@@ -2764,7 +2623,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 // The value goes into the store first: a reference the index
                 // lists but the store cannot hold would render as a key the
                 // user can never reveal, enable or remove.
-                const refused = await storeCredential(credentials, created, value)
+                const refused = await storeCredential(credentials, created, value, pendingMutations)
                 if (refused !== undefined) {
                   refuse(refused)
                   return
@@ -2779,7 +2638,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                     if (failed !== undefined) throw new Error(failed)
                   }
                 } catch (error) {
-                  const rollback = await forgetCredential(credentials, created, CREDENTIAL_IPC_BUDGET_MS)
+                  const rollback = await forgetCredential(credentials, created, pendingMutations, CREDENTIAL_IPC_BUDGET_MS)
                   // Keep metadata if cleanup failed, so the retained secret can
                   // still be found and removed by a later manager request.
                   if (rollback === undefined && indexed) {
@@ -2958,7 +2817,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                 // and its seat. Removing and re-adding would mint a new ref, so
                 // the profile would name a key the store no longer holds and the
                 // row would lose everything but its value.
-                const refused = await storeCredential(credentials, ref, value)
+                const refused = await storeCredential(credentials, ref, value, pendingMutations)
                 if (refused !== undefined) {
                   refuse(refused)
                   return
@@ -2995,17 +2854,17 @@ export function apply(ctx: Context, config: Config = {}): void {
                   forgetServes(route, ref)
                   invalidateCredentialDisplay(credentials, ref)
                   if (configured) {
-                    const refused = await forgetCredential(credentials, ref, CREDENTIAL_IPC_BUDGET_MS)
+                    const refused = await forgetCredential(credentials, ref, pendingMutations, CREDENTIAL_IPC_BUDGET_MS)
                     if (refused !== undefined) throw new Error(refused)
                   }
                 } catch (error) {
                   const failures: string[] = []
                   try {
                     updateKeyIndex(current => {
+                      const original = Object.hasOwn(document.providers, route) ? document.providers[route] : undefined
+                      if (original !== undefined) return { ...current, providers: { ...current.providers, [route]: original } }
                       const providers = { ...current.providers }
-                      const original = document.providers[route]
-                      if (original === undefined) delete providers[route]
-                      else providers[route] = original
+                      delete providers[route]
                       return { ...current, providers }
                     }, indexFile)
                   } catch {
@@ -3105,7 +2964,7 @@ export function apply(ctx: Context, config: Config = {}): void {
               sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
               return
             }
-            const endpoint = document.balances?.[route]
+            const endpoint = routeBalanceOf(document, route)
             if (endpoint === undefined) {
               sendJson(res, 200, { ok: true, route, configured: false })
               return

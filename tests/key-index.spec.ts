@@ -17,8 +17,12 @@ import {
   hasKeyEntry,
   keyEntriesOf,
   keyIndexFilePath,
+  keyIndexHistoryPath,
+  KEY_INDEX_HISTORY_LIMIT,
   parseKeyIndex,
   readKeyIndex,
+  routeBalanceOf,
+  routeEndpointsOf,
   updateKeyIndex,
   withKeyAlias,
   withKeyAutoScope,
@@ -86,6 +90,85 @@ describe('readKeyIndex', () => {
     writeKeyIndex(emptyKeyIndex(), fileOf())
     writeFileSync(fileOf(), '{"providers":{"route":[{"ref":"A","alias":" main "},{"ref":"A"}]}}')
     expect(readKeyIndex(fileOf())).toEqual({ version: 1, providers: { route: [{ ref: 'A', alias: 'main' }] } })
+  })
+})
+
+describe('prototype-safe route dictionaries', () => {
+  const routes = ['__proto__', 'constructor', 'toString']
+
+  it.each(routes)('round-trips every own dictionary entry for %s', route => {
+    const prototype = Object.getOwnPropertyDescriptors(Object.prototype)
+    const raw: unknown = JSON.parse(JSON.stringify({
+      version: 1,
+      providers: { [route]: [{ ref: 'SPECIAL_REF', alias: 'special label', models: ['m-a'], auto: true }] },
+      endpoints: { [route]: { openai: 'https://openai.example/v1', anthropic: 'https://anthropic.example' } },
+      balances: { [route]: 'https://balance.example/account' },
+    }))
+    const document = parseKeyIndex(raw)
+    expect(Object.hasOwn(document.providers, route)).toBe(true)
+    expect(Object.hasOwn(document.endpoints ?? {}, route)).toBe(true)
+    expect(Object.hasOwn(document.balances ?? {}, route)).toBe(true)
+    expect(keyEntriesOf(document, route)).toEqual([{ ref: 'SPECIAL_REF', alias: 'special label', models: ['m-a'], auto: true }])
+    expect(routeEndpointsOf(document, route)).toEqual({ openai: 'https://openai.example/v1', anthropic: 'https://anthropic.example' })
+    expect(routeBalanceOf(document, route)).toBe('https://balance.example/account')
+    writeKeyIndex(document, fileOf())
+    const read = readKeyIndex(fileOf())
+    expect(read).toEqual(document)
+    expect(Object.hasOwn(read.providers, route)).toBe(true)
+    expect(JSON.parse(readFileSync(fileOf(), 'utf8'))).toEqual(raw)
+    expect(Object.getPrototypeOf(read.providers)).toBe(Object.prototype)
+    expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototype)
+  })
+
+  it.each(routes)('keeps %s through key and metadata transforms', route => {
+    const prototype = Object.getOwnPropertyDescriptors(Object.prototype)
+    let document = withKeyEntry(withKeyEntry(emptyKeyIndex(), 'ordinary', 'OTHER'), route, 'FIRST', 'first')
+    document = withKeyEntry(document, route, 'SECOND', 'second')
+    document = withKeyAlias(document, route, 'FIRST', 'renamed')
+    document = withKeyModels(document, route, 'FIRST', ['m-a'])
+    document = withKeyAutoScope(document, route, 'FIRST', ['m-b'])
+    document = withKeyProtocol(document, route, 'FIRST', 'anthropic-messages')
+    document = withKeyDisabled(document, route, 'FIRST', true)
+    document = withRouteEndpoints(document, route, { openai: 'https://openai.example/v1' })
+    document = withRouteBalance(document, route, 'https://balance.example/account')
+    document = withoutKeyEntry(document, route, 'SECOND')
+    expect(keyEntriesOf(document, route)).toEqual([
+      { ref: 'FIRST', alias: 'renamed', models: ['m-b'], auto: true, protocol: 'anthropic-messages', disabled: true },
+    ])
+    writeKeyIndex(document, fileOf())
+    expect(readKeyIndex(fileOf())).toEqual(document)
+    expect(keyEntriesOf(document, 'ordinary')).toEqual([{ ref: 'OTHER' }])
+    const emptied = withoutKeyEntry(document, route, 'FIRST')
+    expect(Object.hasOwn(emptied.providers, route)).toBe(false)
+    expect(routeEndpointsOf(emptied, route)).toEqual({ openai: 'https://openai.example/v1' })
+    expect(routeBalanceOf(emptied, route)).toBe('https://balance.example/account')
+    expect(routeEndpointsOf(withRouteEndpoints(document, route, undefined), route)).toBeUndefined()
+    expect(routeBalanceOf(withRouteBalance(document, route, undefined), route)).toBeUndefined()
+    const removed = withoutRoute(document, route)
+    expect(keyEntriesOf(removed, route)).toEqual([])
+    expect(routeEndpointsOf(removed, route)).toBeUndefined()
+    expect(routeBalanceOf(removed, route)).toBeUndefined()
+    writeKeyIndex(removed, fileOf())
+    expect(readKeyIndex(fileOf())).toEqual(removed)
+    expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototype)
+  })
+
+  it('answers missing prototype names as empty, never inherited entries', () => {
+    const empty: KeyIndexDocument = { version: 1, providers: {}, endpoints: {}, balances: {} }
+    const inherited: KeyIndexDocument = {
+      version: 1,
+      providers: Object.create({ constructor: [{ ref: 'INHERITED' }] }) as KeyIndexDocument['providers'],
+      endpoints: Object.create({ constructor: { openai: 'https://inherited.example/v1' } }) as NonNullable<KeyIndexDocument['endpoints']>,
+      balances: Object.create({ constructor: 'https://inherited.example/balance' }) as NonNullable<KeyIndexDocument['balances']>,
+    }
+    for (const document of [empty, inherited]) {
+      for (const route of routes) {
+        expect(keyEntriesOf(document, route)).toEqual([])
+        expect(hasKeyEntry(document, route, 'INHERITED')).toBe(false)
+        expect(routeEndpointsOf(document, route)).toBeUndefined()
+        expect(routeBalanceOf(document, route)).toBeUndefined()
+      }
+    }
   })
 })
 
@@ -301,7 +384,79 @@ describe('writeKeyIndex', () => {
   })
 })
 
+describe('key index metadata history', () => {
+  it('preserves immutable pre-write references, aliases, scopes and endpoints', () => {
+    const original: KeyIndexDocument = {
+      version: 1,
+      providers: { ofox: [{ ref: 'OFOX_API_KEY', alias: 'main', models: ['model'], disabled: true }] },
+      endpoints: { ofox: { openai: 'https://example.com/v1' } },
+      balances: { ofox: 'https://example.com/balance' },
+    }
+    writeKeyIndex(original, fileOf())
+    const before = readFileSync(fileOf(), 'utf8')
+    updateKeyIndex(document => withKeyAlias(document, 'ofox', 'OFOX_API_KEY', 'renamed'), fileOf())
+    const firstFiles = readdirSync(keyIndexHistoryPath(fileOf()))
+    expect(firstFiles).toHaveLength(1)
+    const first = join(keyIndexHistoryPath(fileOf()), firstFiles[0]!)
+    expect(readFileSync(first, 'utf8')).toBe(before)
+    expect(JSON.parse(readFileSync(first, 'utf8'))).toEqual(original)
+    updateKeyIndex(document => withKeyEntry(document, 'ofox', 'OFOX_API_KEY_2', 'backup'), fileOf())
+    expect(readdirSync(keyIndexHistoryPath(fileOf()))).toHaveLength(2)
+    expect(readFileSync(first, 'utf8')).toBe(before)
+    expect(readKeyIndex(fileOf()).providers['ofox']).toHaveLength(2)
+  })
+
+  it('does not create history for an initial write or an unchanged document', () => {
+    const original = withKeyEntry(emptyKeyIndex(), 'ofox', 'OFOX_API_KEY', 'main')
+    writeKeyIndex(original, fileOf())
+    writeKeyIndex(original, fileOf())
+    expect(existsSync(keyIndexHistoryPath(fileOf()))).toBe(false)
+  })
+
+  it('leaves the original untouched when its backup cannot be written', () => {
+    writeKeyIndex(withKeyEntry(emptyKeyIndex(), 'ofox', 'OFOX_API_KEY', 'main'), fileOf())
+    const before = readFileSync(fileOf(), 'utf8')
+    writeFileSync(keyIndexHistoryPath(fileOf()), 'blocked')
+    expect(() => writeKeyIndex(emptyKeyIndex(), fileOf())).toThrow()
+    expect(readFileSync(fileOf(), 'utf8')).toBe(before)
+    expect(readdirSync(join(home, 'dsh-model-think-level')).some(name => name.endsWith('.tmp'))).toBe(false)
+  })
+
+  it('also refuses direct writes over a malformed existing index', () => {
+    writeKeyIndex(emptyKeyIndex(), fileOf())
+    writeFileSync(fileOf(), '{ broken', 'utf8')
+    expect(() => writeKeyIndex(withKeyEntry(emptyKeyIndex(), 'ofox', 'OFOX_API_KEY'), fileOf())).toThrow()
+    expect(readFileSync(fileOf(), 'utf8')).toBe('{ broken')
+  })
+
+  it('bounds generated snapshots without deleting unrelated history files', () => {
+    writeKeyIndex(withKeyEntry(emptyKeyIndex(), 'ofox', 'OFOX_API_KEY', 'start'), fileOf())
+    for (let i = 0; i < KEY_INDEX_HISTORY_LIMIT + 3; i++) {
+      updateKeyIndex(document => withKeyAlias(document, 'ofox', 'OFOX_API_KEY', `label-${i}`), fileOf())
+    }
+    const directory = keyIndexHistoryPath(fileOf())
+    writeFileSync(join(directory, 'manual-recovery.json'), '{}')
+    updateKeyIndex(document => withKeyAlias(document, 'ofox', 'OFOX_API_KEY', 'final'), fileOf())
+    const files = readdirSync(directory)
+    expect(files.filter(name => name !== 'manual-recovery.json')).toHaveLength(KEY_INDEX_HISTORY_LIMIT)
+    expect(readFileSync(join(directory, 'manual-recovery.json'), 'utf8')).toBe('{}')
+    expect(readKeyIndex(fileOf()).providers['ofox']?.[0]?.alias).toBe('final')
+  })
+})
+
 describe('updateKeyIndex', () => {
+  it('refuses a detected stale snapshot instead of overwriting another writer', () => {
+    writeKeyIndex(withKeyEntry(emptyKeyIndex(), 'ofox', 'A', 'old'), fileOf())
+    expect(() => updateKeyIndex(document => {
+      const newer = withKeyEntry(withKeyAlias(document, 'ofox', 'A', 'new'), 'ofox', 'B', 'second')
+      writeKeyIndex(newer, fileOf())
+      return withRouteEndpoints(document, 'wb', { openai: 'https://example.com/v1' })
+    }, fileOf())).toThrow('the key index changed while updating; retry the operation')
+    expect(readKeyIndex(fileOf()).providers['ofox']).toEqual([
+      { ref: 'A', alias: 'new' }, { ref: 'B', alias: 'second' },
+    ])
+  })
+
   it('answers with what it stored, and starts from what is on disk', () => {
     const first = updateKeyIndex((document) => withKeyEntry(document, 'ofox', 'A'), fileOf())
     const second = updateKeyIndex((document) => withKeyEntry(document, 'ofox', 'B'), fileOf())

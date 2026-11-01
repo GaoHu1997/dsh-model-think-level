@@ -2628,12 +2628,9 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 
 .bre-keys { display: flex; flex-direction: column; gap: 8px; }
 
-/* While the key list is still reading, the panel renders NOTHING (the component
-   returns an empty .bre-keys). An empty ruled box — or a placeholder line that
-   then swaps to the list — would paint one frame of a panel that then visibly
-   changes: the "the key section flashes when you press Edit" report. :empty
-   takes the panel out of the layout until the first answer lands, so the list
-   is the first thing the key area ever paints, and nothing under it moves. */
+/* Fast cold reads leave .bre-keys empty until the list arrives; only a slow
+   read shows a loading status. Hide the empty panel's own layout while the
+   host above reserves space, avoiding a transient ruled box or loading line. */
 .bre-keys:empty { display: none; }
 
 /* One ruled container holding the keys and the add entry, the way a settings
