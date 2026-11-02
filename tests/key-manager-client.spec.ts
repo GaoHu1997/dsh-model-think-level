@@ -13,6 +13,7 @@
 import { afterEach, expect, describe, it, vi } from 'vitest'
 import { KEY_INDEX_PATH, PROVIDER_KEY_PATH } from '../src/constants.js'
 import { httpKeyManagerClient } from '../src/client/key-manager-client.js'
+import { loadKeyList, saveKeyList } from '../src/client/key-list-store.js'
 
 interface Call {
   readonly url: string
@@ -539,5 +540,88 @@ describe('the address pair read', () => {
     stubFetch({ body: { ok: true, endpoints: { openai: null, anthropic: null } } })
     await httpKeyManagerClient.endpoints?.('a b')
     expect(calls[0]?.url).toBe(`${KEY_INDEX_PATH}?route=a%20b&op=endpoints`)
+  })
+})
+
+describe('the list that outlives the page', () => {
+  /** A Map with the Storage surface, for the node environment. */
+  function fakeStorage(): Storage {
+    const entries = new Map<string, string>()
+    return {
+      get length() { return entries.size },
+      clear: () => { entries.clear() },
+      getItem: (key: string) => entries.get(key) ?? null,
+      key: (index: number) => [...entries.keys()][index] ?? null,
+      removeItem: (key: string) => { entries.delete(key) },
+      setItem: (key: string, value: string) => { entries.set(key, value) },
+    } as Storage
+  }
+
+  it('paints the stored list before the host is asked anything', () => {
+    calls = []
+    vi.stubGlobal('localStorage', fakeStorage())
+    saveKeyList('cold-relay', {
+      ok: true,
+      route: 'cold-relay',
+      entries: [{ ref: 'cold-relay/1', alias: 'Team', enabled: true, configured: true, masked: 'sk-…9f2c' }],
+      endpoints: { openai: null, anthropic: null },
+    })
+    expect(httpKeyManagerClient.cached?.('cold-relay')?.entries).toHaveLength(1)
+    // Nothing has been asked yet: the first paint is the stored answer.
+    expect(calls).toHaveLength(0)
+  })
+
+  it('revalidates a stored list on the mount read instead of trusting it', async () => {
+    vi.stubGlobal('localStorage', fakeStorage())
+    saveKeyList('warm-relay', {
+      ok: true,
+      route: 'warm-relay',
+      entries: [{ ref: 'warm-relay/1', enabled: true, configured: true }],
+      endpoints: { openai: null, anthropic: null },
+    })
+    stubFetch({
+      body: {
+        ok: true,
+        route: 'warm-relay',
+        entries: [
+          { ref: 'warm-relay/1', enabled: true, configured: true },
+          { ref: 'warm-relay/2', enabled: true, configured: true },
+        ],
+        endpoints: { openai: null, anthropic: null },
+      },
+    })
+    const answer = await httpKeyManagerClient.list('warm-relay', { preferCache: true })
+    // The restored answer is not a fresh read: preferCache cannot skip it.
+    expect(calls).toHaveLength(1)
+    expect(answer.ok && answer.entries).toHaveLength(2)
+    expect(loadKeyList('warm-relay')?.entries).toHaveLength(2)
+  })
+
+  it('stores the list a successful write produced', async () => {
+    vi.stubGlobal('localStorage', fakeStorage())
+    stubFetch({
+      body: {
+        ok: true,
+        route: 'write-relay',
+        entries: [{ ref: 'write-relay/1', alias: 'Home', enabled: true, configured: true }],
+        endpoints: { openai: null, anthropic: null },
+      },
+    })
+    await httpKeyManagerClient.add('write-relay', 'sk-abcdef123456', 'Home')
+    expect(loadKeyList('write-relay')?.entries[0]?.alias).toBe('Home')
+  })
+
+  it('leaves the stored list alone when the write was refused', async () => {
+    vi.stubGlobal('localStorage', fakeStorage())
+    saveKeyList('keep-relay', {
+      ok: true,
+      route: 'keep-relay',
+      entries: [{ ref: 'keep-relay/1', enabled: true, configured: true }],
+      endpoints: { openai: null, anthropic: null },
+    })
+    stubFetch({ status: 400, body: { ok: false, error: 'a key is printable ASCII without spaces' } })
+    const answer = await httpKeyManagerClient.add('keep-relay', 'bad key', undefined)
+    expect(answer.ok).toBe(false)
+    expect(loadKeyList('keep-relay')?.entries).toHaveLength(1)
   })
 })

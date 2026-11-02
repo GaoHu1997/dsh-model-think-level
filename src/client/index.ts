@@ -83,6 +83,8 @@ import { createConfiguredEfforts } from './injection/configured-efforts.js'
 import { createIdleAutofill } from './injection/autofill-run.js'
 import { createCompatGuard } from './injection/compat-guard.js'
 import { createModelsPage } from './injection/models-page.js'
+import { httpKeyManagerClient } from './key-manager-client.js'
+import { warmStoredKeyLists } from './key-list-warm.js'
 import { teardownFingerprintRunners } from './fingerprint-runner.js'
 import { createSessionDirectoryTracker } from './injection/session-directory.js'
 import { createAutoContinue } from './injection/auto-continue-run.js'
@@ -132,6 +134,15 @@ export function apply(ctx: ClientContext): void {
   style.textContent = STYLES
   document.head.appendChild(style)
   ctx.effect(() => () => style.remove(), 'dsh-model-think-level: stylesheet')
+
+  // Revalidate the key lists the last page left on disk, once the first screen
+  // has had its turn: the panel paints those stored rows instantly, and this
+  // pass is what keeps the painted copy current when the document moved while
+  // the page was closed. Purely background — a refusal changes nothing.
+  ctx.effect(
+    () => warmStoredKeyLists(httpKeyManagerClient),
+    'dsh-model-think-level: key list revalidation',
+  )
 
   // The kernel mounts the settings Remote as an injectable
   // 'remote.settings' service, declared in the plugin's own inject above — so

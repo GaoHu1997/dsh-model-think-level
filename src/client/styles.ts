@@ -37,6 +37,11 @@ body {
   --bre-surface: var(--dsw-alias-bg-base, #ffffff);
   --bre-sunken: var(--dsw-alias-bg-module-platform, #f5f6f7);
   --bre-sunken-2: var(--dsw-alias-fill-tertiary, #f1f3f5);
+  /* The one step between sunken and track: the shimmer skeletons travel through
+     it. It was referenced by the config pane's skeleton long before it existed
+     here, so that gradient silently resolved to nothing; declared now, in both
+     themes, because a var() fallback only covers an UNSET token. */
+  --bre-sunken-1: #ebedf0;
   --bre-track: #e9ecf2;
   --bre-hover: var(--dsw-alias-interactive-bg-hover, #2631480f);
   --bre-active: var(--dsw-alias-interactive-bg-active, #2631481a);
@@ -75,6 +80,7 @@ body[data-ds-dark-theme] {
   --bre-surface: #292929;
   --bre-sunken: #353638;
   --bre-sunken-2: #3d3e40;
+  --bre-sunken-1: #4a4b4e;
   --bre-track: #434446;
   --bre-accent-ink: #d3e2ff;
   --bre-accent-weak: #1e335c;
@@ -2632,6 +2638,73 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
    read shows a loading status. Hide the empty panel's own layout while the
    host above reserves space, avoiding a transient ruled box or loading line. */
 .bre-keys:empty { display: none; }
+
+/* A cold read paints the list's own shape rather than a caption. One key row
+   plus the add row, at exactly the heights the real rows settle at (40px row /
+   35px add row, both measured off the live list), so the answer replaces the
+   placeholder without moving the card by a pixel; the fade covers the moment the
+   200ms delay elapses, so a read that lands right after it does not blink. */
+.bre-keys-skeleton {
+  animation: bre-keys-skeleton-in 180ms ease both;
+}
+
+@keyframes bre-keys-skeleton-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.bre-keys-skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 10px;
+  box-sizing: border-box;
+}
+
+/* The first bar is the switch the row starts with: a ring, not a line. */
+.bre-keys-skeleton-dot {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--bre-sunken-2);
+}
+
+.bre-keys-skeleton-bar {
+  flex: 0 1 auto;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bre-sunken-2) 0%, var(--bre-sunken-1) 50%, var(--bre-sunken-2) 100%);
+  background-size: 200% 100%;
+  animation: bre-config-shimmer 1.4s linear infinite;
+}
+
+/* The name takes the row's measure and the masked key follows as a quieter
+   pill; the add bar is the one-line invitation, so it stays short. */
+.bre-keys-skeleton-bar.is-name { width: 34%; }
+.bre-keys-skeleton-bar.is-mask { width: 18%; }
+.bre-keys-skeleton-row.is-add { height: 35px; }
+.bre-keys-skeleton-row.is-add .bre-keys-skeleton-bar { width: 22%; background: var(--bre-sunken-2); animation: none; }
+
+/* The loading sentence itself, word for word, for assistive tech only: taken
+   out of flow so it neither adds a line nor widens the flex column. */
+.bre-keys-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bre-keys-skeleton { animation: none; }
+  .bre-keys-skeleton-bar { animation: none; background: var(--bre-sunken-2); }
+}
 
 /* One ruled container holding the keys and the add entry, the way a settings
    list reads: a single hairline box, and hairlines between rows only. */

@@ -3094,14 +3094,16 @@ describe('apply() key-index route', () => {
     expect(String(out().body['error'])).toContain('unknown key operation ""')
   })
 
-  // ---- The scope probe (the key panel's button) ----
+  // ---- The scope probe (the key panel's button, and every save) ----
   //
-  // The `probe` operation asks every listed key of a MULTI-KEY route what its
-  // own listing advertises, records the observations, and checks the
-  // probe-maintained scopes to the models the key actually serves within the
-  // route's declared set. A manual scope is never rewritten, a key that serves
-  // every declared model keeps its catch-all, and nothing probes on its own —
-  // a save and a key change schedule nothing.
+  // The `probe` operation asks every switched-on key of a MULTI-KEY route what
+  // its own listing advertises, records the observations, and writes the scope
+  // the key actually serves within the route's declared set: a key that serves
+  // every declared model keeps its catch-all, one that serves part of the set
+  // gets that intersection (marked as the probe's own), and one that serves
+  // none of them is switched off on the spot. Nothing is exempt — a scope
+  // saved by hand is re-checked like any other — and the same sweep runs one
+  // debounce after a save or a key edit, not only on the button.
 
   describe('scope probe operation', () => {
     afterEach(() => {
@@ -3291,17 +3293,22 @@ describe('apply() key-index route', () => {
         peer = keyIndex.withKeyEntry(peer, 'aliyun', 'PEER_ADDED', 'peer added')
         writeKeyIndex(peer, indexFile())
         // No invalidation event: a true fresh configuration read after waiting
-        // must scope the first key against m-b/m-c, not the cached m-a/m-b.
+        // must judge both keys against m-b/m-c, not the cached m-a/m-b.
         settings.register('llm-pi-ai', { aliyun: { ...profile, models: [{ id: 'm-b' }, { id: 'm-c' }] } })
         releasePeer()
         releasePeer = undefined
         await vi.waitFor(() => {
-          expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')[0]?.models).toEqual([])
+          expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')[0]?.disabled).toBe(true)
         })
         const current = readKeyIndex(indexFile())
+        // The first key lists only m-a, which the route no longer declares: it
+        // serves none of the added models and is switched off, with the peer's
+        // own alias intact. The second serves m-b as well, so its scope — the
+        // one the peer saved by hand — is rewritten to the intersection the
+        // listing proves.
         expect(keyEntriesOf(current, 'aliyun')).toEqual([
-          { ref: 'ALIYUN_KEY', alias: 'peer alias', models: [], auto: true },
-          { ref: 'ALIYUN_KEY_2', models: ['m-a'] },
+          { ref: 'ALIYUN_KEY', alias: 'peer alias', disabled: true },
+          { ref: 'ALIYUN_KEY_2', models: ['m-b'], auto: true },
           { ref: 'PEER_ADDED', alias: 'peer added' },
         ])
         expect(keyIndex.routeEndpointsOf(current, 'aliyun')).toEqual({ openai: 'https://peer.example/v1' })
@@ -3394,7 +3401,7 @@ describe('apply() key-index route', () => {
       expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')).toEqual([{ ref: 'ALIYUN_KEY' }])
     })
 
-    it('leaves a scope the user saved by hand alone, whatever the listing says', async () => {
+    it('rewrites a scope the user saved by hand, because the listing is the truth now', async () => {
       writeKeyIndex({
         version: 1,
         providers: { aliyun: [{ ref: 'ALIYUN_KEY', models: ['m-a', 'm-b'] }, { ref: 'ALIYUN_KEY_2' }] },
@@ -3410,15 +3417,85 @@ describe('apply() key-index route', () => {
       expect(out().status).toBe(200)
       // The probe ran (the listing was asked)…
       await vi.waitFor(() => { expect(wire.calls()).toBeGreaterThan(0) })
-      // …and settled: no read reports it any more, and the manual scope the
-      // entry carries — wider than what its key lists — is exactly as saved.
+      // …and settled: the hand-saved scope claimed both declared models, but
+      // this key's own listing only carries m-a, so the scope narrows to the
+      // intersection and changes hands to the probe.
       await vi.waitFor(async () => {
         const { res, out } = fakeRes()
         await handler(fakeReq(), res)
         expect(out().body['probing']).toBeUndefined()
       })
       const entries = keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')
-      expect(entries.find(entry => entry.ref === 'ALIYUN_KEY')).toEqual({ ref: 'ALIYUN_KEY', models: ['m-a', 'm-b'] })
+      expect(entries.find(entry => entry.ref === 'ALIYUN_KEY')).toEqual({ ref: 'ALIYUN_KEY', models: ['m-a'], auto: true })
+      // The second key carries the whole declared set, so its catch-all stands.
+      expect(entries.find(entry => entry.ref === 'ALIYUN_KEY_2')).toEqual({ ref: 'ALIYUN_KEY_2' })
+    })
+
+    it('switches off the key that serves none of the added models, and only that key', async () => {
+      writeKeyIndex({
+        version: 1,
+        providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
+      }, indexFile())
+      const store = credentialStore({ ALIYUN_KEY: 'sk-first', ALIYUN_KEY_2: 'sk-second' })
+      // The first key's group carries a model the route adds; the second lists
+      // only models the route never declared, so its intersection is empty.
+      vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const auth = new Headers(init?.headers).get('authorization') ?? ''
+        const models = auth.endsWith('sk-second') ? ['elsewhere-1'] : ['m-a']
+        return new Response(JSON.stringify({ data: models.map(id => ({ id })) }), { status: 200 })
+      }))
+      const { handler } = await mounted(
+        { aliyun: { ...profile, models: [{ id: 'm-a' }, { id: 'm-b' }] } },
+        store,
+      )
+      const { res, out } = fakeRes()
+      await handler(fakeReq({ method: 'POST', body: { op: 'probe' } }), res)
+      expect(out().status).toBe(200)
+      await vi.waitFor(() => {
+        const entries = keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')
+        expect(entries.find(entry => entry.ref === 'ALIYUN_KEY_2')?.disabled).toBe(true)
+      })
+      // An empty intersection is a scope of zero models: the row is switched
+      // off, while the key that does serve something keeps its intersection.
+      expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')).toEqual([
+        { ref: 'ALIYUN_KEY', models: ['m-a'], auto: true },
+        { ref: 'ALIYUN_KEY_2', disabled: true },
+      ])
+      const { res: listRes, out: listOut } = fakeRes()
+      await handler(fakeReq(), listRes)
+      const rows = listOut().body['entries'] as Array<Record<string, unknown>>
+      expect(rows.map(row => [row['ref'], row['enabled']])).toEqual([['ALIYUN_KEY', true], ['ALIYUN_KEY_2', false]])
+    })
+
+    it('never switches off the last key a route could route with', async () => {
+      writeKeyIndex({
+        version: 1,
+        providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
+      }, indexFile())
+      const store = credentialStore({ ALIYUN_KEY: 'sk-first', ALIYUN_KEY_2: 'sk-second' })
+      // Neither key lists anything this route adds — usually a model-id
+      // mismatch, not two dead accounts. Emptying the pool would claim the
+      // whole provider is unusable, which the sweep has no business claiming.
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(
+        JSON.stringify({ data: [{ id: 'elsewhere-1' }, { id: 'elsewhere-2' }] }),
+        { status: 200 },
+      )))
+      const { handler } = await mounted(
+        { aliyun: { ...profile, models: [{ id: 'm-a' }, { id: 'm-b' }] } },
+        store,
+      )
+      const { res, out } = fakeRes()
+      await handler(fakeReq({ method: 'POST', body: { op: 'probe' } }), res)
+      expect(out().status).toBe(200)
+      await vi.waitFor(async () => {
+        const { res, out } = fakeRes()
+        await handler(fakeReq(), res)
+        expect(out().body['probing']).toBeUndefined()
+      })
+      expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')).toEqual([
+        { ref: 'ALIYUN_KEY' },
+        { ref: 'ALIYUN_KEY_2' },
+      ])
     })
 
     it('re-checks a probe-maintained scope on the next button press', async () => {
@@ -3451,30 +3528,57 @@ describe('apply() key-index route', () => {
       expect(entries.find(entry => entry.ref === 'ALIYUN_KEY_2')).toEqual({ ref: 'ALIYUN_KEY_2' })
     })
 
-    it('probes nothing on its own: a save and a key change schedule nothing', async () => {
+    it('sweeps on its own one debounce after a save moves the profile', async () => {
       writeKeyIndex({
         version: 1,
         providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
       }, indexFile())
       const store = credentialStore({ ALIYUN_KEY: 'sk-first', ALIYUN_KEY_2: 'sk-second' })
       const wire = listingFetch()
-      const { handler, settings, emitUpdated } = await mounted(
+      const { settings, emitUpdated } = await mounted(
         { aliyun: { ...profile, models: [{ id: 'm-a' }, { id: 'm-b' }] } },
         store,
+        { autofill: false },
       )
+      // Booting is not news: what is declared at boot predates this process.
+      expect(wire.calls()).toBe(0)
       // A save that moves every probe fact there is (address, models):
-      settings.register('llm-pi-ai', { aliyun: { ...profile, baseURL: 'https://moved.example.com/v1', models: [{ id: 'm-a' }, { id: 'm-b' }, { id: 'm-c' }] } })
+      settings.register('llm-pi-ai', {
+        aliyun: { ...profile, baseURL: 'https://moved.example.com/v1', models: [{ id: 'm-a' }, { id: 'm-b' }, { id: 'm-c' }] },
+      })
       emitUpdated('llm-pi-ai')
-      // And a key change that used to re-probe (a replaced value):
+      await vi.waitFor(() => { expect(wire.calls()).toBeGreaterThan(0) }, { timeout: 5_000 })
+      await vi.waitFor(() => {
+        const entries = keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')
+        expect(entries.find(entry => entry.ref === 'ALIYUN_KEY')?.models).toEqual(['m-a'])
+      }, { timeout: 5_000 })
+      // The second key lists the whole declared set: catch-all, nothing written.
+      expect(keyEntriesOf(readKeyIndex(indexFile()), 'aliyun').find(entry => entry.ref === 'ALIYUN_KEY_2')).toEqual({ ref: 'ALIYUN_KEY_2' })
+    })
+
+    it('sweeps after a key edit even though the profile itself did not move', async () => {
+      writeKeyIndex({
+        version: 1,
+        providers: { aliyun: [{ ref: 'ALIYUN_KEY' }, { ref: 'ALIYUN_KEY_2' }] },
+      }, indexFile())
+      const store = credentialStore({ ALIYUN_KEY: 'sk-first', ALIYUN_KEY_2: 'sk-second' })
+      const wire = listingFetch()
+      const { handler } = await mounted(
+        { aliyun: { ...profile, models: [{ id: 'm-a' }, { id: 'm-b' }] } },
+        store,
+        { autofill: false },
+      )
+      expect(wire.calls()).toBe(0)
+      // A credential is a new upstream account, and the profile says nothing
+      // about it: the POST names the route the sweep has to ask again.
       const { res, out } = fakeRes()
       await handler(fakeReq({ method: 'POST', body: { op: 'value', ref: 'ALIYUN_KEY', value: 'sk-rotated' } }), res)
       expect(out().status).toBe(200)
-      // Neither may ask the wire; the button is the only trigger.
-      await new Promise(resolve => setTimeout(resolve, 50))
-      expect(wire.calls()).toBe(0)
-      const { res: listRes, out: listOut } = fakeRes()
-      await handler(fakeReq(), listRes)
-      expect(listOut().body['probing']).toBeUndefined()
+      await vi.waitFor(() => { expect(wire.calls()).toBeGreaterThan(0) }, { timeout: 5_000 })
+      await vi.waitFor(() => {
+        const entries = keyEntriesOf(readKeyIndex(indexFile()), 'aliyun')
+        expect(entries.find(entry => entry.ref === 'ALIYUN_KEY')?.models).toEqual(['m-a'])
+      }, { timeout: 5_000 })
     })
   })
 })

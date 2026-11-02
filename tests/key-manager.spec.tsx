@@ -48,7 +48,7 @@ const COPY: Record<string, string> = {
   keysScopeSaved: 'Models saved.',
   keysScopePlaceholder: 'Model ids, comma separated',
   keysScopeHint: 'Only the ticked models use this key.',
-  keysScopeAutoHint: 'This scope was ticked by the probe; saving an edit here claims it by hand.',
+  keysScopeAutoHint: 'This scope was written by the auto-probe from what this key lists; every sweep rechecks it.',
   keysProbe: 'Auto-probe',
   keysProbing: 'Probing…',
   keysProbeHint: 'Ask every key what it actually serves.',
@@ -299,6 +299,9 @@ describe('the list', () => {
     expect(panel.root.querySelector('.bre-keys')?.getAttribute('aria-busy')).toBe('true')
     expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(0)
     expect(panel.root.querySelector('.bre-keys-add-row')).toBeNull()
+    // The skeleton belongs to the delayed state too: a read that lands inside
+    // the window must not flash grey bars ahead of the answer.
+    expect(panel.root.querySelector('.bre-keys-skeleton')).toBeNull()
 
     await vi.advanceTimersByTimeAsync(delay)
     expect(panel.root.querySelector('[role="status"]')).toBeNull()
@@ -319,9 +322,16 @@ describe('the list', () => {
     expect(panel.root.querySelector('[role="status"]')).toBeNull()
     await vi.advanceTimersByTimeAsync(1)
     expect(panel.root.querySelector('[role="status"]')?.textContent).toBe(COPY.keysLoading)
+    // What the eye gets is the list's own shape — one key row and the add row —
+    // not the sentence; the words stay for assistive tech (the status node is
+    // hidden from layout by the skeleton's own class list).
+    const skeleton = panel.root.querySelectorAll('.bre-keys-skeleton-row')
+    expect(skeleton).toHaveLength(2)
+    expect(skeleton[1]?.classList.contains('is-add')).toBe(true)
     finish(state({ entries: [row({ ref: 'A' })] }))
     await flush()
     expect(panel.root.querySelectorAll('.bre-keys-row')).toHaveLength(1)
+    expect(panel.root.querySelector('.bre-keys-skeleton')).toBeNull()
     expect(panel.root.textContent).not.toContain(COPY.keysLoading)
   })
 
@@ -504,7 +514,7 @@ describe('the scope chips', () => {
     expect(chips).toEqual(['glm-4-air', 'qwen-max'])
   })
 
-  it('tells the user when a scope is the probe’s, and that saving it claims the scope by hand', async () => {
+  it('tells the user a scope came from the probe, which rechecks it on every sweep', async () => {
     const { client } = recorder({
       list: async () =>
         state({
@@ -519,7 +529,8 @@ describe('the scope chips', () => {
     await flush()
 
     // The chips show the probe's checks, and the form says whose they are:
-    // a scope the user never ticked must not read as one they did.
+    // a scope the user never ticked must not read as one they did, and an
+    // edit saved here is only good until the next sweep.
     expect(panel.root.querySelector('.bre-keys-chip.is-selected')?.textContent).toBe('glm-4-air')
     expect(panel.root.textContent).toContain(COPY.keysScopeAutoHint)
   })
@@ -699,6 +710,42 @@ describe('the probe follow-up', () => {
       expect(calls.filter(call => call.op === 'list').map(call => call.args)).toEqual([
         ['ofox', { preferCache: true }], ['ofox'], ['ofox'],
       ])
+      expect(buttonByText(panel.root, '1 models')).toBeDefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('looks again after a save, so the sweep the host starts on its own reaches the panel', async () => {
+    vi.useFakeTimers()
+    try {
+      const before = state({
+        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1' })],
+        models: ['glm-4-air'],
+      })
+      const swept = state({
+        entries: [row({ ref: 'A', alias: 'a', masked: 'sk-a...a1', models: ['glm-4-air'], auto: true })],
+        models: ['glm-4-air'],
+      })
+      // The first re-read is always too early: the host waits its own debounce
+      // before it asks the wire, so the scope it writes is not there yet.
+      const script = [before, before, swept]
+      let round = 0
+      const { client, calls } = recorder({ list: async () => script[Math.min(round++, script.length - 1)]! })
+      const panel = mount({ client })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(buttonByText(panel.root, 'All models')).toBeDefined()
+
+      document.dispatchEvent(new CustomEvent(SETTINGS_CHANGED_EVENT))
+      await vi.advanceTimersByTimeAsync(SETTINGS_REFRESH_DEBOUNCE_MS)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls.filter(call => call.op === 'list')).toHaveLength(2)
+      expect(buttonByText(panel.root, 'All models')).toBeDefined()
+
+      // One more look once the sweep can have run, and the assignment shows.
+      await vi.advanceTimersByTimeAsync(1_500)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls.filter(call => call.op === 'list')).toHaveLength(3)
       expect(buttonByText(panel.root, '1 models')).toBeDefined()
     } finally {
       vi.useRealTimers()

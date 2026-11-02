@@ -31,6 +31,7 @@
 import { KEY_INDEX_PATH, PROVIDER_KEY_PATH } from '../constants.js'
 import { isRecord } from '../shared.js'
 import { isRouteProtocol, type RouteProtocol } from '../key-refs.js'
+import { loadKeyList, saveKeyList } from './key-list-store.js'
 
 /** One key row as the host reports it. */
 export interface KeyRow {
@@ -59,26 +60,15 @@ export interface KeyRow {
    */
   readonly models?: readonly string[]
   /**
-   * The model ids this key's OWN listing advertised the last time it answered —
-   * observed by the host, not assigned by the user. A relay may resolve each key
-   * to a different upstream account with its own catalogue, so one key's list can
-   * be smaller than the route's; the panel offers this list as a one-click scope
-   * so "this key only carries half the models" can be made explicit instead of
-   * being discovered as a 404 at request time. Absent means never listed (or the
-   * list named none of the route's models), which is unknown, not empty.
-   */
-  readonly observed?: readonly string[]
-  /**
    * The wire protocol this key pins. Absent means "follow the provider's own
    * protocol". A pinned protocol makes this key speak a different API shape than
    * the rest of the route (e.g. one Anthropic key on an OpenAI route).
    */
   readonly protocol?: RouteProtocol
   /**
-   * Whether the key's model scope is the probe's assignment rather than a
-   * manual one — the panel shows it so a scope edit knows the checked chips
-   * will keep being rewritten on every probe run until the user saves one by
-   * hand.
+   * Whether the key's model scope was written by the probe rather than saved by
+   * hand. The panel says so, because every probe rewrites the scope against what
+   * each key actually lists — an edit here is honoured until the next sweep.
    */
   readonly auto?: boolean
   /**
@@ -246,7 +236,6 @@ function rowOf(value: unknown): KeyRow | undefined {
   const configured = value['configured']
   const masked = value['masked']
   const models = modelsOf(value['models'])
-  const observed = modelsOf(value['observed'])
   const protocol = value['protocol']
   const auto = value['auto']
   const rest = value['rest']
@@ -259,7 +248,6 @@ function rowOf(value: unknown): KeyRow | undefined {
     configured: typeof configured === 'boolean' ? configured : null,
     ...(typeof masked === 'string' && masked.length > 0 ? { masked } : {}),
     ...(models === undefined ? {} : { models }),
-    ...(observed === undefined || observed.length === 0 ? {} : { observed }),
     ...(isRouteProtocol(protocol) ? { protocol } : {}),
     ...(auto === true ? { auto: true } : {}),
     ...(remainingMs !== undefined && remainingMs >= 0 && failures !== undefined
@@ -350,6 +338,14 @@ const KEY_LISTS = new Map<string, KeyListCache>()
 const KEY_LIST_CACHE_LIMIT = 64
 const KEY_LIST_FRESH_MS = 5_000
 
+/**
+ * The cache slot for a route, hydrated from disk the first time this page asks.
+ *
+ * `updatedAt` stays 0 even when a stored list was found: the restored entries
+ * are what the panel paints first, not an answer this page has validated, so
+ * the mount read always revalidates. A later write (or a read answer) stamps
+ * the real time and from then on the five-second gate applies as before.
+ */
 function listCache(route: string): KeyListCache {
   const known = KEY_LISTS.get(route)
   if (known !== undefined) return known
@@ -357,7 +353,7 @@ function listCache(route: string): KeyListCache {
     const oldest = KEY_LISTS.keys().next().value
     if (oldest !== undefined) KEY_LISTS.delete(oldest)
   }
-  const fresh: KeyListCache = { updatedAt: 0, revision: 0 }
+  const fresh: KeyListCache = { state: loadKeyList(route), updatedAt: 0, revision: 0 }
   KEY_LISTS.set(route, fresh)
   return fresh
 }
@@ -372,7 +368,7 @@ function listCache(route: string): KeyListCache {
  * the list it painted a minute ago is still the best available answer.
  */
 function cachedList(route: string): KeyState | undefined {
-  return KEY_LISTS.get(route)?.state
+  return listCache(route).state
 }
 
 function listKeys(route: string, options?: KeyListOptions): Promise<KeyAnswer> {
@@ -389,6 +385,7 @@ function listKeys(route: string, options?: KeyListOptions): Promise<KeyAnswer> {
     if (answer.ok) {
       cached.state = answer
       cached.updatedAt = Date.now()
+      saveKeyList(route, answer)
     }
     return answer
   }).finally(() => {
@@ -408,6 +405,7 @@ async function changeKeys(route: string, payload: Record<string, unknown>): Prom
     cached.read = undefined
     cached.state = answer
     cached.updatedAt = Date.now()
+    saveKeyList(route, answer)
   }
   return answer
 }

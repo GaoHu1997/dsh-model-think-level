@@ -177,6 +177,13 @@ const PROBE_POLL_MAX = 150
 const SETTINGS_REFRESH_DEBOUNCE_MS = 300
 
 /**
+ * How long after a save-driven re-read to look again for the sweep the host
+ * scheduled: the host waits its own debounce (a second) before it asks the
+ * wire, so the first re-read is always too early to see the assignments.
+ */
+const AUTO_PROBE_FOLLOW_UP_MS = 1_500
+
+/**
  * How the provider's added model ids read in the scope chips. `numeric` keeps
  * a family in version order (`glm-4.5` before `glm-4.6`).
  */
@@ -297,6 +304,11 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
    * list is how those reach the screen.
    */
   const [probing, setProbing] = useState(false)
+  /** The same flag, readable from a timer that fires long after the render. */
+  const probingRef = useRef(false)
+  useEffect(() => {
+    probingRef.current = probing
+  }, [probing])
   const probePolls = useRef(0)
 
   /**
@@ -355,23 +367,35 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   }, [revalidate, route])
 
   // A save anywhere moved the settings document: re-read so the painted rows
-  // stay the document's. (The probe rides the button below, not saves; this
-  // re-read is what carries another tab's probe result into this one when the
-  // document itself moved for an unrelated reason.)
+  // stay the document's. A save also happens to be the host's cue to re-check
+  // every key's scope, and that sweep starts a debounce later and writes the
+  // index (which fires no settings event of its own). Too early to see it in
+  // this read, so unless the read already reported a sweep in flight — then
+  // the quiet poll below follows it — look once more after the sweep can have
+  // started, and the assignments it wrote reach the panel from there.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined
+    let followUp: ReturnType<typeof setTimeout> | undefined
     const onChanged = (): void => {
       // A write burst lands as several pushes; one re-read per burst is enough.
       if (timer !== undefined) return
       timer = setTimeout(() => {
         timer = undefined
         void revalidate(route)
+        if (followUp === undefined) {
+          followUp = setTimeout(() => {
+            followUp = undefined
+            if (probingRef.current) return
+            void revalidate(route)
+          }, AUTO_PROBE_FOLLOW_UP_MS)
+        }
       }, SETTINGS_REFRESH_DEBOUNCE_MS)
     }
     document.addEventListener(SETTINGS_CHANGED_EVENT, onChanged)
     return () => {
       document.removeEventListener(SETTINGS_CHANGED_EVENT, onChanged)
       if (timer !== undefined) clearTimeout(timer)
+      if (followUp !== undefined) clearTimeout(followUp)
     }
   }, [revalidate, route])
 
@@ -586,19 +610,12 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     const kind = editing.kind
     const wantsValue = kind === 'add' || kind === 'value'
     const wantsScope = kind === 'scope'
-    // What this key's own listing said (host-observed, not user-assigned): a
-    // one-click way to make "this key's group only carries part of the
-    // catalogue" explicit, instead of discovering it as a 404 at request time.
-    const observed = kind === 'scope' && editing?.ref !== undefined
-      ? rows?.find(row => row.ref === editing.ref)?.observed ?? []
-      : []
     // Whether the scope being edited is the probe's assignment: the user
-    // should know the checked chips were checked for them, and that saving
-    // this form claims the scope by hand.
+    // should know the checked chips were ticked from what this key lists, and
+    // that every sweep redoes them.
     const autoScope = kind === 'scope' && editing?.ref !== undefined
       ? rows?.find(row => row.ref === editing.ref)?.auto === true
       : false
-    const observedChips = chipModels.filter(model => observed.includes(model))
     const illegal = wantsValue && valueDraft.length > 0 && !isLegalKeyValue(valueDraft)
     return (
       <div className="bre-keys-form">
@@ -679,25 +696,12 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
         {kind === 'add' ? <p className="bre-keys-hint">{t('keysProtocolCreateHint')}</p> : null}
         {wantsScope ? <p className="bre-keys-hint">{t('keysScopeHint')}</p> : null}
         {wantsScope && autoScope ? <p className="bre-keys-hint">{t('keysScopeAutoHint')}</p> : null}
-        {observedChips.length > 0 && observedChips.length < chipModels.length ? (
-          <p className="bre-keys-hint">{t('keysScopeObservedHint', { count: observedChips.length, total: chipModels.length })}</p>
-        ) : null}
         {illegal ? (
           <p className="bre-effort-message bre-error" role="alert">
             {t('keysAddIllegal')}
           </p>
         ) : null}
         <div className="bre-keys-form-actions">
-          {wantsScope && observedChips.length > 0 ? (
-            <button
-              type="button"
-              className="bre-link-button bre-keys-allmodels"
-              disabled={busy}
-              onClick={() => setScopeDraft(observedChips)}
-            >
-              {t('keysScopeObserved', { count: observedChips.length })}
-            </button>
-          ) : null}
           {wantsScope ? (
             <button
               type="button"
@@ -768,7 +772,27 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
   if (rows === undefined) {
     if (notice === undefined) return (
       <div className="bre-keys" aria-busy="true">
-        {showLoading ? <p role="status">{t('keysLoading')}</p> : null}
+        {/* A cold read paints the list's own shape: one key row and the add row
+            stand in as grey bars, exactly the heights the real rows settle at,
+            so the panel never opens as a bare sentence floating in the space
+            reserved for it — and the answer swaps in without a pixel of move.
+            The sentence stays, word for word, but only for assistive tech; the
+            skeleton is the sighted user's loading state. */}
+        {showLoading ? (
+          <>
+            <ul className="bre-keys-list bre-keys-skeleton" aria-hidden="true">
+              <li className="bre-keys-skeleton-row">
+                <span className="bre-keys-skeleton-dot" />
+                <span className="bre-keys-skeleton-bar is-name" />
+                <span className="bre-keys-skeleton-bar is-mask" />
+              </li>
+              <li className="bre-keys-skeleton-row is-add">
+                <span className="bre-keys-skeleton-bar" />
+              </li>
+            </ul>
+            <p className="bre-keys-sr" role="status">{t('keysLoading')}</p>
+          </>
+        ) : null}
       </div>
     )
     return (

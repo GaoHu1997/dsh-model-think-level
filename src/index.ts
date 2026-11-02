@@ -354,13 +354,6 @@ interface KeyEntryView {
   masked?: string
   /** Manual assignment, restricted to the models this route has added. */
   models?: readonly string[]
-  /**
-   * What this key's own listing last advertised (observed, not assigned). The
-   * panel offers it as a one-click scope: an unscoped key that lists only part of
-   * the catalogue silently refuses the rest, and this is the list that makes the
-   * split visible. Absent means the key was never listed successfully.
-   */
-  observed?: readonly string[]
   /** The protocol this key pins, when it pins one (else the route's own). */
   protocol?: RouteProtocol
   /**
@@ -1342,22 +1335,33 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Keep its key metadata, endpoints and balance URL until an explicit key
   // operation removes them; never infer permission to unset a secret here.
 
-  // ---- Scope probe: what each key serves, asked on demand ----
+  // ---- Scope probe: what each key serves, kept true automatically ----
   //
   // A relay resolves each key to a different upstream account with its own
   // catalogue, so the models a route declares are not the models every key
   // serves — requests discover the difference the hard way, one refusal per
-  // model per key, until someone narrows each key's scope by hand. The probe
-  // asks instead: on the key panel's 自动探测 button, every listed key of a
-  // MULTI-KEY route is asked for its own listing on the wires it could serve
-  // on, the answers are recorded as observations (key-serves.ts), and each
-  // key's model scope is checked to the models it actually listed within the
-  // set the route declares.
+  // model per key, unless each key's scope is kept to what it actually serves.
+  // The probe does that: every switched-on key of a MULTI-KEY route is asked
+  // for its own listing on the wires it could serve on, the answers are
+  // recorded as observations (key-serves.ts), and each key's model scope is
+  // then checked to the models it listed WITHIN the set the route declares:
   //
-  // The check only claims scopes nobody has claimed: a manual assignment (an
-  // entry without the `auto` mark) is never rewritten. Nothing here runs on a
-  // timer or a save — the button is the only trigger, so a listing sweep only
-  // ever happens when the user asked for one.
+  //   - it lists all of them  → the catch-all it already reads as IS the
+  //     assignment, so no scope is written and the key keeps serving models
+  //     added later;
+  //   - it lists some of them → that intersection is written as the key's
+  //     scope (marked `auto`, so the panel can say whose assignment it is);
+  //   - it lists none of them → the key cannot serve this provider at all, so
+  //     the key's own row is switched off. The provider is left alone: one
+  //     unusable upstream account must not take the whole route down. A key
+  //     the user switched off by hand is never probed, and a key the probe
+  //     switched off stays off until the user switches it back on — the probe
+  //     has no separate "was this me?" bit to re-enable from.
+  //
+  // Every sweep rewrites whatever it finds, manual assignments included: with
+  // two triggers (the key panel's 自动探测 button, and a save that moves a
+  // provider's address, protocol, key reference or model list) nobody has to
+  // keep the split up to date by hand.
 
   /** In-flight probe runs, by route; the list payload reports this as `probing`. */
   const keyProbeRuns = new Map<string, Promise<void>>()
@@ -1365,12 +1369,13 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.effect(() => () => { probeStopped = true })
 
   /**
-   * Probe one route now: resolve every listed key (and the profile's own seat,
-   * when the index has never listed it), ask each on the wires a request could
-   * take, record the observations, and check the auto-maintained scopes to what
-   * each key listed within the route's declared set. A route with fewer than
-   * two keys has nothing to divide — one key serves whatever it serves — so
-   * the sweep is refused before the wire is touched.
+   * Probe one route now: resolve every switched-on key (and the profile's own
+   * seat, when the index has never listed it), ask each on the wires a request
+   * could take, record the observations, and write what each key serves within
+   * the route's declared set — a scope when it carries part of the catalogue, a
+   * switched-off row when it carries none of it, nothing when it carries all of
+   * it. A route with fewer than two switched-on keys has nothing to divide —
+   * one key serves whatever it serves — so the sweep stops before the wire.
    */
   const probeRouteKeys = async (route: string): Promise<void> => {
     if (probeStopped) return
@@ -1385,6 +1390,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     const api = normalizeKeyProtocol(profile['api'])
     const baseURL = typeof profile['baseURL'] === 'string' ? profile['baseURL'].trim() : ''
     if (api === undefined || !LISTABLE_PROTOCOLS.has(api) || baseURL.length === 0) return
+    // The route's own model list is the universe a scope is written in, so a
+    // route without one has nothing to check any key against — and no reason to
+    // spend a listing request finding that out.
+    const declaredIds = Array.isArray(profile['models'])
+      ? profile['models'].filter(isRecord).map(model => typeof model['id'] === 'string' ? model['id'].trim() : '').filter(Boolean)
+      : []
+    if (declaredIds.length === 0) return
     let document: ReturnType<typeof readKeyIndex>
     try {
       document = readKeyIndex(indexFile)
@@ -1393,9 +1405,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       return
     }
     const endpoints = routeEndpointsOf(document, route)
+    // A switched-off key is out of the pool already: the probe neither asks it
+    // nor keeps asking a row it switched off itself.
     const listed = keyEntriesOf(document, route)
+    const active = listed.filter(entry => entry.disabled !== true)
     const seat = enabledRefOf(profile)
-    const keys: { ref: string; entry: KeyIndexEntry | undefined }[] = listed.map(entry => ({ ref: entry.ref, entry }))
+    const keys: { ref: string; entry: KeyIndexEntry | undefined }[] = active.map(entry => ({ ref: entry.ref, entry }))
     if (seat !== undefined && !listed.some(entry => entry.ref === seat)) keys.push({ ref: seat, entry: undefined })
     // One key serves whatever it serves: the scope check exists to divide a
     // route's models across keys, and a single-key route has no division.
@@ -1471,6 +1486,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       // or while this commit waited for another writer. Read only now.
       let next = readKeyIndex(indexFile)
       let mutated = false
+      const emptied: string[] = []
       for (const [ref, ids] of served) {
         // Publish observations only while this live commit owns the lease.
         lastKnownScopes.set(`${route}\u0000${ref}`, ids)
@@ -1478,9 +1494,17 @@ export function apply(ctx: Context, config: Config = {}): void {
         const entry = keyEntriesOf(next, route).find(candidate => candidate.ref === ref)
         // An unlisted seat keeps its catch-all and recorded observations.
         if (entry === undefined) continue
-        // A manual assignment is a claim the probe never rewrites.
-        if (entry.models !== undefined && entry.auto !== true) continue
         const target = declared.filter(id => ids.includes(id))
+        if (target.length === 0) {
+          // Nothing this key lists belongs to this provider: it cannot serve a
+          // single model here, so its own row is switched off (never the
+          // provider — one unusable upstream account must not take the route
+          // down). Applied below, where the route's last key is protected.
+          if (entry.disabled !== true) emptied.push(ref)
+          continue
+        }
+        // Every declared model: the catch-all the entry already reads as IS the
+        // assignment, so adding models later keeps working without another pass.
         const scope = target.length === declared.length ? undefined : target
         const unchanged = scope === undefined
           ? entry.models === undefined
@@ -1488,6 +1512,20 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (unchanged) continue
         next = withKeyAutoScope(next, route, ref, scope)
         mutated = true
+      }
+      if (emptied.length > 0) {
+        // A route must keep a key: switching off the last one would leave the
+        // model list pointing at a provider nothing can sign for, which is a
+        // bigger claim than "these keys serve none of these models" — most
+        // often it means the ids simply do not line up, so the rows stay as
+        // they are and the user keeps a pool to fix.
+        const after = keyEntriesOf(next, route)
+        const activeLeft = after.filter(entry => entry.disabled !== true && !emptied.includes(entry.ref)).length
+        const seatLeft = seat !== undefined && !after.some(entry => entry.ref === seat) ? 1 : 0
+        if (activeLeft + seatLeft > 0) {
+          for (const ref of emptied) next = withKeyDisabled(next, route, ref, true)
+          mutated = true
+        }
       }
       if (!mutated) return
       try {
@@ -1517,6 +1555,77 @@ export function apply(ctx: Context, config: Config = {}): void {
     keyProbeRuns.set(route, run)
     return run
   }
+
+  // ---- The second trigger: a save that moves a route ----
+  //
+  // The button is the deliberate trigger; a save is the automatic one. Only the
+  // parts of a profile that decide what the sweep would ask (the wire, the key
+  // reference, the declared models) count as a move — renaming a provider,
+  // changing a display name or a balance URL leaves every scope true and must
+  // not put a listing request on the wire. Saves also cluster (the official
+  // card writes the whole profile, the autofill pass writes again), so one
+  // timer collects them: a sweep per save would ask the same questions three
+  // times in a row.
+  const PROBE_SAVE_DELAY_MS = 1_000
+  const probeSignatures = new Map<string, string>()
+  const probeSavePending = new Set<string>()
+  let probeSaveTimer: ReturnType<typeof setTimeout> | undefined
+  /** What a sweep would ask about: a change here means the scopes may be stale. */
+  const probeSignatureOf = (profile: Record<string, unknown>): string => JSON.stringify([
+    profile['api'],
+    profile['baseURL'],
+    profile['apiKeyEnv'],
+    profile['headers'],
+    Array.isArray(profile['models'])
+      ? profile['models']
+        .filter(isRecord)
+        .map(model => typeof model['id'] === 'string' ? model['id'].trim() : '')
+        .filter(Boolean)
+        .sort()
+      : [],
+  ])
+  const armProbeTimer = (): void => {
+    if (probeStopped || probeSavePending.size === 0 || probeSaveTimer !== undefined) return
+    probeSaveTimer = setTimeout(() => {
+      probeSaveTimer = undefined
+      const routes = Array.from(probeSavePending)
+      probeSavePending.clear()
+      for (const route of routes) void runKeyProbe(route)
+    }, PROBE_SAVE_DELAY_MS)
+  }
+  /**
+   * Saves arrive through the settings listener; key edits (a new credential, a
+   * switched-off row, a protocol pin) arrive through the POST below and name
+   * their route outright. Both end in the same debounce.
+   */
+  const scheduleKeyProbes = (changed?: string): void => {
+    if (probeStopped) return
+    const providers = providersOf()
+    for (const route of Array.from(probeSignatures.keys())) {
+      if (!Object.hasOwn(providers, route)) probeSignatures.delete(route)
+    }
+    for (const [route, profile] of Object.entries(providers)) {
+      if (!isRecord(profile)) continue
+      const signature = probeSignatureOf(profile)
+      if (probeSignatures.get(route) === signature) continue
+      probeSignatures.set(route, signature)
+      probeSavePending.add(route)
+    }
+    // A key edit changes the index, not the profile: the signature cannot see
+    // it, so the caller names the route that must be asked again anyway.
+    if (changed !== undefined && Object.hasOwn(providers, changed)) probeSavePending.add(changed)
+    armProbeTimer()
+  }
+  // Boot seeds the signatures without sweeping: what is declared at boot was
+  // declared before this process started, so nothing about it is news.
+  for (const [route, profile] of Object.entries(providersOf())) {
+    if (isRecord(profile)) probeSignatures.set(route, probeSignatureOf(profile))
+  }
+  ctx.effect(() => () => {
+    if (probeSaveTimer !== undefined) clearTimeout(probeSaveTimer)
+    probeSaveTimer = undefined
+    probeSavePending.clear()
+  })
   const headerRetryTimers = new Set<ReturnType<typeof setTimeout>>()
   let headerRetryAttempt = 0
   const stopHeaderRetries = (): void => {
@@ -1575,6 +1684,10 @@ export function apply(ctx: Context, config: Config = {}): void {
         catalogueSourceStamp = source
         invalidateListings()
       }
+      // A save that moved a provider's wire, key reference or model list makes
+      // the scopes it left behind a guess: sweep the affected routes once the
+      // cluster of saves settles.
+      scheduleKeyProbes()
     }
   })
   /**
@@ -2436,16 +2549,10 @@ export function apply(ctx: Context, config: Config = {}): void {
                   if (fact?.masked !== undefined) view.masked = fact.masked
                   if (stored?.alias !== undefined) view.alias = stored.alias
                   if (stored?.models !== undefined) view.models = stored.models.filter(id => declaredModels.has(id))
-                  // What the key's own listing said, when it ever answered one:
-                  // the observed half of the routing decision, shown so the user
-                  // can adopt it as a scope with one click. Filtered to the models
-                  // this route added (the scope universe) and omitted when that
-                  // leaves nothing, so an empty list can never read as "serves
-                  // nothing".
-                  const observed = servesOfRoute(servesDocument(), route).get(ref)?.filter(id => declaredModels.has(id))
-                  if (observed !== undefined && observed.length > 0) {
-                    ;(view as { observed?: readonly string[] }).observed = observed
-                  }
+                  // Whose assignment the scope is: the probe writes every scope
+                  // it lands itself and says so, so the panel can report that
+                  // the ticks follow what each key lists rather than a choice.
+                  if (stored?.auto === true) (view as { auto?: boolean }).auto = true
                   if (stored?.protocol !== undefined) (view as { protocol?: RouteProtocol }).protocol = stored.protocol
                   // The cooldown memory rides the view even though no row paints
                   // a badge from it any more: the routing pool is the state's
@@ -2878,17 +2985,19 @@ export function apply(ctx: Context, config: Config = {}): void {
                   throw new Error([error instanceof Error ? error.message : String(error), ...failures].join('; '))
                 }
               } else if (op === 'probe') {
-                // The key panel's 自动探测 button: ask every listed key of a
-                // multi-key route what its own listing advertises, and check
-                // the probe-maintained scopes to the models each key actually
-                // serves within the route's declared set. A single-key route
-                // has nothing to divide — one key serves whatever it serves —
-                // so the refusal says so instead of running a sweep that can
-                // only confirm what the row already reads.
+                // The key panel's 自动探测 button: ask every switched-on key of
+                // a multi-key route what its own listing advertises, and write
+                // what each key actually serves within the route's declared set
+                // — a scope when it carries part of it, a switched-off row when
+                // it carries none of it, nothing when it carries all of it. A
+                // route with a single switched-on key has nothing to divide —
+                // one key serves whatever it serves — so the refusal says so
+                // instead of running a sweep that can only confirm what the row
+                // already reads.
                 const listed = keyEntriesOf(readKeyIndex(indexFile), route)
                 const seat = enabledNow()
-                const distinct = new Set(listed.map(entry => entry.ref))
-                if (seat !== undefined) distinct.add(seat)
+                const distinct = new Set(listed.filter(entry => entry.disabled !== true).map(entry => entry.ref))
+                if (seat !== undefined && !listed.some(entry => entry.ref === seat)) distinct.add(seat)
                 if (distinct.size < 2) {
                   refuse('a scope probe needs a second key; a single key serves whatever it serves')
                   return
@@ -2908,6 +3017,10 @@ export function apply(ctx: Context, config: Config = {}): void {
               refreshKeyScopes()
               if (['add', 'remove', 'value', 'protocol', 'endpoints', 'enable'].includes(op)) {
                 invalidateListings(route)
+                // A key edit is exactly the news a sweep exists to digest: a
+                // new credential is a new upstream account, a fresh row has no
+                // scope yet, and a row switched back on has to be asked again.
+                scheduleKeyProbes(route)
               }
               // The transaction is committed. Slow display-only credential reads
               // must not hold the next unrelated mutation in the global queue.

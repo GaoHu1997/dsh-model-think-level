@@ -370,6 +370,23 @@ describe('the key list contract with the stylesheet', () => {
     expect(STYLES).toContain('border: 0.5px solid var(--dsw-alias-border-l2, #d5d7dd);')
   })
 
+  it('loads a cold list as its own shape, at the height the real rows settle at', () => {
+    // A cold read paints one key row plus the add row as bars instead of a
+    // caption; the heights are the live list's own (measured 40px / 35px), so
+    // the answer cannot move the card by a pixel.
+    expect(STYLES).toContain('.bre-keys-skeleton-row {')
+    expect(STYLES).toContain('height: 40px;')
+    expect(STYLES).toContain('.bre-keys-skeleton-row.is-add { height: 35px; }')
+    expect(STYLES).toContain('.bre-keys-skeleton-bar {')
+    // The shimmer travels through a token the config skeleton already used but
+    // that had never been declared; it is a real step between sunken and track.
+    expect(STYLES).toContain('--bre-sunken-1: #ebedf0;')
+    expect(STYLES).toContain('--bre-sunken-1: #4a4b4e;')
+    // The sentence survives for assistive tech only, out of flow.
+    expect(STYLES).toContain('.bre-keys-sr {')
+    expect(STYLES).toContain('clip-path: inset(50%);')
+  })
+
   it('opens every row with a circular enable check instead of a default badge', () => {
     expect(STYLES).toContain('.bre-keys-toggle {')
     // The state is colour on a bare dot: the lit mark takes the brand, and no
