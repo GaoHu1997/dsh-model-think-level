@@ -212,10 +212,12 @@ export function commitUiOrderGuarded(patch: unknown, at: number, file: string = 
   const current = readUiOrder(file)
   const incoming = savedAtOf(patch)
   const merged = mergeUiOrder(current, patch, at)
-  if (incoming !== undefined && incoming <= current.savedAt && !sameUiOrderContent(merged, current)) {
-    // Nothing written: the losing payload must not become the new base either.
-    return { document: current, stale: true }
+  if (incoming !== undefined && incoming <= current.savedAt) {
+    // An old identical POST is an idempotent success, not permission to lower
+    // savedAt: otherwise a later-arriving intermediate edit could win next.
+    return { document: current, stale: !sameUiOrderContent(merged, current) }
   }
-  writeUiOrder(merged, file)
-  return { document: merged, stale: false }
+  const document = { ...merged, savedAt: Math.max(current.savedAt, merged.savedAt) }
+  writeUiOrder(document, file)
+  return { document, stale: false }
 }

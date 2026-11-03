@@ -134,6 +134,7 @@ function contentKey(): string {
 
 let lastSynced: string | undefined
 let pushTimer: ReturnType<typeof setTimeout> | undefined
+const pushes = new Set<Promise<boolean>>()
 /** The periodic pull and the focus listener, while a sync is running. */
 let pollTimer: ReturnType<typeof setInterval> | undefined
 let stopListening: (() => void) | undefined
@@ -141,7 +142,7 @@ let disposed = false
 /** True while the stores are being written FROM the file: a change we made, not one to push. */
 let adopting = false
 /** True while a reconcile's GET is in flight: a poll and a focus event must not ask twice. */
-let reconciling = false
+let reconciliation: Promise<void> | undefined
 /**
  * Bumped on every start and on dispose. A push's answer (or a reconcile's)
  * belongs to the generation that asked; a page that was torn down and rebuilt
@@ -171,34 +172,44 @@ function pushNow(): void {
   })
   lastSynced = contentKey()
   const mine = generation
-  void fetch(ORDER_PATH, {
+  const operation = fetch(ORDER_PATH, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body,
   }).then(async response => {
-    if (disposed || mine !== generation) return
+    if (disposed || mine !== generation) return true
     const answer = await response.json().catch(() => undefined) as Record<string, unknown> | undefined
+    if (disposed || mine !== generation) return true
     const document = sanitizeDocument(answer?.['data'])
     // 409: the host holds a document at least as new as this push, and it differs.
     // This page never saw it (another machine wrote it) — adopt what won instead
     // of pushing the old order and switches back over it.
     if (response.status === 409) {
-      if (document !== undefined && hasContent(document)) adopt(document)
-      else lastSynced = undefined
-      return
+      // An answer to the previous drag must not erase a later local edit.
+      if (readStamp() !== stamp) return true
+      if (document !== undefined && hasContent(document)) {
+        adopt(document)
+        return true
+      }
+      lastSynced = undefined
+      return false
     }
     // A refused push clears the identity so the next change retries; the boot
     // arbitrate also repairs it, because the stamp says local is newer.
     if (!response.ok) {
       lastSynced = undefined
-      return
+      return false
     }
     // The host answers with the document as stored. Fold in a newer stamp it
     // may carry (never ours, which it just accepted) so the next boot agrees.
     if (document !== undefined && document.savedAt > readStamp()) writeStamp(document.savedAt)
+    return true
   }).catch(() => {
-    lastSynced = undefined
+    if (!disposed && mine === generation) lastSynced = undefined
+    return false
   })
+  pushes.add(operation)
+  void operation.then(() => { pushes.delete(operation) })
 }
 
 function schedulePush(delayMs: number): void {
@@ -218,6 +229,21 @@ export function flushOrderSync(): void {
   if (pushTimer !== undefined) {
     clearTimeout(pushTimer)
     pushNow()
+  }
+}
+
+/** A snapshot must wait for the POST, not just start a pagehide-style flush. */
+export async function settleOrderSync(): Promise<void> {
+  if (disposed) return
+  const mine = generation
+  await reconcileOrderSync()
+  if (disposed || mine !== generation) return
+  if (contentKey() !== lastSynced && pushTimer === undefined && pushes.size === 0) schedulePush(0)
+  while (!disposed && mine === generation && (pushTimer !== undefined || pushes.size > 0)) {
+    flushOrderSync()
+    const results = await Promise.all([...pushes])
+    if (disposed || mine !== generation) return
+    if (results.includes(false)) throw new Error('模型顺序和启停尚未保存，请重试同步')
   }
 }
 
@@ -250,9 +276,17 @@ function adopt(document: OrderDocumentView): void {
  * the decision has been acted on (adoption is synchronous; a push is
  * fire-and-forget).
  */
-export async function reconcileOrderSync(): Promise<void> {
-  if (disposed || reconciling) return
-  reconciling = true
+export function reconcileOrderSync(): Promise<void> {
+  if (disposed) return Promise.resolve()
+  if (reconciliation !== undefined) return reconciliation
+  const operation = reconcile().finally(() => {
+    if (reconciliation === operation) reconciliation = undefined
+  })
+  reconciliation = operation
+  return operation
+}
+
+async function reconcile(): Promise<void> {
   const mine = generation
   let document: OrderDocumentView | undefined
   try {
@@ -264,8 +298,6 @@ export async function reconcileOrderSync(): Promise<void> {
   } catch {
     // No host on this origin (or offline): the local stores stand alone.
     return
-  } finally {
-    reconciling = false
   }
   if (disposed || mine !== generation) return
   // A local change is already queued and stamped newer than anything the file
@@ -278,14 +310,13 @@ export async function reconcileOrderSync(): Promise<void> {
     providersDisabled: document?.providersDisabled ?? [],
   })
   if (document !== undefined && hasContent(document)) {
-    if (document.savedAt > stamp) {
+    if (document.savedAt >= stamp) {
+      // The host already arbitrated this document (including WebDAV's stable
+      // tie-break). A read is not a new user edit: do not mint a newer stamp
+      // just to resurrect the browser's losing order and switches.
       adopt(document)
       return
     }
-    // The same instant with different content cannot be arbitrated by the
-    // stamp: move ours one millisecond ahead so the push below is strictly
-    // newer, instead of bouncing off the host's stale guard forever.
-    if (document.savedAt === stamp && contentKey() !== fileContent) writeStamp(nextStamp())
   }
   // The file is older (or empty, or absent): overwrite it with what we hold —
   // the seed after an upgrade, the repair of a push the last session missed.
@@ -310,17 +341,38 @@ function poll(): void {
 export function startOrderSync(): () => void {
   disposed = false
   generation += 1
+  reconciliation = undefined
+  pushes.clear()
+  lastSynced = undefined
   const unsubscribeOrders = subscribeProviderOrder(onChange)
   const unsubscribeModels = subscribeModelOrders(onChange)
   const unsubscribeDisabled = subscribeDisabledProviders(onChange)
   pollTimer = setInterval(poll, ORDER_POLL_MS)
-  if (typeof window !== 'undefined') window.addEventListener('focus', poll)
-  if (typeof document !== 'undefined') {
-    const onVisibility = (): void => { if (document.visibilityState === 'visible') poll() }
-    document.addEventListener('visibilitychange', onVisibility)
-    stopListening = () => {
-      document.removeEventListener('visibilitychange', onVisibility)
-      if (typeof window !== 'undefined') window.removeEventListener('focus', poll)
+  const beforeSnapshot = (event: Event): void => {
+    const detail = (event as CustomEvent<{ waitUntil?: (operation: Promise<void>) => void }>).detail
+    if (typeof detail?.waitUntil === 'function') detail.waitUntil(settleOrderSync())
+  }
+  const applied = (): void => {
+    const mine = generation
+    void (async () => {
+      // A pre-apply GET may still be in flight. Wait, then read the new file.
+      if (reconciliation !== undefined) await reconciliation
+      if (!disposed && mine === generation) await reconcileOrderSync()
+    })()
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('focus', poll)
+    window.addEventListener('dsh-webdav-sync:before-snapshot', beforeSnapshot)
+    window.addEventListener('dsh-webdav-sync:applied', applied)
+  }
+  const onVisibility = (): void => { if (document.visibilityState === 'visible') poll() }
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
+  stopListening = () => {
+    if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('focus', poll)
+      window.removeEventListener('dsh-webdav-sync:before-snapshot', beforeSnapshot)
+      window.removeEventListener('dsh-webdav-sync:applied', applied)
     }
   }
   void reconcileOrderSync()

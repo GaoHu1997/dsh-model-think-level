@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { commitUiOrder, emptyUiOrder, mergeUiOrder, parseUiOrder, readUiOrder, uiOrderFilePath, writeUiOrder } from '../src/order-store.js'
+import { commitUiOrder, commitUiOrderGuarded, emptyUiOrder, mergeUiOrder, parseUiOrder, readUiOrder, uiOrderFilePath, writeUiOrder } from '../src/order-store.js'
 
 let home = ''
 
@@ -112,6 +112,34 @@ describe('readUiOrder / writeUiOrder', () => {
     const corrupt = join(home, 'corrupt.json')
     writeFileSync(corrupt, '{not json', 'utf8')
     expect(readUiOrder(corrupt)).toEqual(emptyUiOrder())
+  })
+})
+
+describe('commitUiOrderGuarded', () => {
+  it('keeps the latest order and switches when identical older and intermediate POSTs arrive out of order', () => {
+    const file = uiOrderFilePath(home)
+    const payload = (savedAt: number, other = false) => ({ savedAt,
+      providerOrder: other ? ['b', 'a'] : ['a', 'b'],
+      modelOrder: { a: other ? ['two', 'one'] : ['one', 'two'] },
+      providersDisabled: other ? ['a'] : ['b'],
+    })
+    const latest = commitUiOrderGuarded(payload(1002), 1002, file)
+    const identicalOld = commitUiOrderGuarded(payload(1000), 1003, file)
+    expect(identicalOld.stale).toBe(false)
+    expect(identicalOld.document).toEqual(latest.document)
+    expect(readUiOrder(file).savedAt).toBe(1002)
+    const intermediate = commitUiOrderGuarded(payload(1001, true), 1004, file)
+    expect(intermediate.stale).toBe(true)
+    expect(intermediate.document).toEqual(latest.document)
+    expect(readUiOrder(file)).toEqual(latest.document)
+  })
+
+  it('does not lower the stored stamp for a legacy unstamped writer', () => {
+    const file = uiOrderFilePath(home)
+    commitUiOrderGuarded({ savedAt: 100, providerOrder: ['a'] }, 100, file)
+    const result = commitUiOrderGuarded({ providerOrder: ['b'] }, 50, file)
+    expect(result.document.savedAt).toBe(100)
+    expect(readUiOrder(file).savedAt).toBe(100)
   })
 })
 

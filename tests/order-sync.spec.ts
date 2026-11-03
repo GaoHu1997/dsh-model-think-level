@@ -54,6 +54,26 @@ afterEach(() => {
 })
 
 describe('boot arbitrate', () => {
+  it('keeps the file winner when a synchronized document has the same stamp', async () => {
+    window.localStorage.setItem(PROVIDER_ORDER_KEY, '["a","b"]')
+    window.localStorage.setItem(MODEL_ORDER_KEY, '{"b":["one","two"]}')
+    window.localStorage.setItem(PROVIDER_DISABLED_KEY, '["b"]')
+    window.localStorage.setItem(ORDER_SAVED_AT_KEY, '200')
+    const calls = stubFetch({ ok: true, data: {
+      savedAt: 200, providerOrder: ['b', 'a'], modelOrder: { b: ['two', 'one'] }, providersDisabled: ['a'],
+    } })
+    const { reconcileOrderSync } = await import('../src/client/order-sync.js')
+    const { providerOrder } = await import('../src/client/provider-order.js')
+    const { modelOrders } = await import('../src/client/model-order.js')
+    const { disabledProviders } = await import('../src/client/provider-enabled.js')
+    await reconcileOrderSync()
+    expect(providerOrder()).toEqual(['b', 'a'])
+    expect(modelOrders()).toEqual({ b: ['two', 'one'] })
+    expect(disabledProviders()).toEqual(['a'])
+    expect(window.localStorage.getItem(ORDER_SAVED_AT_KEY)).toBe('200')
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(posts(calls)).toEqual([])
+  })
   it('adopts a newer file into the stores and localStorage, and pushes nothing', async () => {
     window.localStorage.setItem(PROVIDER_ORDER_KEY, '["a"]')
     window.localStorage.setItem(MODEL_ORDER_KEY, '{"openai":["m1"]}')
