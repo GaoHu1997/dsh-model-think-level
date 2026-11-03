@@ -454,6 +454,27 @@ describe('reconcileEditorTabs', () => {
     expect(tabOf(root, 'models')?.getAttribute('aria-selected')).toBe('false')
   })
 
+  it('does not measure layout or schedule a restore when reselecting the active tab', () => {
+    const root = buildCard()
+    reconcileEditorTabs(root, depsFor('en'), createEditorTabsState())
+    const card = cardOf(root)
+    const rect = vi.spyOn(card, 'getBoundingClientRect')
+    const frame = vi.fn(() => 0)
+    vi.stubGlobal('requestAnimationFrame', frame)
+    // A foreign-root refresh can leave the bar behind its card attribute. Even
+    // a no-op selection should repair aria state without buying a layout read.
+    tabOf(root, 'provider')?.setAttribute('aria-selected', 'false')
+    try {
+      for (let index = 0; index < 100; index++) selectEditorTab(card, 'provider')
+      expect(card.getAttribute('data-bre-tab')).toBe('provider')
+      expect(tabOf(root, 'provider')?.getAttribute('aria-selected')).toBe('true')
+      expect(rect).not.toHaveBeenCalled()
+      expect(frame).not.toHaveBeenCalled()
+    } finally {
+      rect.mockRestore()
+    }
+  })
+
   it('is idempotent across scans', () => {
     const root = buildCard()
     const state = createEditorTabsState()

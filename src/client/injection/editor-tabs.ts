@@ -264,6 +264,12 @@ export function activeScopeOf(card: HTMLElement): HTMLElement {
  * on the occasion the swap really did move it.
  */
 export function selectEditorTab(card: HTMLElement, id: EditorTabId): void {
+  // A repeat click changes no pane. Keep the foreign bar's aria state in step,
+  // but do not force pending layout or queue another scroll correction.
+  if (card.getAttribute(TAB_ATTR) === id) {
+    syncSelected(card)
+    return
+  }
   const host = scrollHostOf(card)
   // The card's viewport Y before the pane swap — the number the restore below
   // re-earns. The scroll host's offset is captured with it because the swap

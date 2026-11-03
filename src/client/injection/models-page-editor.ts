@@ -1170,9 +1170,11 @@ function disclosureOf(trigger: Element): HTMLElement | undefined {
     const card = cardOf(trigger)
     if (card === undefined) return undefined
     const candidates = Array.from(card.querySelectorAll<HTMLElement>('[class*="modelAdvanced"]'))
+    if (candidates.length === 1) return candidates[0]
     return candidates.find(candidate => candidate.offsetParent !== null) ?? candidates[0]
   }
   const candidates = Array.from(row.querySelectorAll<HTMLElement>('[class*="modelAdvanced"]'))
+  if (candidates.length === 1) return candidates[0]
   return candidates.find(candidate => candidate.offsetParent !== null) ?? candidates[0]
 }
 
@@ -3499,6 +3501,39 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     if (state.disposed || !root.isConnected) return
     const namespace = join.namespace
     const providers = providersOf(namespace)
+    // Cache only this live DOM continuation: later scans may have a new
+    // snapshot or freshly typed card fields, and event handlers must read live.
+    const routesByCard = new Map<HTMLElement, ReturnType<typeof routeOfCard>>()
+    const resolveCard = (card: HTMLElement): ReturnType<typeof routeOfCard> => {
+      if (!routesByCard.has(card)) routesByCard.set(card, routeOfCard(card, providers, labels))
+      return routesByCard.get(card)
+    }
+    type ModelCatalogue = {
+      models: Record<string, unknown>[]
+      savedModelIds: Set<unknown>
+      unsetModelIds: Set<unknown>
+      singletonById: Map<unknown, Record<string, unknown>[]>
+    }
+    const cataloguesByRoute = new Map<string, ModelCatalogue>()
+    const catalogueOfRoute = (route: string): ModelCatalogue => {
+      const cached = cataloguesByRoute.get(route)
+      if (cached !== undefined) return cached
+      const models = modelsOf(providers, route)
+      const savedModelIds = new Set<unknown>()
+      const unsetModelIds = new Set<unknown>()
+      const singletonById = new Map<unknown, Record<string, unknown>[]>()
+      for (const model of models) {
+        const id = model['id']
+        savedModelIds.add(id)
+        // The accessors use find (first duplicate wins), while the opt-out
+        // marker uses some (any matching duplicate may opt out).
+        if (!singletonById.has(id)) singletonById.set(id, [model])
+        if (model[UNSET_MARKER] === true) unsetModelIds.add(id)
+      }
+      const catalogue = { models, savedModelIds, unsetModelIds, singletonById }
+      cataloguesByRoute.set(route, catalogue)
+      return catalogue
+    }
 
     // Staged declarations land on the IDLE pass, never from an open card:
     // writing while the official editor holds the document is exactly what
@@ -3531,9 +3566,11 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       onRequest: route => adaptEveryModel(state, deps, route, screenModelsLive(root, route, providers, labels)),
     })
 
-    // Unmount editors whose rows are gone (the page re-rendered).
+    // Unmount editors whose rows are gone (the page re-rendered). Index once
+    // rather than searching every found row again for each mounted container.
+    const liveContainers = new Set(found.map(target => target.container))
     for (const [key, entry] of state.mounted) {
-      if (!found.some(candidate => candidate.container === key)) {
+      if (!liveContainers.has(key)) {
         showOfficialReasoning(key)
         showOfficialCapacityChrome(key)
         entry.editor.unmount()
@@ -3549,7 +3586,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     if (state.pending.size > 0) {
       const onPage = new Map<string, Set<string>>()
       for (const target of found) {
-        const resolved = routeOfCard(target.card, providers, labels)
+        const resolved = resolveCard(target.card)
         if (resolved === undefined) continue
         let ids = onPage.get(resolved.route)
         if (ids === undefined) onPage.set(resolved.route, ids = new Set())
@@ -3589,7 +3626,7 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
     // them once the card releases its frozen settings revision.
     const cards = new Set(found.map(target => target.card))
     for (const card of cards) {
-      const resolved = routeOfCard(card, providers, labels)
+      const resolved = resolveCard(card)
       if (resolved === undefined) continue
       const route = resolved.route
       const actions = actionsOf(card, labels)
@@ -3622,16 +3659,16 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       // already served the provider-wide side of the scan above.
       const container = target.container
       if (container === undefined) return
-      const resolved = routeOfCard(target.card, providers, labels)
+      const resolved = resolveCard(target.card)
       if (resolved === undefined) return
       const { route, staged: routeStaged } = resolved
       const profile = providers[route] ?? {}
-      const models = modelsOf(providers, route)
+      const { savedModelIds, unsetModelIds, singletonById } = catalogueOfRoute(route)
+      const model = singletonById.get(target.modelId) ?? []
       // Staged covers TWO unsaved shapes: the create card's draft route, and
       // a typed-but-unsaved model row on a SAVED route. Writing the latter
       // would bounce model-not-found (the row is not in the document yet);
       // staging rides the same flush-on-save path as the create card.
-      const savedModelIds = new Set(models.map(model => model['id']))
       const staged = routeStaged || !savedModelIds.has(target.modelId)
       // A staged row's baseline is the pending store (the settings document
       // holds nothing for the model yet); the create card's typed protocol
@@ -3640,26 +3677,26 @@ export function reconcile(root: HTMLElement, deps: InjectorDeps, state: ScanStat
       const stagedEfforts = staged ? state.pending.get(route)?.get(target.modelId)?.efforts : undefined
       const efforts = staged
         ? (stagedEfforts === 'keep' ? undefined : stagedEfforts)
-        : effortsOf(models, target.modelId)
-      const effortsUnset = !staged && models.some(model => model['id'] === target.modelId && model[UNSET_MARKER] === true)
+        : effortsOf(model, target.modelId)
+      const effortsUnset = !staged && unsetModelIds.has(target.modelId)
       const input = staged
         ? state.pending.get(route)?.get(target.modelId)?.input
-        : inputOf(models, target.modelId)
+        : inputOf(model, target.modelId)
       const imageGen = staged
         ? state.pending.get(route)?.get(target.modelId)?.imageGen
-        : imageGenOf(models, target.modelId)
+        : imageGenOf(model, target.modelId)
       const compat = staged
         ? state.pending.get(route)?.get(target.modelId)?.compat
-        : compatOf(models, target.modelId)
+        : compatOf(model, target.modelId)
       const defaultEffort = staged
         ? (state.pending.get(route)?.get(target.modelId)?.defaultEffort ?? undefined)
-        : defaultEffortOf(models, target.modelId)
+        : defaultEffortOf(model, target.modelId)
       // An unsaved row has no stored declaration to name it, but the user may
       // have typed a Display name on the row already -- suggestion inference
       // and knowledge-base matching lose that signal without it. The read is
       // ROW-scoped (the same multi-row trap the model id above avoids).
       const typedName = staged ? inputValueByLabel(target.row, labels.modelName) : ''
-      const modelName = staged ? (typedName.length > 0 ? typedName : undefined) : nameOf(models, target.modelId)
+      const modelName = staged ? (typedName.length > 0 ? typedName : undefined) : nameOf(model, target.modelId)
       const typedApi = routeStaged ? inputValueByLabel(target.card, labels.apiProtocol) : ''
       const typedBaseURL = routeStaged ? inputValueByLabel(target.card, labels.baseUrl) : ''
       const routeApi = routeStaged && typedApi.length > 0
