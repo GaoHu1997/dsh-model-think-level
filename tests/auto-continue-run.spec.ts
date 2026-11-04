@@ -11,7 +11,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { setAutoContinueEnabled } from '../src/client/auto-continue-pref.js'
+import {
+  setAutoContinueEnabled, setAutoContinueConfig, DEFAULT_AUTO_CONTINUE_CONFIG, autoContinueConfig,
+} from '../src/client/auto-continue-pref.js'
 import { createAutoContinue } from '../src/client/injection/auto-continue-run.js'
 import type { DurableEventLike } from '../src/client/auto-continue-rules.js'
 
@@ -121,13 +123,31 @@ async function failTurn(
   binding.setRunning(true)
   binding.setRunning(false)
   await vi.advanceTimersByTimeAsync(500)
-  await vi.advanceTimersByTimeAsync(35_000)
+  // Observe the echo near the actual send, not 33 seconds after a fixed 2s wait.
+  await vi.advanceTimersByTimeAsync(autoContinueConfig().waitSeconds * 1_000)
+}
+
+/** Attach a live session and arm one eligible ending without consuming its send delay. */
+async function scheduledCutoff(reason: Record<string, unknown> = { kind: 'max-tokens' }): Promise<Binding> {
+  const harness = makeHarness()
+  disposer = harness.runner.dispose
+  const binding = makeBinding('s1')
+  harness.bindings.set('s1', binding)
+  harness.setCurrent('s1')
+  binding.append('user/message', 1, { id: 'm1', content: [{ type: 'text', text: '长任务' }] })
+  binding.setRunning(true)
+  await vi.advanceTimersByTimeAsync(1_100)
+  binding.append('turn/end', 2, { turn: 1, reason })
+  binding.setRunning(false)
+  await vi.advanceTimersByTimeAsync(500)
+  return binding
 }
 
 describe('auto-continue watcher', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     setAutoContinueEnabled(true)
+    setAutoContinueConfig(DEFAULT_AUTO_CONTINUE_CONFIG)
   })
 
   it('replies 继续 to a transport-disconnected turn it watched live', async () => {
@@ -151,6 +171,91 @@ describe('auto-continue watcher', () => {
     await vi.advanceTimersByTimeAsync(2_600)
     expect(binding.prompts).toHaveLength(1)
     expect(binding.prompts[0]).toMatchObject({ mode: 'queue', content: [{ type: 'text', text: '继续' }] })
+  })
+
+  it('uses the configured wait on every retry, without doubling it', async () => {
+    setAutoContinueConfig({ waitSeconds: 7 })
+    const binding = await scheduledCutoff()
+    await vi.advanceTimersByTimeAsync(6_999)
+    expect(binding.prompts).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(binding.prompts).toHaveLength(1)
+    binding.append('turn/end', 3, { turn: 2, reason: { kind: 'max-tokens' } })
+    binding.setRunning(true)
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    await vi.advanceTimersByTimeAsync(6_999)
+    expect(binding.prompts).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(binding.prompts).toHaveLength(2)
+  })
+
+  it.each([1, 3, 8])('stops after the configured %i retries, not a fixed five', async (maxRetries) => {
+    setAutoContinueConfig({ maxRetries })
+    const binding = await scheduledCutoff()
+    await vi.advanceTimersByTimeAsync(2_000)
+    for (let seq = 3; seq < maxRetries + 5; seq += 1) {
+      await failTurn(binding, seq, { kind: 'max-tokens' })
+    }
+    expect(binding.prompts).toHaveLength(maxRetries)
+    binding.append('user/message', maxRetries + 6, { id: 'manual', content: [{ type: 'text', text: '再试试' }] })
+    await failTurn(binding, maxRetries + 7, { kind: 'max-tokens' })
+    expect(binding.prompts).toHaveLength(maxRetries + 1)
+  })
+
+  it('applies a wait edit to an armed retry from the original wait start', async () => {
+    setAutoContinueConfig({ waitSeconds: 10 })
+    const binding = await scheduledCutoff()
+    await vi.advanceTimersByTimeAsync(5_000)
+    setAutoContinueConfig({ waitSeconds: 20 })
+    await vi.advanceTimersByTimeAsync(14_999)
+    expect(binding.prompts).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(binding.prompts).toHaveLength(1)
+  })
+
+  it('cancels an armed retry when its newly lowered cap is already reached', async () => {
+    const binding = await scheduledCutoff()
+    await vi.advanceTimersByTimeAsync(2_000)
+    binding.append('turn/end', 3, { turn: 2, reason: { kind: 'max-tokens' } })
+    binding.setRunning(true)
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    setAutoContinueConfig({ maxRetries: 1 })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(1)
+    // Raising the cap does not replay the canceled old ending.
+    setAutoContinueConfig({ maxRetries: 4 })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(1)
+  })
+
+  it.each([
+    [2, 10_000, 10_000],
+    [300, 200_000, 300_000],
+    [2, 200_000, 120_000],
+  ])('respects wait=%i seconds and provider Retry-After=%i ms', async (waitSeconds, providerRetryAfterMs, delay) => {
+    setAutoContinueConfig({ waitSeconds })
+    const binding = await scheduledCutoff({ kind: 'error', error: { code: 'RATE_LIMIT', providerRetryAfterMs } })
+    await vi.advanceTimersByTimeAsync(delay - 1)
+    expect(binding.prompts).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(binding.prompts).toHaveLength(1)
+  })
+
+  it('does not revive an old pending retry by switching off and back on', async () => {
+    const binding = await scheduledCutoff()
+    setAutoContinueEnabled(false)
+    setAutoContinueEnabled(true)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it('cancels a pending retry as soon as the user submits a manual message', async () => {
+    const binding = await scheduledCutoff()
+    binding.append('user/message', 3, { id: 'manual', content: [{ type: 'text', text: '等等，别继续' }] })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(0)
   })
 
   it('answers a max-tokens cut-off too', async () => {

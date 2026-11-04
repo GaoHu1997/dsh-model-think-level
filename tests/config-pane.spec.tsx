@@ -15,6 +15,10 @@ import { clearImageConfigCache } from '../src/client/image-config-client.js'
 import { STYLES } from '../src/client/styles.js'
 import { IMAGE_CONFIG_PATH } from '../src/constants.js'
 import type { RemoteApi } from '../src/client/types.js'
+import {
+  AUTO_CONTINUE_CONFIG_KEY, DEFAULT_AUTO_CONTINUE_CONFIG, autoContinueConfig,
+  setAutoContinueConfig, setAutoContinueEnabled,
+} from '../src/client/auto-continue-pref.js'
 
 /** The config the host answers a GET with. */
 const CONFIG_VIEW = {
@@ -77,7 +81,12 @@ type FetchHandler = (url: string, init?: RequestInit) => Response | Promise<Resp
 
 let handleFetch: FetchHandler = () => new Response('{}')
 
+const mountedRoots = new Set<Root>()
+
 beforeEach(() => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  setAutoContinueEnabled(false)
+  setAutoContinueConfig(DEFAULT_AUTO_CONTINUE_CONFIG)
   // The transport caches the last GET so the pane can paint instantly; a test
   // must start without another test's snapshot.
   clearImageConfigCache()
@@ -87,6 +96,10 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  act(() => {
+    for (const root of mountedRoots) root.unmount()
+    mountedRoots.clear()
+  })
   vi.unstubAllGlobals()
   document.body.innerHTML = ''
 })
@@ -96,6 +109,7 @@ function mountPane(api: RemoteApi, onClose: () => void): { host: HTMLElement; ro
   const host = document.createElement('div')
   document.body.appendChild(host)
   const root = createRoot(host)
+  mountedRoots.add(root)
   act(() => {
     root.render(createElement(ConfigPane, { api, t, onClose }))
   })
@@ -113,6 +127,23 @@ async function expand(): Promise<void> {
   const head = document.querySelector<HTMLButtonElement>('.bre-config-expand')!
   await act(async () => { head.click() })
   await flush()
+}
+
+function autoCard(): Element {
+  return [...document.querySelectorAll('.bre-config-card')]
+    .find(node => node.querySelector('.bre-config-card-title')!.textContent === 'autoContinueSectionTitle')!
+}
+
+async function editNumber(input: HTMLInputElement, value: string, enter = false): Promise<void> {
+  await act(async () => {
+    input.focus()
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await act(async () => {
+    if (enter) input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    else input.blur()
+  })
 }
 
 describe('ConfigPane', () => {
@@ -458,6 +489,118 @@ describe('ConfigPane', () => {
     expect(document.body.textContent).toContain('boom')
   })
 
+  it('expands auto-continue into labelled wait and retry controls', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const card = autoCard()
+    const head = card.querySelector<HTMLButtonElement>('.bre-config-expand')!
+    const sw = card.querySelector<HTMLInputElement>('.bre-config-switch-input')!
+    await act(async () => { sw.click() })
+    expect(head.getAttribute('aria-expanded')).toBe('false')
+    expect(card.querySelectorAll('input[type="number"]')).toHaveLength(0)
+    await act(async () => { head.click() })
+    const fields = [...card.querySelectorAll<HTMLInputElement>('input[type="number"]')]
+    expect(fields).toHaveLength(2)
+    expect(fields.map(input => input.value)).toEqual(['2', '5'])
+    expect(fields.map(input => [input.min, input.max, input.step])).toEqual([
+      ['1', '3600', '1'], ['1', '100', '1'],
+    ])
+    expect(fields[0]!.closest('label')!.querySelector('.bre-config-auto-label')!.textContent).toBe('autoContinueWaitLabel')
+    expect(fields[1]!.closest('label')!.querySelector('.bre-config-auto-label')!.textContent).toBe('autoContinueRetriesLabel')
+    expect([...card.querySelectorAll('.bre-config-auto-unit')].map(unit => unit.textContent)).toEqual(['autoContinueSecondsUnit', 'autoContinueRetriesUnit'])
+    expect(fields.map(input => input.getAttribute('aria-label'))).toEqual([
+      'autoContinueWaitLabel (autoContinueSecondsUnit)', 'autoContinueRetriesLabel (autoContinueRetriesUnit)',
+    ])
+    expect(fields.map(input => input.title)).toEqual(['1–3600 autoContinueSecondsUnit', '1–100 autoContinueRetriesUnit'])
+    expect(card.querySelector('.bre-config-card-hint')).toBeNull()
+    expect(card.textContent).not.toContain('autoContinueDescription')
+    expect(card.textContent).not.toContain('autoContinueConfigHint')
+  })
+
+  it('saves wait and retry values on blur or Enter and keeps them when folded or disabled', async () => {
+    const { api } = fakeApi({})
+    const { root } = mountPane(api, () => {})
+    await flush()
+    let card = autoCard()
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
+    let fields = [...card.querySelectorAll<HTMLInputElement>('input[type="number"]')]
+    await editNumber(fields[0]!, '12')
+    await editNumber(fields[1]!, '3', true)
+    expect(autoContinueConfig()).toEqual({ waitSeconds: 12, maxRetries: 3 })
+    expect(JSON.parse(window.localStorage.getItem(AUTO_CONTINUE_CONFIG_KEY)!)).toEqual({ waitSeconds: 12, maxRetries: 3 })
+    expect(card.querySelector('.bre-config-auto-summary')).toBeNull()
+    expect(fields[0]!.value).toBe('12')
+    await act(async () => {
+      card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click()
+      card.querySelector<HTMLInputElement>('.bre-config-switch-input')!.click()
+      card.querySelector<HTMLInputElement>('.bre-config-switch-input')!.click()
+    })
+    expect(card.querySelectorAll('input[type="number"]')).toHaveLength(0)
+    expect(card.querySelector('.bre-config-auto-summary')!.textContent).toContain('"seconds":12,"count":3')
+    await act(async () => { root.unmount() })
+    mountPane(api, () => {})
+    await flush()
+    card = autoCard()
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
+    fields = [...card.querySelectorAll<HTMLInputElement>('input[type="number"]')]
+    expect(fields.map(input => input.value)).toEqual(['12', '3'])
+  })
+
+  it('normalizes out-of-range drafts and restores a cleared field instead of losing the setting', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const card = autoCard()
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
+    const fields = [...card.querySelectorAll<HTMLInputElement>('input[type="number"]')]
+    await editNumber(fields[0]!, '0')
+    await editNumber(fields[1]!, '999')
+    expect(fields.map(input => input.value)).toEqual(['1', '100'])
+    await editNumber(fields[0]!, '5.8')
+    await editNumber(fields[1]!, '')
+    expect(autoContinueConfig()).toEqual({ waitSeconds: 5, maxRetries: 100 })
+    expect(fields.map(input => input.value)).toEqual(['5', '100'])
+  })
+
+  it('reflects a synchronized preference update in both controls and the folded summary', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const card = autoCard()
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
+    await act(async () => { setAutoContinueConfig({ waitSeconds: 25, maxRetries: 8 }) })
+    expect([...card.querySelectorAll<HTMLInputElement>('input[type="number"]')].map(input => input.value)).toEqual(['25', '8'])
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
+    expect(card.querySelector('.bre-config-card-hint')!.textContent).toContain('25')
+    expect(card.querySelector('.bre-config-card-hint')!.textContent).toContain('8')
+  })
+
+  it('keeps field typography smaller than the title even under oversized host label styles', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const card = autoCard()
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
+    const style = document.createElement('style')
+    const selectors = ['.bre-config-card-title', '.bre-config-auto-field', '.bre-config-auto-label', '.bre-config-auto-input', '.bre-config-auto-unit', '.bre-config-auto-control']
+    style.textContent = 'label { font-size: 24px; line-height: 1.8; }' + selectors.map(selector => {
+      const start = STYLES.indexOf(selector + ' {')
+      expect(start).toBeGreaterThanOrEqual(0)
+      return STYLES.slice(start, STYLES.indexOf('}', start) + 1)
+    }).join('\n')
+    document.body.append(style)
+    const sizeOf = (selector: string): string => window.getComputedStyle(card.querySelector(selector)!).fontSize
+    expect(sizeOf('.bre-config-card-title')).toBe('13.5px')
+    expect(sizeOf('.bre-config-auto-label')).toBe('11.5px')
+    expect(sizeOf('.bre-config-auto-input')).toBe('13px')
+    expect(sizeOf('.bre-config-auto-unit')).toBe('11px')
+    for (const control of card.querySelectorAll('.bre-config-auto-control')) {
+      expect(window.getComputedStyle(control).height).toBe('34px')
+    }
+    expect(STYLES).toMatch(/\.bre-config-auto-fields\s*{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s)
+  })
+
   it('hosts the auto-continue card: folded, the switch reflects and flips the preference', async () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
@@ -482,8 +625,11 @@ describe('ConfigPane', () => {
     // Leave the module-level preference as tests found it: OFF.
     await act(async () => { sw.click() })
     expect(sw.checked).toBe(false)
-    // Expanding reveals the body, which carries the full trigger description.
+    // Expanded: just two compact controls, not a repeated summary or paragraphs.
     await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
-    expect(card.querySelector('.bre-config-card-body')!.textContent).toContain('autoContinueDescription')
+    expect(card.querySelectorAll('input[type="number"]')).toHaveLength(2)
+    expect(card.querySelector('.bre-config-card-hint')).toBeNull()
+    expect(card.textContent).not.toContain('autoContinueDescription')
+    expect(card.textContent).not.toContain('autoContinueConfigHint')
   })
 })

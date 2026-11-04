@@ -22,11 +22,17 @@ import type { ChangeEvent, MouseEvent as ReactMouseEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ReactNode } from 'react'
 import { canonicalSize, IMAGE_SIZE_TIERS } from '../image/sizes.js'
-import { MAX_CONSECUTIVE } from './auto-continue-rules.js'
 import {
   autoContinueEnabled,
+  autoContinueConfig,
+  AUTO_CONTINUE_WAIT_MIN,
+  AUTO_CONTINUE_WAIT_MAX,
+  AUTO_CONTINUE_RETRIES_MIN,
+  AUTO_CONTINUE_RETRIES_MAX,
   setAutoContinueEnabled,
+  setAutoContinueConfig,
   subscribeAutoContinueEnabled,
+  subscribeAutoContinueConfig,
 } from './auto-continue-pref.js'
 import { EffortBoundary, mountReact, unmountReact } from './injection/mount.js'
 import {
@@ -279,17 +285,28 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
 }
 
 /**
- * The 「自动继续」 card: one folded settings entry — the switch sits on the
- * head line (flipping it never unfolds the card). The one-line streak cap
- * stays under the head, so the folded card keeps the same height as the
- * 「生图」 card; the full what-triggers description folds into the body.
+ * The 「自动继续」 card: one folded settings entry with a quiet summary.
+ * The expanded card contains only the two compact controls.
  */
 export function AutoContinueCard(props: { t: (key: string, params?: Record<string, unknown>) => string }): ReactNode {
   const { t } = props
   const enabled = useSyncExternalStore(subscribeAutoContinueEnabled, autoContinueEnabled)
+  const config = useSyncExternalStore(subscribeAutoContinueConfig, autoContinueConfig)
+  const [waitDraft, setWaitDraft] = useState(String(config.waitSeconds))
+  const [retriesDraft, setRetriesDraft] = useState(String(config.maxRetries))
+  useEffect(() => { setWaitDraft(String(config.waitSeconds)) }, [config.waitSeconds])
+  useEffect(() => { setRetriesDraft(String(config.maxRetries)) }, [config.maxRetries])
+  const saveWait = (): void => {
+    setAutoContinueConfig({ waitSeconds: waitDraft.trim() === '' ? config.waitSeconds : Number(waitDraft) })
+    setWaitDraft(String(autoContinueConfig().waitSeconds))
+  }
+  const saveRetries = (): void => {
+    setAutoContinueConfig({ maxRetries: retriesDraft.trim() === '' ? config.maxRetries : Number(retriesDraft) })
+    setRetriesDraft(String(autoContinueConfig().maxRetries))
+  }
   const [open, setOpen] = useState(false)
   const bodyId = 'bre-config-auto-continue-body'
-  return createElement('div', { className: 'bre-config-card' },
+  return createElement('div', { className: 'bre-config-card bre-config-auto-card' },
     createElement('div', { className: 'bre-config-card-head' },
       createElement('button', {
         type: 'button',
@@ -317,10 +334,49 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
         createElement('span', { className: 'bre-config-switch-track', 'aria-hidden': true }),
       ),
     ),
-    createElement('div', { className: 'bre-config-card-hint' },
-      t('autoContinueHint', { count: MAX_CONSECUTIVE })),
+    !open && createElement('div', { className: 'bre-config-card-hint bre-config-auto-summary' },
+      t('autoContinueHint', { seconds: config.waitSeconds, count: config.maxRetries })),
     open && createElement('div', { className: 'bre-config-card-body', id: bodyId },
-      createElement('div', { className: 'bre-config-card-hint' }, t('autoContinueDescription')),
+      createElement('div', { className: 'bre-config-auto-fields' },
+        createElement('label', { className: 'bre-config-auto-field' },
+          createElement('span', { className: 'bre-config-auto-label' }, t('autoContinueWaitLabel')),
+          createElement('span', { className: 'bre-config-auto-control' },
+            createElement('input', {
+              type: 'number',
+              className: 'bre-config-auto-input',
+              min: AUTO_CONTINUE_WAIT_MIN,
+              max: AUTO_CONTINUE_WAIT_MAX,
+              step: 1,
+              value: waitDraft,
+              'aria-label': `${t('autoContinueWaitLabel')} (${t('autoContinueSecondsUnit')})`,
+              title: `${AUTO_CONTINUE_WAIT_MIN}–${AUTO_CONTINUE_WAIT_MAX} ${t('autoContinueSecondsUnit')}`,
+              onChange: (event: ChangeEvent<HTMLInputElement>) => setWaitDraft(event.target.value),
+              onBlur: saveWait,
+              onKeyDown: (event) => { if (event.key === 'Enter') event.currentTarget.blur() },
+            }),
+            createElement('span', { className: 'bre-config-auto-unit', 'aria-hidden': true }, t('autoContinueSecondsUnit')),
+          ),
+        ),
+        createElement('label', { className: 'bre-config-auto-field' },
+          createElement('span', { className: 'bre-config-auto-label' }, t('autoContinueRetriesLabel')),
+          createElement('span', { className: 'bre-config-auto-control' },
+            createElement('input', {
+              type: 'number',
+              className: 'bre-config-auto-input',
+              min: AUTO_CONTINUE_RETRIES_MIN,
+              max: AUTO_CONTINUE_RETRIES_MAX,
+              step: 1,
+              value: retriesDraft,
+              'aria-label': `${t('autoContinueRetriesLabel')} (${t('autoContinueRetriesUnit')})`,
+              title: `${AUTO_CONTINUE_RETRIES_MIN}–${AUTO_CONTINUE_RETRIES_MAX} ${t('autoContinueRetriesUnit')}`,
+              onChange: (event: ChangeEvent<HTMLInputElement>) => setRetriesDraft(event.target.value),
+              onBlur: saveRetries,
+              onKeyDown: (event) => { if (event.key === 'Enter') event.currentTarget.blur() },
+            }),
+            createElement('span', { className: 'bre-config-auto-unit', 'aria-hidden': true }, t('autoContinueRetriesUnit')),
+          ),
+        ),
+      ),
     ),
   )
 }

@@ -88,6 +88,10 @@ import { warmStoredKeyLists } from './key-list-warm.js'
 import { teardownFingerprintRunners } from './fingerprint-runner.js'
 import { createSessionDirectoryTracker } from './injection/session-directory.js'
 import { createAutoContinue } from './injection/auto-continue-run.js'
+import {
+  AUTO_CONTINUE_PREF_KEY, AUTO_CONTINUE_CONFIG_KEY,
+  syncAutoContinueEnabled, syncAutoContinueConfig, parseAutoContinueConfig,
+} from './auto-continue-pref.js'
 import { modelMenuOf, modelTriggerOf } from './injection/model-menu.js'
 import { registerProviderCardSlot } from './injection/provider-card-slot.js'
 import { registerSliderToggleSlot } from './injection/slider-toggle-slot.js'
@@ -358,6 +362,12 @@ export function apply(ctx: ClientContext): void {
         syncDisabledProviders(parseDisabledProviders(event.newValue))
       }
       else if (event.key === MODEL_ORDER_KEY) syncModelOrders(parseModelOrders(event.newValue))
+      else if (event.key === AUTO_CONTINUE_PREF_KEY) syncAutoContinueEnabled(event.newValue === 'true')
+      else if (event.key === AUTO_CONTINUE_CONFIG_KEY) syncAutoContinueConfig(parseAutoContinueConfig(event.newValue))
+      else if (event.key === null) {
+        syncAutoContinueEnabled(false)
+        syncAutoContinueConfig(parseAutoContinueConfig(null))
+      }
       }
     window.addEventListener('storage', onStorage)
     const dispose = subscribeSliderEnabled(() => { modelsPage.schedule() })

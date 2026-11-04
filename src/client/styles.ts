@@ -4536,6 +4536,102 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   line-height: 16px;
   color: var(--bre-ink-3);
 }
+.bre-config-auto-card {
+  padding: 12px 14px;
+}
+.bre-config-auto-card .bre-config-card-title {
+  line-height: 20px;
+}
+.bre-config-auto-summary {
+  margin: 4px 0 0 19px;
+  font-size: 11px;
+}
+.bre-config-auto-card .bre-config-card-body {
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.bre-config-auto-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.bre-config-auto-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+.bre-config-auto-label {
+  color: var(--bre-ink-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 16px;
+}
+.bre-config-auto-control {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--bre-line-2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+  cursor: text;
+}
+.bre-config-auto-control:hover {
+  border-color: var(--bre-ink-4);
+}
+.bre-config-auto-control:focus-within {
+  border-color: var(--bre-accent-line);
+  box-shadow: 0 0 0 2px var(--bre-accent-weak);
+}
+.bre-config-auto-input {
+  box-sizing: border-box;
+  flex: 1 1 0;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  color: var(--bre-ink-1);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
+  appearance: textfield;
+}
+.bre-config-auto-input::-webkit-inner-spin-button,
+.bre-config-auto-input::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+.bre-config-auto-unit {
+  flex: none;
+  color: var(--bre-ink-3);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 16px;
+  user-select: none;
+}
+@media (max-width: 420px) {
+  .bre-config-auto-fields { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bre-config-auto-control { transition: none; }
+}
 .bre-config-card-body {
   margin-top: 10px;
   padding-top: 10px;

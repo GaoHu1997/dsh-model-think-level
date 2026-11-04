@@ -31,10 +31,12 @@
 import {
   claimTurn,
   autoContinueEnabled,
+  autoContinueConfig,
+  subscribeAutoContinueEnabled,
+  subscribeAutoContinueConfig,
 } from '../auto-continue-pref.js'
 import {
   judgeTurnTail,
-  MAX_CONSECUTIVE,
   type DurableEventLike,
 } from '../auto-continue-rules.js'
 import { currentSessionId, type SessionsLike, type UiSessionLike } from './session-directory.js'
@@ -55,12 +57,6 @@ const EVAL_RETRY_DELAY_MS = 600
  * from polling forever.
  */
 const EVAL_WINDOW_MS = 6_000
-
-/** Delay before the FIRST automatic reply of a chain. */
-const SEND_BASE_DELAY_MS = 2_000
-
-/** Ceiling of one send delay, with or without a provider-requested wait. */
-const SEND_DELAY_MAX_MS = 30_000
 
 /** Ceiling for a provider-requested `providerRetryAfterMs`. */
 const RETRY_AFTER_MAX_MS = 120_000
@@ -147,6 +143,9 @@ interface Attached {
   historyReady: boolean
   /** The turn/end seq the pending send timer belongs to, if one is queued. */
   pendingSendTurnEndSeq: number | undefined
+  /** Start of the configurable wait, retained when settings change mid-wait. */
+  pendingSendScheduledAt: number
+  pendingRetryAfterMs: number | undefined
   /** When the last automatic reply was sent (client clock), for echo attribution. */
   lastAutoSentAt: number
   /** The exact text the last automatic reply carried. */
@@ -221,6 +220,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       }
       state.lastUserSeq = event.seq
       state.consecutive = 0
+      cancelPendingSend(state)
     }
   }
 
@@ -259,11 +259,35 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     return events.slice(previous + 1, turnEndIndex + 1)
   }
 
-  /** Send delay for the next automatic reply of the streak. */
-  const sendDelayOf = (consecutive: number, waitMs: number | undefined): number => {
-    const ladder = Math.min(SEND_BASE_DELAY_MS * 2 ** consecutive, SEND_DELAY_MAX_MS)
-    if (waitMs === undefined) return ladder
-    return Math.min(Math.max(ladder, waitMs), RETRY_AFTER_MAX_MS)
+  /** Every retry uses the configured wait; a provider may request a longer delay. */
+  const sendDelayOf = (waitMs: number | undefined): number => {
+    const configured = autoContinueConfig().waitSeconds * 1_000
+    return waitMs === undefined ? configured : Math.max(configured, Math.min(waitMs, RETRY_AFTER_MAX_MS))
+  }
+
+  const cancelPendingSend = (state: Attached): void => {
+    if (state.sendTimer !== undefined) {
+      clearTimeout(state.sendTimer)
+      timers.delete(state.sendTimer)
+      state.sendTimer = undefined
+    }
+    state.pendingSendTurnEndSeq = undefined
+  }
+
+  /** Recompute an already-armed wait from its original start, not from the edit. */
+  const scheduleSend = (state: Attached): void => {
+    if (state.sendTimer !== undefined) {
+      clearTimeout(state.sendTimer)
+      timers.delete(state.sendTimer)
+    }
+    const remaining = Math.max(0, sendDelayOf(state.pendingRetryAfterMs) - (Date.now() - state.pendingSendScheduledAt))
+    const timer = setTimeout(() => {
+      timers.delete(timer)
+      state.sendTimer = undefined
+      void send(state, t('autoContinueMessage'))
+    }, remaining)
+    state.sendTimer = timer
+    timers.add(timer)
   }
 
   /** Snapshot facts the guards read; undefined when the session is unreadable. */
@@ -391,19 +415,16 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       return
     }
     if (verdict.kind === 'refuse') return
-    if (state.consecutive >= MAX_CONSECUTIVE) {
-      console.info(`[dsh-model-think-level] auto-continue: streak cap (${MAX_CONSECUTIVE}) reached, standing down (${verdict.detail})`)
+    const maxRetries = autoContinueConfig().maxRetries
+    if (state.consecutive >= maxRetries) {
+      console.info(`[dsh-model-think-level] auto-continue: streak cap (${maxRetries}) reached, standing down (${verdict.detail})`)
       return
     }
     if (!claimTurn(state.sessionId, turnEnd.seq)) return
-    const text = t('autoContinueMessage')
-    const delay = sendDelayOf(state.consecutive, verdict.waitMs)
     state.pendingSendTurnEndSeq = turnEnd.seq
-    state.sendTimer = setTimeout(() => {
-      state.sendTimer = undefined
-      void send(state, text)
-    }, delay)
-    timers.add(state.sendTimer)
+    state.pendingSendScheduledAt = Date.now()
+    state.pendingRetryAfterMs = verdict.waitMs
+    scheduleSend(state)
   }
 
   const send = async (state: Attached, text: string): Promise<void> => {
@@ -413,7 +434,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const armedSeq = state.pendingSendTurnEndSeq
     state.pendingSendTurnEndSeq = undefined
     if (armedSeq === undefined || armedSeq !== state.lastHandledTurnEndSeq) return
-    if (!autoContinueEnabled()) return
+    if (!autoContinueEnabled() || state.consecutive >= autoContinueConfig().maxRetries) return
     const snap = snapshotOf(state.session)
     // Re-checks at fire time: the user may have queued something, the model
     // may have resumed itself, or the view may have moved on.
@@ -498,6 +519,8 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       lastHandledTurnEndSeq: first.open ? newestSeqOf(binding.eventSource, 'turn/end') : 0,
       consecutive: 0,
       pendingSendTurnEndSeq: undefined,
+      pendingSendScheduledAt: 0,
+      pendingRetryAfterMs: undefined,
       lastAutoSentAt: 0,
       lastAutoSentText: undefined,
       unsubs: [],
@@ -579,15 +602,36 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
 
   // A connection reset replaces every binding: the old attachment's objects
   // are dead and its subscriptions must go before the next poll re-attaches.
+  let disposeReset: (() => void) | undefined
   try {
-    ctx.on?.('connection/reset', () => { detach() })
+    disposeReset = ctx.on?.('connection/reset', () => { detach() })
   } catch {
     // The connection event is an optimization here; the poll heals regardless.
   }
 
+  const disposeEnabled = subscribeAutoContinueEnabled(() => {
+    const state = attached
+    if (autoContinueEnabled() || state === undefined) return
+    cancelPendingSend(state)
+    if (state.evalTimer !== undefined) {
+      clearTimeout(state.evalTimer)
+      timers.delete(state.evalTimer)
+      state.evalTimer = undefined
+    }
+  })
+  const disposeConfig = subscribeAutoContinueConfig(() => {
+    const state = attached
+    if (state?.pendingSendTurnEndSeq === undefined) return
+    if (!autoContinueEnabled() || state.consecutive >= autoContinueConfig().maxRetries) cancelPendingSend(state)
+    else scheduleSend(state)
+  })
+
   return {
     dispose: (): void => {
       disposed = true
+      disposeEnabled()
+      disposeConfig()
+      disposeReset?.()
       clearInterval(interval)
       detach()
       for (const timer of timers) clearTimeout(timer)
