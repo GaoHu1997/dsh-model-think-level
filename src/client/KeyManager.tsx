@@ -110,6 +110,55 @@ const PLUS_PATHS: readonly string[] = ['M8 3.9v8.2', 'M3.9 8h8.2']
 /** The tick drawn inside a selected model chip. */
 const CHECK_PATH = 'M3.9 8.35 6.6 11.05 12.1 5.5'
 
+/** The copy glyph beside a row's masked value: two offset rounded squares. */
+const COPY_PATHS: readonly string[] = [
+  'M5.75 5.75V4.1A1.6 1.6 0 0 1 7.35 2.5h4.55a1.6 1.6 0 0 1 1.6 1.6v4.55a1.6 1.6 0 0 1-1.6 1.6h-1.65',
+  'M4.1 5.75h4.55a1.6 1.6 0 0 1 1.6 1.6v4.55a1.6 1.6 0 0 1-1.6 1.6H4.1a1.6 1.6 0 0 1-1.6-1.6V7.35a1.6 1.6 0 0 1 1.6-1.6Z',
+]
+
+/** How long the copied row keeps its tick before returning to the copy glyph. */
+const COPIED_TICK_MS = 1_600
+
+/**
+ * Put one string on the system clipboard.
+ *
+ * The async clipboard is tried first, but it is not always there: on an
+ * insecure origin `navigator.clipboard` is undefined, and even where it exists
+ * the browser may withhold the write from a script. The legacy textarea path is
+ * the fallback — synchronous, permission-free within a user gesture, and
+ * removed from the DOM again whether it answered or not.
+ *
+ * Answers whether the text actually reached the clipboard, so the row only
+ * shows its tick when the copy succeeded.
+ */
+async function writeClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText !== undefined) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // Denied or unavailable: fall through to the selection path.
+  }
+  if (typeof document === 'undefined') return false
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    // Off-screen but still selectable: `display: none` would not copy.
+    area.style.position = 'fixed'
+    area.style.top = '-1000px'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const done = document.execCommand('copy')
+    area.remove()
+    return done
+  } catch {
+    return false
+  }
+}
+
 /** One 16px stroke glyph, on the same grid the injected controls draw on. */
 function Glyph({ paths }: { paths: readonly string[] }): ReactNode {
   return (
@@ -293,6 +342,16 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
     setEditing({ kind: 'add' })
   }, [draft])
   const [confirming, setConfirming] = useState<string | undefined>(undefined)
+
+  /** The row whose value was just copied: its glyph reads as a tick for a
+   *  moment. Cleared by the timer below, and by unmount. */
+  const [copied, setCopied] = useState<string | undefined>(undefined)
+  /** The row whose value is being fetched for the clipboard right now. */
+  const [copying, setCopying] = useState<string | undefined>(undefined)
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => {
+    if (copiedTimer.current !== undefined) clearTimeout(copiedTimer.current)
+  }, [])
   /** Which row's protocol menu is open, and the trigger it hangs off. */
   const [protocolMenu, setProtocolMenu] = useState<{ ref: string; anchor: HTMLElement } | undefined>(undefined)
   /** Which family addresses this route has, so the picker only offers those. */
@@ -758,6 +817,51 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
       </li>
     )
 
+  /**
+   * Copy one key's stored value to the clipboard.
+   *
+   * The list itself never holds a secret: the value is fetched one reference at
+   * a time through the reveal route, written straight to the clipboard and
+   * dropped. It is fetched on the click and never cached, which is what keeps
+   * the copy affordance from widening what the page can see.
+   *
+   * A tick marks the row when the clipboard accepted the text; a row the store
+   * cannot answer for — or a clipboard the browser refuses — says so instead of
+   * pretending a copy happened.
+   */
+  const copyKey = async (row: KeyRow): Promise<void> => {
+    if (copying !== undefined) return
+    const atRoute = route
+    setCopying(row.ref)
+    try {
+      const value = await client.reveal(route, row.ref)
+      // The panel moved to another route while the read flew: the row this
+      // value belongs to is no longer the list on screen.
+      if (liveRouteRef.current !== atRoute) return
+      if (value === undefined) {
+        setNotice({ kind: 'error', text: t('keysCopyFailed') })
+        return
+      }
+      const done = await writeClipboard(value)
+      if (liveRouteRef.current !== atRoute) return
+      if (!done) {
+        setNotice({ kind: 'error', text: t('keysCopyFailed') })
+        return
+      }
+      // The tick on the row is the whole confirmation: a copy is a glance away,
+      // so a line of text for it would only add noise under the list.
+      setNotice(undefined)
+      setCopied(row.ref)
+      if (copiedTimer.current !== undefined) clearTimeout(copiedTimer.current)
+      copiedTimer.current = setTimeout(() => {
+        copiedTimer.current = undefined
+        setCopied(undefined)
+      }, COPIED_TICK_MS)
+    } finally {
+      setCopying(undefined)
+    }
+  }
+
   /** Change one key's pinned protocol; undefined restores the route's own. */
   const changeProtocol = (row: KeyRow, next: string): void => {
     const protocol = next === '' ? undefined : (next as RouteProtocol)
@@ -861,6 +965,24 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                   <span className="bre-keys-toggle-mark" aria-hidden="true">
                     <Glyph paths={[CHECK_PATH]} />
                   </span>
+                </button>
+                {/* The value is write-only everywhere else in the harness: a
+                    saved key is never in the settings document and never in
+                    this list. The clipboard is the one way to get it back out,
+                    and this glyph is the one gesture that does it. It leads the
+                    row rather than trailing the preview: the hover tray on the
+                    right grows when the pointer arrives, and anything sitting
+                    just before it gets shoved sideways out from under the
+                    pointer. The head of the row never moves. */}
+                <button
+                  type="button"
+                  className={copied === row.ref ? 'bre-keys-copy is-copied' : 'bre-keys-copy'}
+                  aria-label={t('keysCopy', { name })}
+                  title={copied === row.ref ? t('keysCopied') : t('keysCopy', { name })}
+                  disabled={busy || copying === row.ref || row.configured === false}
+                  onClick={() => void copyKey(row)}
+                >
+                  <Glyph paths={copied === row.ref ? [CHECK_PATH] : COPY_PATHS} />
                 </button>
                 {row.alias === undefined ? null : <span className="bre-keys-alias">{row.alias}</span>}
                 <span className={row.alias === undefined ? 'bre-keys-mask bre-keys-mask-plain' : 'bre-keys-mask'}>

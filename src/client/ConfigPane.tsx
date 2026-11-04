@@ -185,8 +185,10 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     return `${model.label} · ${provider}`
   }
   return createElement('div', { className: 'bre-config-card' },
-    // One line while folded: caret + name, the state word, and the switch. The
-    // switch is a sibling of the expand button, so flipping it never toggles.
+    // The head line: name and description on the left (they are the expand
+    // button), the state word, the switch and the chevron on the right. The
+    // switch and the chevron are siblings of the button, so flipping the
+    // switch never toggles the card.
     createElement('div', { className: 'bre-config-card-head' },
       createElement('button', {
         type: 'button',
@@ -196,10 +198,13 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
         title: open ? t('imagegenCollapse') : t('imagegenExpand'),
         onClick: () => setOpen(current => !current),
       },
-        createElement('span', { className: 'bre-config-caret', 'aria-hidden': true }, open ? '▾' : '▸'),
         createElement('span', { className: 'bre-config-card-title' }, t('imagegenSectionTitle')),
+        // The one-line description, always visible: the folded card still has
+        // to say what the switch turns on.
+        createElement('span', { className: 'bre-config-card-hint' },
+          view.enabled ? t('imagegenEnabledHint') : t('imagegenDisabledHint')),
       ),
-      createElement('span', { className: 'bre-config-card-state' }, view.enabled ? t('imagegenEnabled') : t('imagegenDisabled')),
+      createElement('span', { className: 'bre-config-card-state' }, view.enabled ? t('cardStateOn') : t('cardStateOff')),
       createElement('label', { className: 'bre-config-switch', title: t('imagegenEnable') },
         createElement('input', {
           type: 'checkbox',
@@ -212,12 +217,16 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
         }),
         createElement('span', { className: 'bre-config-switch-track', 'aria-hidden': true }),
       ),
+      createElement('span', {
+        className: 'bre-config-chevron',
+        'aria-hidden': true,
+        'data-open': String(open),
+        onClick: () => setOpen(current => !current),
+      }, '›'),
     ),
     // A save failure must stay visible while the card is folded: the switch is
     // on the head line, so its error cannot live in the body.
     notice !== undefined && createElement('div', { className: 'bre-config-notice' }, notice),
-    createElement('div', { className: 'bre-config-card-hint' },
-      view.enabled ? t('imagegenEnabledHint') : t('imagegenDisabledHint')),
     open && createElement('div', { className: 'bre-config-card-body', id: bodyId },
       toolError !== undefined && createElement('div', { className: 'bre-config-notice bre-config-notice-warn' },
         createElement('div', null, t('imagegenToolMissing')),
@@ -316,10 +325,13 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
         title: open ? t('autoContinueCollapse') : t('autoContinueExpand'),
         onClick: () => setOpen(current => !current),
       },
-        createElement('span', { className: 'bre-config-caret', 'aria-hidden': true }, open ? '▾' : '▸'),
         createElement('span', { className: 'bre-config-card-title' }, t('autoContinueSectionTitle')),
+        // The folded summary only: once the two controls are on screen they
+        // say the same thing, and repeating it would be a third copy.
+        !open && createElement('span', { className: 'bre-config-card-hint bre-config-auto-summary' },
+          t('autoContinueHint', { seconds: config.waitSeconds, count: config.maxRetries })),
       ),
-      createElement('span', { className: 'bre-config-card-state' }, enabled ? t('settingOn') : t('settingOff')),
+      createElement('span', { className: 'bre-config-card-state' }, enabled ? t('cardStateOn') : t('cardStateOff')),
       createElement('label', { className: 'bre-config-switch', title: t('autoContinueAria') },
         createElement('input', {
           type: 'checkbox',
@@ -333,9 +345,13 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
         }),
         createElement('span', { className: 'bre-config-switch-track', 'aria-hidden': true }),
       ),
+      createElement('span', {
+        className: 'bre-config-chevron',
+        'aria-hidden': true,
+        'data-open': String(open),
+        onClick: () => setOpen(current => !current),
+      }, '›'),
     ),
-    !open && createElement('div', { className: 'bre-config-card-hint bre-config-auto-summary' },
-      t('autoContinueHint', { seconds: config.waitSeconds, count: config.maxRetries })),
     open && createElement('div', { className: 'bre-config-card-body', id: bodyId },
       createElement('div', { className: 'bre-config-auto-fields' },
         createElement('label', { className: 'bre-config-auto-field' },

@@ -13,6 +13,7 @@ import { act } from 'react'
 import { ConfigPane } from '../src/client/ConfigPane.js'
 import { clearImageConfigCache } from '../src/client/image-config-client.js'
 import { STYLES } from '../src/client/styles.js'
+import { zh } from '../src/client/locales.js'
 import { IMAGE_CONFIG_PATH } from '../src/constants.js'
 import type { RemoteApi } from '../src/client/types.js'
 import {
@@ -153,7 +154,7 @@ describe('ConfigPane', () => {
     await flush()
     const head = document.querySelector('.bre-config-card-head')!
     expect(head.querySelector('.bre-config-card-title')!.textContent).toBe('imagegenSectionTitle')
-    expect(head.querySelector('.bre-config-card-state')!.textContent).toBe('imagegenEnabled')
+    expect(head.querySelector('.bre-config-card-state')!.textContent).toBe('cardStateOn')
     expect(document.querySelectorAll('.bre-config-card-sub, .bre-config-card-head .bre-config-badge')).toHaveLength(0)
   })
 
@@ -213,7 +214,7 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
-    expect(document.querySelector('.bre-config-card-state')!.textContent).toBe('imagegenDisabled')
+    expect(document.querySelector('.bre-config-card-state')!.textContent).toBe('cardStateOff')
     expect(document.querySelector('.bre-config-card-hint')!.textContent).toBe('imagegenDisabledHint')
     expect(document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.checked).toBe(false)
     expect(document.querySelector('.bre-config-notice-warn')).toBeNull()
@@ -477,7 +478,7 @@ describe('ConfigPane', () => {
 
   it('the card list keeps an even gap between the cards', () => {
     expect(STYLES).toMatch(/\.bre-config-body\s*{[^}]*display:\s*flex/s)
-    expect(STYLES).toMatch(/\.bre-config-body\s*{[^}]*gap:\s*10px/s)
+    expect(STYLES).toMatch(/\.bre-config-body\s*{[^}]*gap:\s*12px/s)
   })
 
   it('a failed GET renders the readable failure instead of an empty pane', async () => {
@@ -585,13 +586,14 @@ describe('ConfigPane', () => {
     const style = document.createElement('style')
     const selectors = ['.bre-config-card-title', '.bre-config-auto-field', '.bre-config-auto-label', '.bre-config-auto-input', '.bre-config-auto-unit', '.bre-config-auto-control']
     style.textContent = 'label { font-size: 24px; line-height: 1.8; }' + selectors.map(selector => {
-      const start = STYLES.indexOf(selector + ' {')
+      // Anchor at a rule start: the same class name also appears in `:hover` rules.
+      const start = STYLES.search(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{`, 'm'))
       expect(start).toBeGreaterThanOrEqual(0)
       return STYLES.slice(start, STYLES.indexOf('}', start) + 1)
     }).join('\n')
     document.body.append(style)
     const sizeOf = (selector: string): string => window.getComputedStyle(card.querySelector(selector)!).fontSize
-    expect(sizeOf('.bre-config-card-title')).toBe('13.5px')
+    expect(sizeOf('.bre-config-card-title')).toBe('14.5px')
     expect(sizeOf('.bre-config-auto-label')).toBe('11.5px')
     expect(sizeOf('.bre-config-auto-input')).toBe('13px')
     expect(sizeOf('.bre-config-auto-unit')).toBe('11px')
@@ -612,7 +614,7 @@ describe('ConfigPane', () => {
     // Same folded shape as the image card: switch on the head, body folded.
     expect(card.querySelector('.bre-config-expand')).not.toBeNull()
     expect(card.querySelector('.bre-config-card-body')).toBeNull()
-    expect(card.querySelector('.bre-config-card-state')!.textContent).toBe('settingOff')
+    expect(card.querySelector('.bre-config-card-state')!.textContent).toBe('cardStateOff')
     // Folded, the one-line streak cap sits under the head and the full
     // description stays folded away — the same collapsed height as 生图.
     expect(card.querySelector('.bre-config-card-hint')!.textContent).toMatch(/^autoContinueHint/)
@@ -621,7 +623,7 @@ describe('ConfigPane', () => {
     expect(sw.checked).toBe(false)
     await act(async () => { sw.click() })
     expect(sw.checked).toBe(true)
-    expect(card.querySelector('.bre-config-card-state')!.textContent).toBe('settingOn')
+    expect(card.querySelector('.bre-config-card-state')!.textContent).toBe('cardStateOn')
     // Leave the module-level preference as tests found it: OFF.
     await act(async () => { sw.click() })
     expect(sw.checked).toBe(false)
@@ -631,5 +633,37 @@ describe('ConfigPane', () => {
     expect(card.querySelector('.bre-config-card-hint')).toBeNull()
     expect(card.textContent).not.toContain('autoContinueDescription')
     expect(card.textContent).not.toContain('autoContinueConfigHint')
+  })
+
+  it('names the switch state with one shared word on both cards', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const [imageCard, auto] = [...document.querySelectorAll('.bre-config-card')]
+    expect(imageCard!.querySelector('.bre-config-card-state')!.textContent).toBe('cardStateOn')
+    await act(async () => { auto!.querySelector<HTMLInputElement>('.bre-config-switch-input')!.click() })
+    expect(auto!.querySelector('.bre-config-card-state')!.textContent).toBe('cardStateOn')
+    // The words beside the two switches are one pair, not 「已开启」 next to 「启用」.
+    expect(zh.cardStateOn).toBe('开启')
+    expect(zh.cardStateOff).toBe('关闭')
+    // Leave the module-level preference as tests found it: OFF.
+    await act(async () => { auto!.querySelector<HTMLInputElement>('.bre-config-switch-input')!.click() })
+  })
+
+  it('the chevron folds and unfolds the card it sits on', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const chevron = document.querySelector<HTMLElement>('.bre-config-chevron')!
+    expect(chevron.getAttribute('data-open')).toBe('false')
+    await act(async () => { chevron.click() })
+    expect(chevron.getAttribute('data-open')).toBe('true')
+    expect(document.querySelector('.bre-config-card-body')).not.toBeNull()
+  })
+
+  it('reserves one fixed pane height so expanding a card never stretches the dialog', () => {
+    // 400px holds both cards expanded; the body scrolls instead of the pane growing.
+    expect(STYLES).toMatch(/\.bre-config-pane\s*{[^}]*height:\s*min\(400px,\s*calc\(100vh - 48px\)\)/s)
+    expect(STYLES).toMatch(/\.bre-config-body\s*{[^}]*overflow-y:\s*auto/s)
   })
 })

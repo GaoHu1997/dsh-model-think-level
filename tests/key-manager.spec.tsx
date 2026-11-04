@@ -41,6 +41,9 @@ const COPY: Record<string, string> = {
   keysRenamed: 'Label saved.',
   keysReplaced: 'Key replaced.',
   keysRemoved: 'Key removed.',
+  keysCopy: 'Copy {name}',
+  keysCopied: 'Key copied.',
+  keysCopyFailed: 'Could not copy the key.',
   keysModels: 'Models',
   keysScopeAll: 'All models',
   keysScopeNone: 'No models found',
@@ -1742,5 +1745,83 @@ describe('endpoint-only event updates', () => {
     await flush()
     expect(calls).toHaveLength(count)
     expect(panel.root.isConnected).toBe(false)
+  })
+})
+
+describe('copying a key', () => {
+  /** jsdom has no async clipboard, so the tests hand the component its own. */
+  function stubClipboard(writes: string[]): void {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text: string) => { writes.push(text) } },
+    })
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'clipboard')
+  })
+
+  it('copies one row’s stored value and ticks only that row', async () => {
+    const writes: string[] = []
+    stubClipboard(writes)
+    const { client, calls } = recorder({
+      list: async () => state({
+        entries: [
+          row({ ref: 'A', alias: 'Team', masked: 'sk-…aaaa' }),
+          row({ ref: 'B', masked: 'sk-…bbbb' }),
+        ],
+      }),
+      reveal: async (_route, ref) => (ref === 'A' ? 'sk-plain-a' : 'sk-plain-b'),
+    })
+    const { root } = mount({ client })
+    await flush()
+
+    // The glyph leads the row: the hover tray grows from the right, so a copy
+    // button parked next to it would slide out from under the pointer.
+    const team = rowOf(root, 'Team')
+    const copyButton = team.querySelector<HTMLButtonElement>('.bre-keys-copy')!
+    expect(team.querySelector('.bre-keys-mask')!.compareDocumentPosition(copyButton)).toBe(
+      Node.DOCUMENT_POSITION_PRECEDING,
+    )
+    copyButton.click()
+    await flush()
+
+    // One click, one read of the clicked reference, and the plain value lands
+    // on the clipboard — never in the list.
+    expect(calls.filter(call => call.op === 'reveal')).toEqual([{ op: 'reveal', args: ['ofox', 'A'] }])
+    expect(writes).toEqual(['sk-plain-a'])
+    // The tick is the whole confirmation: a successful copy leaves no notice.
+    expect(root.textContent).not.toContain('Key copied.')
+    expect(root.querySelector('.bre-effort-message.bre-status')).toBeNull()
+    expect(rowOf(root, 'Team').querySelector('.bre-keys-copy')?.className).toContain('is-copied')
+    expect(rowOf(root, 'sk-…bbbb').querySelector('.bre-keys-copy')?.className).not.toContain('is-copied')
+  })
+
+  it('reports a value the store will not answer instead of ticking the row', async () => {
+    const writes: string[] = []
+    stubClipboard(writes)
+    const { client } = recorder({
+      list: async () => state({ entries: [row({ ref: 'A', masked: 'sk-…aaaa' })] }),
+      reveal: async () => undefined,
+    })
+    const { root } = mount({ client })
+    await flush()
+
+    rowOf(root, 'sk-…aaaa').querySelector<HTMLButtonElement>('.bre-keys-copy')!.click()
+    await flush()
+
+    expect(writes).toEqual([])
+    expect(root.textContent).toContain('Could not copy the key.')
+    expect(root.querySelector('.bre-keys-copy.is-copied')).toBeNull()
+  })
+
+  it('leaves a row with nothing stored uncopyable', async () => {
+    const { client } = recorder({
+      list: async () => state({ entries: [row({ ref: 'A', configured: false })] }),
+    })
+    const { root } = mount({ client })
+    await flush()
+
+    expect(rowOf(root, 'Not stored').querySelector<HTMLButtonElement>('.bre-keys-copy')?.disabled).toBe(true)
   })
 })

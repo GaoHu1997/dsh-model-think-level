@@ -2844,6 +2844,47 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   font-size: 12px;
 }
 
+/* The copy affordance at the head of a row, right after the switch. Always on
+   the row: a saved value is write-only everywhere else, so this glyph is the
+   one way it can leave the store — hiding it until hover would hide the row's
+   own reason to exist. It leads the row instead of trailing the preview because
+   the hover tray grows in from the right and would otherwise shove the glyph
+   sideways the moment the pointer reaches it. It borrows the preview's quiet
+   tone and answers with a tick once the clipboard has the text. */
+.bre-keys-copy {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: -2px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: color 140ms ease, background-color 140ms ease, opacity 140ms ease;
+}
+
+.bre-keys-copy:hover:not(:disabled),
+.bre-keys-copy:focus-visible {
+  color: var(--dsw-alias-label-primary, #0f1115);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
+}
+
+.bre-keys-copy:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.bre-keys-copy.is-copied {
+  color: var(--dsw-alias-state-success-primary, #18a058);
+}
+
 /* The row's three actions, revealed on hover or keyboard focus rather than
    removed, so the row keeps its width and nothing shifts under the pointer.
    Revealing is opacity alone; a pointer that cannot hover simply always sees
@@ -3681,6 +3722,40 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   font-size: 12px;
 }
 
+.bre-keys-copy {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: -2px;
+  padding: 0;
+  border: none;
+  border-radius: var(--bre-r-xs);
+  background: transparent;
+  color: var(--bre-ink-4);
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: color 140ms ease, background-color 140ms ease, opacity 140ms ease;
+}
+
+.bre-keys-copy:hover:not(:disabled),
+.bre-keys-copy:focus-visible {
+  color: var(--bre-ink);
+  background: var(--bre-hover);
+}
+
+.bre-keys-copy:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.bre-keys-copy.is-copied {
+  color: var(--bre-accent, #4176e6);
+}
+
 /* The row's tray: the protocol and the model scope are STATE and stay on the
    row; the verbs appear on hover. The split is made here rather than in the
    markup — the tray stays mounted and only the VERBS inside it are taken out of
@@ -4345,11 +4420,16 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 .bre-config-pane {
   width: min(560px, calc(100vw - 48px));
-  /* Fixed height: expanding/collapsing the image-gen card must not resize the dialog. */
-  height: min(320px, calc(100vh - 48px));
+  /* Fixed height, on purpose: expanding a card fills the reserved space instead
+     of stretching the dialog. 400px is the designed height and was measured in
+     the browser: head 57px, body 343px. Folded, the two cards take 69px each
+     (12px apart), which leaves the pane with visible bottom breathing room; both
+     cards expanded reach 337px of the body, so the widest state still fits
+     without a scrollbar and only a notice (or a longer translation) scrolls. */
+  height: min(400px, calc(100vh - 48px));
   display: flex;
   flex-direction: column;
-  border-radius: 12px;
+  border-radius: 16px;
   border: 1px solid var(--bre-line-2);
   background: var(--dsw-alias-bg-elevated, #ffffff);
   box-shadow: 0 18px 48px #00000038;
@@ -4360,26 +4440,27 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 16px;
+  padding: 16px 20px 12px;
   border-bottom: 1px solid var(--bre-line-1);
 }
 .bre-config-title {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
   color: var(--bre-ink-1);
 }
 .bre-config-close {
   margin-left: auto;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   background: none;
   color: var(--bre-ink-3);
-  font-size: 13px;
+  font-size: 15px;
   cursor: pointer;
 }
 .bre-config-close:hover { background: var(--bre-accent-weak); color: var(--bre-ink-1); }
@@ -4387,11 +4468,12 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   flex: 1 1 auto;
   min-height: 0;
   /* Column flex so the card list keeps an even gap; items keep their content
-     height (min-height auto), so the pane still scrolls instead of squashing. */
+     height (min-height auto), so the pane still scrolls instead of squashing
+     when both cards are expanded. */
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 12px;
+  padding: 14px 20px 20px;
   overflow-y: auto;
 }
 .bre-config-loading {
@@ -4424,53 +4506,67 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   .bre-config-skeleton-row { animation: none; }
 }
 
-/* One settings entry: a bordered card whose head line stays visible while the
+/* One settings entry: a quiet card whose head line stays visible while the
    body folds away, so the pane reads as a list of services rather than a form. */
 .bre-config-card {
-  padding: 10px 12px;
-  border: 1px solid var(--bre-line-1);
-  border-radius: 12px;
+  padding: 14px 16px;
+  border: none;
+  border-radius: 14px;
   background: var(--bre-sunken-2);
 }
 .bre-config-card-head {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 10px;
 }
-/* The whole name is the fold control; the switch keeps its own hit area. */
+/* The name and its description are the fold control; the switch and the
+   chevron keep their own hit areas beside it. */
 .bre-config-expand {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   min-width: 0;
   margin: 0;
-  padding: 2px 4px 2px 2px;
+  padding: 0;
   border: none;
-  border-radius: 6px;
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
-.bre-config-expand:hover { background: var(--bre-accent-weak); }
-.bre-config-expand:focus-visible { outline: 2px solid var(--bre-accent-line); outline-offset: 1px; }
-.bre-config-caret {
+.bre-config-expand:hover .bre-config-card-title { color: var(--bre-accent); }
+.bre-config-expand:focus-visible { outline: 2px solid var(--bre-accent-line); outline-offset: 4px; border-radius: 8px; }
+/* Right-pointing when folded, turned down when open. */
+.bre-config-chevron {
   flex: none;
-  width: 11px;
+  margin-top: 2px;
+  padding: 0 2px;
   color: var(--bre-ink-3);
-  font-size: 11px;
-  line-height: 1;
+  font-size: 16px;
+  line-height: 16px;
+  cursor: pointer;
+  transition: transform 140ms ease, color 140ms ease;
+}
+.bre-config-chevron:hover { color: var(--bre-ink-1); }
+.bre-config-chevron[data-open='true'] { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .bre-config-chevron { transition: none; }
 }
 .bre-config-card-title {
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: 14.5px;
+  font-weight: 650;
+  line-height: 20px;
   color: var(--bre-ink-1);
+  transition: color 140ms ease;
 }
 .bre-config-card-state {
-  margin-left: auto;
-  font-size: 11.5px;
-  color: var(--bre-ink-3);
+  flex: none;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--bre-ink-2);
   white-space: nowrap;
 }
 /* Switch: a real checkbox for a11y, hidden over a track + knob that follow it. */
@@ -4479,8 +4575,8 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   flex: none;
   display: inline-flex;
   align-items: center;
-  width: 34px;
-  height: 20px;
+  width: 38px;
+  height: 22px;
   cursor: pointer;
 }
 .bre-config-switch-input {
@@ -4505,8 +4601,8 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: var(--bre-ink-4);
   transition: transform 140ms ease, background 140ms ease;
@@ -4516,7 +4612,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   background: var(--bre-accent);
 }
 .bre-config-switch-input:checked + .bre-config-switch-track::after {
-  transform: translateX(14px);
+  transform: translateX(16px);
   background: #fff;
 }
 .bre-config-switch-input:focus-visible + .bre-config-switch-track {
@@ -4529,22 +4625,23 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   .bre-config-switch-track,
   .bre-config-switch-track::after { transition: none; }
 }
-/* The state in words under the head: what off/on actually means here. */
+/* The description under the name: what off/on actually means here. */
 .bre-config-card-hint {
-  margin-top: 6px;
-  font-size: 11.5px;
-  line-height: 16px;
+  margin: 0;
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 17px;
   color: var(--bre-ink-3);
 }
 .bre-config-auto-card {
-  padding: 12px 14px;
+  padding: 14px 16px;
 }
 .bre-config-auto-card .bre-config-card-title {
   line-height: 20px;
 }
 .bre-config-auto-summary {
-  margin: 4px 0 0 19px;
-  font-size: 11px;
+  margin: 0;
+  font-size: 11.5px;
 }
 .bre-config-auto-card .bre-config-card-body {
   margin-top: 12px;
