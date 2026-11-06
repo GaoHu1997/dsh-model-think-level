@@ -19,6 +19,7 @@
  */
 
 import { isRecord } from './shared.js'
+import type { CamouflagePreset } from './camouflage.js'
 
 /**
  * Upper bound on one header value the plugin will send. Fetch itself refuses
@@ -48,6 +49,13 @@ export interface HeaderOverride {
   userAgent?: string
   /** Whether this route actually declares sendable request headers. */
   hasHeaders: boolean
+  /**
+   * The client identity this route asks the wire to present, when the user
+   * picked one in the advanced pane. Absent means "send whatever the adapter
+   * sent" — the conservative default. The identity is stored in the plugin's
+   * own document, not in the profile, so it survives an official card save.
+   */
+  camouflage?: CamouflagePreset
 }
 
 /** Backwards-compatible name retained for callers that only knew the UA seam. */
@@ -263,9 +271,17 @@ function recordHeaderConflicts(index: HeaderIndex, existing: HeaderOverride, rou
   }
 }
 
-/** Build the route index from each provider profile's endpoint and header declaration. */
+/** Build the route index from each provider profile's endpoint and header declaration.
+ *
+ * @param providers - the settings document's provider profiles.
+ * @param camouflages - route → client identity, from the plugin's own document.
+ *   Optional: a deployment with no camouflage file builds exactly the index it
+ *   built before, and a route named here that the settings no longer carry is
+ *   simply never matched.
+ */
 export function buildHeaderIndex(
   providers: Record<string, Record<string, unknown>>,
+  camouflages?: Readonly<Record<string, CamouflagePreset | undefined>>,
 ): HeaderIndex {
   const index = emptyIndex()
   const claimedUserAgents = new Map<string, { routes: string[]; values: string[] }>()
@@ -282,6 +298,9 @@ export function buildHeaderIndex(
     const sendable = sendableHeadersOf(profile) ?? {}
     const hasHeaders = Object.keys(sendable).length > 0
     const userAgent = Object.entries(sendable).find(([name]) => name.toLowerCase() === 'user-agent')?.[1]
+    const camouflage = camouflages !== undefined && Object.hasOwn(camouflages, route)
+      ? camouflages[route]
+      : undefined
     const override: HeaderOverride = {
       origin,
       pathPrefix: pathPrefixOf(baseURL ?? origin),
@@ -290,6 +309,7 @@ export function buildHeaderIndex(
       modelIds: modelIdsOf(profile),
       hasHeaders,
       ...(userAgent === undefined ? {} : { userAgent }),
+      ...(camouflage === undefined ? {} : { camouflage }),
     }
     // Every route is registered, headers or not: a route that declares no
     // headers must still be able to claim its own requests so another route on

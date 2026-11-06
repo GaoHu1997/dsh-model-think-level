@@ -966,27 +966,26 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                     <Glyph paths={[CHECK_PATH]} />
                   </span>
                 </button>
-                {/* The value is write-only everywhere else in the harness: a
-                    saved key is never in the settings document and never in
-                    this list. The clipboard is the one way to get it back out,
-                    and this glyph is the one gesture that does it. It leads the
-                    row rather than trailing the preview: the hover tray on the
-                    right grows when the pointer arrives, and anything sitting
-                    just before it gets shoved sideways out from under the
-                    pointer. The head of the row never moves. */}
-                <button
-                  type="button"
-                  className={copied === row.ref ? 'bre-keys-copy is-copied' : 'bre-keys-copy'}
-                  aria-label={t('keysCopy', { name })}
-                  title={copied === row.ref ? t('keysCopied') : t('keysCopy', { name })}
-                  disabled={busy || copying === row.ref || row.configured === false}
-                  onClick={() => void copyKey(row)}
-                >
-                  <Glyph paths={copied === row.ref ? [CHECK_PATH] : COPY_PATHS} />
-                </button>
-                {row.alias === undefined ? null : <span className="bre-keys-alias">{row.alias}</span>}
-                <span className={row.alias === undefined ? 'bre-keys-mask bre-keys-mask-plain' : 'bre-keys-mask'}>
-                  {previewOf(row, t)}
+                {/* Keep the preview and its copy gesture together. Hover-only
+                    verbs take no room at rest, so the resting row is exactly as
+                    wide as the values it shows — no empty seat is left for them.
+                    A saved secret still never enters this list; only a click
+                    reveals it straight to the clipboard. */}
+                <span className="bre-keys-value">
+                  {row.alias === undefined ? null : <span className="bre-keys-alias">{row.alias}</span>}
+                  <span className={row.alias === undefined ? 'bre-keys-mask bre-keys-mask-plain' : 'bre-keys-mask'}>
+                    {previewOf(row, t)}
+                  </span>
+                  <button
+                    type="button"
+                    className={copied === row.ref ? 'bre-keys-copy is-copied' : 'bre-keys-copy'}
+                    aria-label={t('keysCopy', { name })}
+                    title={copied === row.ref ? t('keysCopied') : t('keysCopy', { name })}
+                    disabled={busy || copying === row.ref || row.configured === false}
+                    onClick={() => void copyKey(row)}
+                  >
+                    <Glyph paths={copied === row.ref ? [CHECK_PATH] : COPY_PATHS} />
+                  </button>
                 </span>
                 <span
                   className={
@@ -1046,14 +1045,6 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                           </span>
                         </button>
                       </span>
-                      <button
-                        type="button"
-                        className="bre-link-button"
-                        disabled={busy}
-                        onClick={() => openForm('alias', row)}
-                      >
-                        {t('keysAlias')}
-                      </button>
                       {/* The scope action is the edit card's alone: a draft list
                           has no models to pick from — the provider the scope
                           would name its keys by does not exist yet. */}
@@ -1068,6 +1059,14 @@ export function KeyManager(props: KeyManagerProps): ReactNode {
                           {scopeText(row, t)}
                         </button>
                       )}
+                      <button
+                        type="button"
+                        className="bre-link-button"
+                        disabled={busy}
+                        onClick={() => openForm('alias', row)}
+                      >
+                        {t('keysAlias')}
+                      </button>
                       <button
                         type="button"
                         className="bre-link-button"

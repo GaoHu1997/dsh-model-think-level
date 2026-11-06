@@ -10,7 +10,7 @@
  */
 
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PI_AI_NS, PLUGIN_ID, STORE_NS } from '../src/constants.js'
 import { en, zh } from '../src/client/locales.js'
 import type { ModelDirectoryLike } from '../src/client/types.js'
@@ -108,6 +108,12 @@ function buildAddBlock(): HTMLElement {
 function levelPills(): HTMLButtonElement[] {
   return Array.from(document.querySelectorAll<HTMLButtonElement>('.bre-effort-card .bre-pillrow[aria-label="Declared levels"] .bre-lvl'))
 }
+
+// The cold Vite transform belongs to setup, not the first apply/dispose budget.
+// Keep the test timeout and every lifecycle assertion unchanged.
+beforeAll(async () => {
+  await import('../src/client/index.js')
+})
 
 beforeEach(() => {
   document.body.innerHTML = ''

@@ -46,6 +46,7 @@ import {
   type HeaderIndex,
   type HeaderOverride,
 } from './headers-core.js'
+import { applyCamouflageHeaders, patchCamouflageBody } from './camouflage.js'
 import {
   applyKeyToHeaders,
   classifyFailure,
@@ -299,6 +300,17 @@ function passthroughInit(input: RequestInfo | URL, init: RequestInit | undefined
 }
 
 /**
+ * The UTF-8 byte length of a serialized request body, for `content-length`.
+ *
+ * `TextEncoder` is the only length primitive guaranteed next to both the
+ * browser and the Node fetch this module wraps, so the seam does not depend on
+ * `Buffer` being in scope.
+ */
+function textByteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength
+}
+
+/**
  * The wrapper: inject the matched route's request headers, sign with the right
  * key, fail over to the next key on a retryable status, and delegate everything
  * else untouched.
@@ -361,6 +373,12 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
     // patch is simply empty, which is different from "no route matched".
     const patched = seedHeaders(input, init)
     let hasPatch = false
+    // The client identity is applied FIRST, so the route's own stored headers
+    // below still win: an operator who wants a different user-agent than the
+    // preset ships can override that single value by hand.
+    if (override.camouflage !== undefined && applyCamouflageHeaders(patched, override.camouflage)) {
+      hasPatch = true
+    }
     if (override.hasHeaders) {
       for (const [name, value] of Object.entries(override.headers)) {
         // The index already filters invalid entries. Keep the seam defensive for
@@ -375,6 +393,20 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       }
     }
 
+    // A Claude identity also has to look like Claude Code in the Messages body:
+    // the gate parses the system block and `metadata.user_id`, neither of which
+    // any header can carry. The transform is pure JSON-in/JSON-out and bails on
+    // anything it cannot parse, so a body it does not understand is sent
+    // untouched rather than mangled. Codex needs headers only.
+    let camouflageBody: string | undefined
+    if (override.camouflage === 'claude') {
+      const text = await bodyTextOf(input, init)
+      if (text !== undefined) {
+        camouflageBody = patchCamouflageBody(text, 'claude', url)
+        if (camouflageBody !== undefined) hasPatch = true
+      }
+    }
+
     /**
      * Send one attempt, optionally re-signed with `keyValue`. A fresh `Headers`
      * is built per attempt so a rejected attempt's header tweaks never leak into
@@ -382,9 +414,24 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
      * attempt (the first failed send consumed the clone, not the caller's
      * request).
      */
-    const attempt = (keyValue: string | undefined): Promise<Response> => {
+    const attempt = (keyValue: string | undefined, body: string | undefined = camouflageBody): Promise<Response> => {
       const headers = new Headers(patched)
       if (keyValue !== undefined) applyKeyToHeaders(headers, keyValue)
+      if (body !== undefined) {
+        // The patched document replaces the caller's own, so the length header
+        // has to follow it or the server reads a truncated body.
+        headers.set('content-length', String(textByteLength(body)))
+        if (typeof Request !== 'undefined' && input instanceof Request) {
+          try {
+            return base(new Request(input.clone(), { ...init, body, headers }), { ...init, body, headers })
+          } catch {
+            // A Request body that cannot be reconstructed keeps its own copy;
+            // the identity headers above are still applied.
+          }
+        } else {
+          return base(input, { ...init, body, headers })
+        }
+      }
       if (typeof Request !== 'undefined' && input instanceof Request) {
         return base(new Request(input.clone(), { headers }), { ...init, headers })
       }

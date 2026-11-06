@@ -258,6 +258,67 @@ describe('auto-continue watcher', () => {
     expect(binding.prompts).toHaveLength(0)
   })
 
+  it('keeps an old retry canceled after a manual submission leaves the queue', async () => {
+    const binding = await scheduledCutoff()
+    binding.setPending([{ text: '继续' }])
+    binding.setPending([])
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it('keeps an unevaluated ending canceled after a manual submission leaves the queue', async () => {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    binding.setPending([{ text: '继续' }])
+    binding.setPending([])
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it('keeps an old retry canceled after a new run starts and returns to idle', async () => {
+    const binding = await scheduledCutoff()
+    binding.setRunning(true)
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it('does not arm an old ending when a manual continue arrives before evaluation', async () => {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    binding.append('user/message', 3, { id: 'manual', content: [{ type: 'text', text: '继续' }] })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it('cancels a second retry when the user sends continue after the automatic echo', async () => {
+    const binding = await scheduledCutoff()
+    await vi.advanceTimersByTimeAsync(autoContinueConfig().waitSeconds * 1_000)
+    expect(binding.prompts).toHaveLength(1)
+    binding.append('user/message', 3, { id: 'auto', content: [{ type: 'text', text: '继续' }] })
+    binding.setRunning(true)
+    binding.append('turn/end', 4, { turn: 2, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    binding.append('user/message', 5, { id: 'manual', content: [{ type: 'text', text: '继续' }] })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(1)
+  })
+
   it('answers a max-tokens cut-off too', async () => {
     const harness = makeHarness()
     disposer = harness.runner.dispose

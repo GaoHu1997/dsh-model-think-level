@@ -2434,6 +2434,58 @@ describe('the auto-adapt seat', () => {
     expect(report).toEqual({ held: 1, unsuggested: 0 })
   })
 
+  it('holds the visit inside a fixed-height clip so no row is seen unfolding', async () => {
+    // #2 (user report: every model row opened and closed again, one after
+    // another). The visit is still taken, but the row is height-clipped for its
+    // whole duration, so the frame the disclosure stands open for is never
+    // PAINTED at the opened height and nothing below the row moves.
+    const deps = makeDeps()
+    const state = createScanState()
+    const root = buildModelsDom()
+    const entry = document.createElement('div')
+    entry.className = 'modelEntry'
+    entry.innerHTML = `<div class="modelRow">
+      <input aria-label="Model ID 3" value="gpt-4o-mini" />
+      <input aria-label="Display name 3" value="Draft Vision" />
+      <button aria-label="Capacities 3"></button>
+    </div>`
+    root.querySelector('.modelCatalog')!.append(entry)
+    // jsdom reports 0 for every box; give the row a real folded height so the
+    // clip has something to hold.
+    Object.defineProperty(entry, 'offsetHeight', { configurable: true, value: 96 })
+    const trigger = entry.querySelector<HTMLButtonElement>('button[aria-label="Capacities 3"]')!
+    const seen: Array<{ height: string; overflow: string }> = []
+    trigger.addEventListener('click', () => {
+      const open = entry.querySelector('.modelAdvanced')
+      if (open !== null) {
+        open.remove()
+        return
+      }
+      seen.push({ height: entry.style.height, overflow: entry.style.overflow })
+      entry.insertAdjacentHTML('beforeend', `
+        <div class="modelAdvanced" style="display:block">
+          <fieldset class="modelInputTypes">
+            <label><input type="checkbox" checked /><span>Text</span></label>
+            <label><input type="checkbox" /><span>Image</span></label>
+          </fieldset>
+        </div>`)
+    })
+
+    await adaptEveryModel(state, deps, 'acme-gateway', [
+      { id: 'gpt-4o-mini', name: 'Draft Vision', row: entry },
+    ])
+
+    // While the row stood open for the visit it was clipped to its folded height.
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.height).toBe('96px')
+    expect(seen[0]!.overflow).toBe('hidden')
+    // The clip is gone once the visit is over, and the fold is put back.
+    expect(entry.style.height).toBe('')
+    expect(entry.style.overflow).toBe('')
+    expect(entry.style.boxSizing).toBe('')
+    expect(entry.querySelector('.modelAdvanced')).toBeNull()
+  })
+
   it('fills a collapsed row\'s official capacity inputs through the same single visit', async () => {
     // The capacities a suggestion names are reference numbers the official
     // disclosure's own inputs carry (上下文大小/最大输出). They render the card's

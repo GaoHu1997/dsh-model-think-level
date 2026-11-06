@@ -198,27 +198,16 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     return out
   }
 
-  /**
-   * Fold the window's new user messages into the streak: anything the USER
-   * sent by hand resets it. A user message is attributed to this watcher's
-   * own reply when its text matches what was sent and it arrived within the
-   * echo tolerance — a manual 「继续」 typed in that window reads as a reset,
-   * which is the conservative direction (the streak shrinks, never grows).
-   */
+  /** Consume at most one matching event per automatic send. */
   const scanUserEvents = (state: Attached): void => {
     const events = durableEventsOf(state)
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index]!
-      // Walk past every non-user event: a message that was admitted together
-      // with the step it started still resets the streak. Monotonic seqs make
-      // the first already-seen user message the stop.
-      if (event.type !== 'user/message') continue
-      if (event.seq <= state.lastUserSeq) break
-      if (isOwnEcho(state, event)) {
-        state.lastUserSeq = event.seq
-        continue
-      }
-      state.lastUserSeq = event.seq
+    const seenSeq = state.lastUserSeq
+    for (const event of events) {
+      if (event.type !== 'user/message' || event.seq <= seenSeq) continue
+      state.lastUserSeq = Math.max(state.lastUserSeq, event.seq)
+      const ownEcho = isOwnEcho(state, event)
+      state.lastAutoSentText = undefined
+      if (ownEcho) continue
       state.consecutive = 0
       cancelPendingSend(state)
     }
@@ -387,7 +376,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     if (!autoContinueEnabled()) return
     const snap = snapshotOf(state.session)
     if (!state.historyReady) return
-    if (snap === undefined || snap.running || snap.pending > 0) return
+    if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) return
     const events = durableEventsOf(state)
     let turnEndIndex = -1
     for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -407,6 +396,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     // Handled BEFORE the async path: one ending is judged exactly once.
     state.lastHandledTurnEndSeq = turnEnd.seq
     scanUserEvents(state)
+    if (events.some(event => event.seq > turnEnd.seq && (event.type === 'user/message' || event.type === 'turn/start'))) return
     const verdict = judgeTurnTail({ turnEnd, turnEvents: tailOf(events, turnEndIndex) })
     if (verdict.kind === 'settled') {
       // A completed / aborted / blocked turn is evidence the session is not
@@ -429,6 +419,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
 
   const send = async (state: Attached, text: string): Promise<void> => {
     if (disposed || attached !== state) return
+    scanUserEvents(state)
     // A newer turn/end took over the attachment since this send was armed:
     // the older reply would answer a turn that has already moved on.
     const armedSeq = state.pendingSendTurnEndSeq
@@ -438,22 +429,26 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const snap = snapshotOf(state.session)
     // Re-checks at fire time: the user may have queued something, the model
     // may have resumed itself, or the view may have moved on.
-    if (snap === undefined || snap.running || snap.pending > 0) return
+    if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) return
     if (!stillCurrent(state)) return
+    const events = durableEventsOf(state)
+    if (events.some(event => event.seq > armedSeq && (event.type === 'user/message' || event.type === 'turn/start' || event.type === 'turn/end'))) return
+    state.lastAutoSentAt = Date.now()
+    state.lastAutoSentText = text
     try {
       const answer = await state.session.prompt([{ type: 'text', text }], 'queue')
       if (answer?.ok !== true) {
         // A refused prompt counts toward the streak: a transport that just
         // failed the turn must not be hammered by the continuation either.
         state.consecutive += 1
+        state.lastAutoSentText = undefined
         console.warn(`[dsh-model-think-level] auto-continue: prompt refused ${describeError(answer)}`)
         return
       }
       state.consecutive += 1
-      state.lastAutoSentAt = Date.now()
-      state.lastAutoSentText = text
     } catch (error) {
       state.consecutive += 1
+      state.lastAutoSentText = undefined
       console.warn('[dsh-model-think-level] auto-continue: prompt failed:', error)
     }
   }
@@ -472,6 +467,17 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const snap = snapshotOf(state.session)
     if (snap === undefined) return
     ensureHistoryReady(state)
+    if (!snap.open || snap.subagent || snap.running || snap.pending > 0) cancelPendingSend(state)
+    if (snap.pending > 0) {
+      // Admission is already user intent even before its durable message lands.
+      state.lastHandledTurnEndSeq = Math.max(state.lastHandledTurnEndSeq, newestSeqOf(state.eventSource, 'turn/end'))
+      if (state.evalTimer !== undefined) {
+        clearTimeout(state.evalTimer)
+        timers.delete(state.evalTimer)
+        state.evalTimer = undefined
+      }
+      state.evalDeadline = 0
+    }
     if (state.wasRunning && !snap.running) armEvaluation(state)
     state.wasRunning = snap.running
   }

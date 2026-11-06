@@ -221,6 +221,52 @@ describe('model rows inside a provider editor', () => {
     expect(grips()).toHaveLength(1)
   })
 
+  it('leaves native model ordering and layout to the host, including disabled handles', () => {
+    const { list } = officialModelPage('native', [{ id: 'a' }, { id: 'b' }])
+    const handles = Array.from(list.querySelectorAll<HTMLElement>('[class*="modelRow"]')).map(grid => {
+      const handle = document.createElement('button')
+      handle.className = 'host_modelDragHandle'
+      handle.disabled = true
+      grid.prepend(handle)
+      return handle
+    })
+    setModelOrder('native', ['b', 'a'])
+    const before = list.outerHTML
+    const state = createModelOrderState()
+    reconcileModelOrder(document.body, deps(), state)
+    reconcileModelOrder(document.body, deps(), state)
+    expect(list.outerHTML).toBe(before)
+    expect(grips()).toHaveLength(0)
+    expect(handles.every(handle => handle.isConnected && handle.disabled)).toBe(true)
+  })
+
+  it('releases legacy injections when a list gains native ordering, without changing older lists', () => {
+    const native = officialModelPage('native', [{ id: 'a' }, { id: 'b' }])
+    const legacy = officialModelPage('legacy', [{ id: 'c' }, { id: 'd' }])
+    const state = createModelOrderState()
+    setModelOrder('native', ['b', 'a'])
+    setModelOrder('legacy', ['d', 'c'])
+    reconcileModelOrder(document.body, deps(), state)
+    for (const grid of Array.from(native.list.querySelectorAll('[class*="modelRow"]'))) {
+      const handle = document.createElement('button')
+      handle.className = 'host_modelDragHandle'
+      handle.draggable = true
+      grid.prepend(handle)
+    }
+    reconcileModelOrder(document.body, deps(), state)
+    expect(native.list.querySelectorAll('.bre-drag-grip, .bre-model-grid, [data-bre-row-model]')).toHaveLength(0)
+    expect(native.list.querySelectorAll('[class*="modelDragHandle"]')).toHaveLength(2)
+    for (const row of Array.from(native.list.children) as HTMLElement[]) expect(row.style.order).toBe('')
+    expect(legacy.list.querySelectorAll('.bre-drag-grip')).toHaveLength(2)
+    expect(shownModels(legacy.list)).toEqual(['d', 'c'])
+    // Native handlers can move the host's own rows without the next scan
+    // restoring an obsolete plugin preference.
+    native.list.prepend(native.list.lastElementChild as HTMLElement)
+    const reordered = native.list.outerHTML
+    reconcileModelOrder(document.body, deps(), state)
+    expect(native.list.outerHTML).toBe(reordered)
+  })
+
   it('places the rows in the order stored for that provider', () => {
     const aliyun = officialModelPage('aliyun', [{ id: 'a' }, { id: 'b' }, { id: 'c' }])
     const moonshot = officialModelPage('moonshot', [{ id: 'a' }, { id: 'b' }, { id: 'c' }])

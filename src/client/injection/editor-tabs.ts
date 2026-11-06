@@ -543,7 +543,12 @@ function applyTabs(card: HTMLElement, deps: EditorTabsDeps): void {
     cleanupCard(card)
     return
   }
-  const headersSection = scope.querySelector<HTMLElement>(HEADERS_SECTION_SELECTOR)
+  // Every request section under the mount — the header table AND the
+  // camouflage identity below it — is the advanced pane, and both wear
+  // `.bre-headers` so one selector covers them. The first is the one whose
+  // presence makes the tab available at all.
+  const advancedSections = Array.from(scope.querySelectorAll<HTMLElement>(HEADERS_SECTION_SELECTOR))
+  const headersSection = advancedSections[0] ?? null
 
   // One route for the whole pane: every field here belongs to the same
   // provider, and the eye and the key panel both use it to name the provider
@@ -574,7 +579,7 @@ function applyTabs(card: HTMLElement, deps: EditorTabsDeps): void {
   if (scope.querySelector(CREATE_HOST_SELECTOR) !== null) markFooterRow(regions.actions, body)
   // The MOUNT is not the pane: it carries the bar and stays visible on every
   // tab, so only the section inside it is tagged (and hidden off `advanced`).
-  if (headersSection !== null) setAttr(headersSection, REGION_ATTR, TAB_ADVANCED)
+  for (const section of advancedSections) setAttr(section, REGION_ATTR, TAB_ADVANCED)
   // The fingerprint pane rides the same mount — it is a sibling of the headers
   // section, not a child of the official body — so it is tagged the same way.
   const fingerprintSection = scope.querySelector<HTMLElement>(FINGERPRINT_SECTION_SELECTOR)

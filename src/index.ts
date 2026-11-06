@@ -28,6 +28,7 @@ import Schema from '@deepseek-ai/schemastery'
 import {
   AUTOFILL_CONFIG_PATH,
   BALANCE_PATH,
+  CAMOUFLAGE_PATH,
   DIAG_PATH,
   FINGERPRINT_PATH,
   HEADERS_CONFIG_PATH,
@@ -75,6 +76,8 @@ import { acquireKeyMutation } from './key-mutation-queue.js'
 import { keyRest, keysForModel, restKeyOf, type KeyCandidate, type ServingKnowledge } from './key-route-core.js'
 import { keyServesFilePath, readKeyServes, servesOfRoute, withServes, withoutServes, writeKeyServes, type KeyServesDocument } from './key-serves.js'
 import { commitUiOrderGuarded, readUiOrder, uiOrderFilePath } from './order-store.js'
+import { readCamouflage, setRouteCamouflage } from './camouflage-store.js'
+import { CAMOUFLAGE_PRESETS, isCamouflagePreset } from './camouflage.js'
 import { collectKeyListings, mergeKeyListings } from './multi-key-listing.js'
 import { listingTargetsOf, type ProbeTarget } from './key-probe.js'
 import { probeListing } from './discovery-merge.js'
@@ -1647,7 +1650,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     headerRetryTimers.add(timer)
   }
   const refreshHeaders = (): void => {
-    if (!resolved.uaOverride) {
+    // Camouflage is an independent switch: a route may ask for an identity
+    // while the generic header override feature stays off, and vice versa.
+    const camouflage = readCamouflage().providers
+    if (!resolved.uaOverride && Object.keys(camouflage).length === 0) {
       overlaySource.current = emptyIndex()
       stopHeaderRetries()
       return
@@ -1665,7 +1671,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const providers = isRecord(section) && isRecord(section['providers'])
       ? (section['providers'] as Record<string, Record<string, unknown>>)
       : {}
-    overlaySource.current = buildHeaderIndex(providers)
+    overlaySource.current = buildHeaderIndex(providers, camouflage)
   }
   refreshHeaders()
   refreshKeyScopes()
@@ -3265,6 +3271,82 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         }),
       'dsh-model-think-level: ui-order route',
+    )
+
+    // Request camouflage: which CLIENT IDENTITY each provider route presents on
+    // the wire. Stored in the plugin's own file beside the key index, because
+    // the official provider card writes the whole `providers.<route>` object and
+    // would drop a field its schema does not know.
+    //
+    // GET answers the whole map (the card shows its own route's choice, and the
+    // editor can warn about another route presenting the same identity). POST
+    // changes exactly ONE route, with `preset: null` meaning "send as sent", so
+    // one save can never blank the other routes' choices.
+    // Whether the disguise can reach the wire at all. Two seams can carry it:
+    // this plugin's fetch overlay, and the pi-ai header transform every model
+    // adapter calls. Asking only the overlay under-reports — `headerOverlayInstalled`
+    // means OUR wrapper is the global fetch, which stops being true the moment
+    // another plugin layers its own on top, even though ours still runs beneath
+    // it. A route whose adapters are patched therefore counts as installed too,
+    // which is the seam model requests actually cross.
+    const requestSeamsInstalled = (): boolean => {
+      if (headerOverlayInstalled()) return true
+      const state = headerBridgeState()
+      return isRecord(state) && typeof state['adaptersPatched'] === 'number' && state['adaptersPatched'] > 0
+    }
+    ctx.effect(
+      () =>
+        webServerCtx.webServer.register({
+          kind: 'exact',
+          path: CAMOUFLAGE_PATH,
+          handler: async (req, res) => {
+            res.setHeader('cache-control', 'no-store')
+            if (!isTrustedRequest(req)) {
+              sendJson(res, 403, { ok: false, error: 'forbidden' })
+              return
+            }
+            if (req.method === 'GET') {
+              sendJson(res, 200, {
+                ok: true,
+                data: {
+                  presets: CAMOUFLAGE_PRESETS,
+                  providers: readCamouflage().providers,
+                  installed: requestSeamsInstalled(),
+                },
+              })
+              return
+            }
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
+              return
+            }
+            const body = await readJsonBody(req, 16_384)
+            if (!isRecord(body)) {
+              sendJson(res, 400, { ok: false, error: 'the body is not a JSON document' })
+              return
+            }
+            const route = body['route']
+            const preset = body['preset']
+            if (typeof route !== 'string' || route.length === 0) {
+              sendJson(res, 400, { ok: false, error: 'route is required' })
+              return
+            }
+            if (preset !== null && !isCamouflagePreset(preset)) {
+              sendJson(res, 400, { ok: false, error: 'preset must be codex, claude or null' })
+              return
+            }
+            try {
+              const document = setRouteCamouflage(route, preset ?? undefined)
+              // Rebuild the fetch index now: the next request must already carry
+              // the identity this save selected, not the previous one.
+              refreshHeaders()
+              sendJson(res, 200, { ok: true, data: document })
+            } catch (error) {
+              sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        }),
+      'dsh-model-think-level: camouflage route',
     )
 
     // The request-header overlay's status, for the browser half. Same-origin

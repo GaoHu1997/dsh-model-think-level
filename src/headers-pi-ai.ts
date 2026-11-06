@@ -17,6 +17,12 @@
  */
 
 import { isRecord } from './shared.js'
+import {
+  CLAUDE_CODE_SYSTEM_TEXT,
+  camouflageClaudeUserId,
+  camouflageHeaders,
+  type CamouflagePreset,
+} from './camouflage.js'
 import { selectOverride, type HeaderIndex, type HeaderOverride } from './headers-core.js'
 import { anthropicRequestBaseUrl } from './listing.js'
 import {
@@ -259,6 +265,46 @@ function routeOverrideOf(source: PiAiHeaderSource, model: unknown): HeaderOverri
 }
 
 /**
+ * The preset's identity headers layered under the caller's own values.
+ *
+ * Every ordinary name keeps whatever the adapter or the route already set; only
+ * the identity's own markers are added when absent. `user-agent` is the
+ * exception and is always forced — it is the header the whole identity is
+ * judged by, and the Harness attribution layer otherwise rewrites it. Route
+ * headers are merged on top by the caller, so a hand-written value still wins.
+ */
+function withCamouflageHeaders(merged: ProviderHeaders, preset: CamouflagePreset): ProviderHeaders {
+  const identity = camouflageHeaders(preset)
+  const present = new Set(Object.keys(merged).map(name => name.toLowerCase()))
+  const next: ProviderHeaders = { ...merged }
+  for (const [name, value] of Object.entries(identity)) {
+    if (!present.has(name)) next[name] = value
+  }
+  next['user-agent'] = identity['user-agent'] as string
+  return next
+}
+
+/**
+ * Put the Claude Code identity at the front of a context's system prompt.
+ *
+ * Only the protocol-switch path needs this: there pi-ai re-encodes the body
+ * itself, so the JSON patch in `camouflage.ts` never sees it. A context whose
+ * prompt is not a plain string is left alone rather than guessed at.
+ */
+function withClaudeIdentityContext<T>(context: T): T {
+  if (!isRecord(context)) return context
+  const systemPrompt = context['systemPrompt']
+  if (typeof systemPrompt === 'string') {
+    if (systemPrompt.startsWith('You are Claude Code')) return context
+    return { ...context, systemPrompt: `${CLAUDE_CODE_SYSTEM_TEXT}\n\n${systemPrompt}` } as T
+  }
+  if (systemPrompt === undefined || systemPrompt === null) {
+    return { ...context, systemPrompt: CLAUDE_CODE_SYSTEM_TEXT } as T
+  }
+  return context
+}
+
+/**
  * The text a stream error carries.
  *
  * pi-ai reports the provider's message in `error.message` (older shapes also use
@@ -295,7 +341,10 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
           // user's route headers are the final request-level values by design.
           const merged = existing === undefined ? headers : await existing(headers)
           const override = routeOverrideOf(source, model)
-          return override?.hasHeaders ? { ...merged, ...override.headers } : merged
+          const identified = override?.camouflage === undefined
+            ? merged
+            : withCamouflageHeaders(merged, override.camouflage)
+          return override?.hasHeaders ? { ...identified, ...override.headers } : identified
         }
 
         // Requests this proxy signs carry the wire-dispatch marker on top of
@@ -365,10 +414,26 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
             ? options['headers'] as ProviderHeaders
             : {})
           const implementation = await loadProtocol(protocol)
+          // The wire may switch into Anthropic Messages, where the body is
+          // re-encoded by the target implementation: the CLIENT identity has to
+          // ride in the context and options instead of the JSON text.
+          const switchedToClaude = protocol === 'anthropic-messages'
+            && routeOverrideOf(source, model)?.camouflage === 'claude'
           // The registry call the adapter normally makes folds the context for
           // us; this direct re-dispatch must do it itself or the target
           // implementation never sees the request's tool declarations.
-          const dispatchedContext = await normalizeDispatchedContext(context)
+          const normalized = await normalizeDispatchedContext(context)
+          const dispatchedContext = switchedToClaude ? withClaudeIdentityContext(normalized) : normalized
+          const existingMetadata = isRecord(options['metadata']) ? options['metadata'] : undefined
+          const suppliedUserId = existingMetadata?.['user_id']
+          const metadata = switchedToClaude
+            ? {
+                ...(existingMetadata ?? {}),
+                user_id: typeof suppliedUserId === 'string' && suppliedUserId.length > 0
+                  ? suppliedUserId
+                  : camouflageClaudeUserId(),
+              }
+            : undefined
           return implementation.streamSimple(
             { ...modelObject, api: protocol, baseUrl },
             dispatchedContext,
@@ -376,6 +441,7 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
               ...options,
               apiKey: candidate.value,
               headers: { ...mergedHeaders, [WIRE_DISPATCH_HEADER]: '1' },
+              ...(metadata === undefined ? {} : { metadata }),
               transformHeaders: undefined,
             },
           )

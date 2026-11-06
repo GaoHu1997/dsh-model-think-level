@@ -641,6 +641,105 @@ describe('HeadersEditor', () => {
     }
   })
 
+  it('renders the pane as two sections above its one commit row', async () => {
+    // The pane is ONE form over two sections. The second section rides the
+    // editor's `extras` seat, which is what keeps a single commit row below
+    // both: rendered as a sibling with a Save between them, the row above read
+    // as the header table's own commit and left the section under it outside
+    // the form.
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const editor = await renderEditor(
+      { route: 'aliyun', api, t, extras: <div className="bre-camouflage" /> },
+      { tabbed: 'after-mount' },
+    )
+    try {
+      const section = editor.container.querySelector('.bre-headers')!
+      const extras = editor.container.querySelector('.bre-camouflage')!
+      const actions = editor.container.querySelector('.bre-headers-actions')!
+      // Inside the SAME section — the pane, not a second card of its own.
+      expect(section.contains(extras)).toBe(true)
+      // Below the header table and above the row, so the row commits both.
+      expect(extras.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      // And nothing but the status line follows it.
+      expect(section.lastElementChild === actions).toBe(true)
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('commits the second section through the same Save, after the headers', async () => {
+    // The disguise is a draft until Save: rendering the pane must not write it,
+    // or 取消 would leave behind the very choice it was meant to discard.
+    const order: string[] = []
+    const api = fakeApi({
+      headers: { 'x-company': 'acme' },
+      mutate: async () => { order.push('headers'); return { ok: true } },
+    })
+    const onCommitExtras = vi.fn(async () => { order.push('extras') })
+    const onResetExtras = vi.fn()
+    const editor = await renderEditor(
+      {
+        route: 'aliyun',
+        api,
+        t,
+        extras: <div className="bre-camouflage" />,
+        onCommitExtras,
+        onResetExtras,
+      },
+      { tabbed: 'after-mount' },
+    )
+    try {
+      expect(onCommitExtras).not.toHaveBeenCalled()
+      await act(async () => { buttonByText(editor.container, en.headersSave).click() })
+      // One button, both halves, header dict first.
+      expect(order).toEqual(['headers', 'extras'])
+      expect(onResetExtras).not.toHaveBeenCalled()
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('keeps the pane open when the second section cannot be written', async () => {
+    // The header dict lands first, so a failed second write must be SAID against
+    // the pane instead of dismissing it as if everything had been saved.
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const onDismiss = vi.fn()
+    const editor = await renderEditor(
+      {
+        route: 'aliyun',
+        api,
+        t,
+        onDismiss,
+        extras: <div className="bre-camouflage" />,
+        onCommitExtras: async () => { throw new Error('refused') },
+      },
+      { tabbed: 'after-mount' },
+    )
+    try {
+      await act(async () => { buttonByText(editor.container, en.headersSave).click() })
+      expect(onDismiss).not.toHaveBeenCalled()
+      expect(editor.container.textContent).toContain(en.camouflageError)
+    } finally {
+      await editor.unmount()
+    }
+  })
+
+  it('drops the second section draft on cancel', async () => {
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const onResetExtras = vi.fn()
+    const editor = await renderEditor(
+      { route: 'aliyun', api, t, extras: <div className="bre-camouflage" />, onResetExtras },
+      { tabbed: 'after-mount' },
+    )
+    try {
+      await act(async () => { buttonByText(editor.container, en.headersCancel).click() })
+      // 取消 means "nothing of this pane is kept", the disguise included.
+      expect(onResetExtras).toHaveBeenCalledTimes(1)
+    } finally {
+      await editor.unmount()
+    }
+  })
+
   it('keeps the pane commit row at the end of the pane', async () => {
     // The pane's Save closes the pane, so it belongs after everything it commits:
     // a row that sat inside the header table read as that table's own commit.

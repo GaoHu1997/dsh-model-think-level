@@ -105,6 +105,26 @@ export interface HeadersEditorProps {
    * which is the write that declares the route the draft is addressed to.
    */
   deferred?: DeferredHeaders
+  /**
+   * Further sections of this pane, rendered above the commit row.
+   *
+   * The pane is the route's whole advanced configuration, not just headers:
+   * these render after the header table, inside the same section container, so
+   * the pane keeps ONE commit row and that row sits under every section. A
+   * sibling section rendered outside would need a commit row of its own, and
+   * two rows would make the pane read as two forms.
+   */
+  extras?: ReactNode
+  /**
+   * Commit the extras' draft as part of this pane's Save.
+   *
+   * Runs after the header write, before the card is dismissed. Rejecting keeps
+   * the pane open and reports an error: a dismissal over a write that did not
+   * happen would present the old state as the saved one.
+   */
+  onCommitExtras?: () => Promise<void>
+  /** Drop the extras' draft (this pane's 取消). */
+  onResetExtras?: () => void
 }
 
 /** One editable header row; a stable `id` keeps React keys off the name. */
@@ -163,7 +183,16 @@ export function headersFromDraft(draft: Draft): Record<string, string> {
  * @param props - route identity, write seam, copy and the card dismiss seam.
  * @returns the section.
  */
-export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEditorProps): ReactNode {
+export function HeadersEditor({
+  route,
+  api,
+  t,
+  onDismiss,
+  deferred,
+  extras,
+  onCommitExtras,
+  onResetExtras,
+}: HeadersEditorProps): ReactNode {
   // Kept for the optional User-Agent preset list when a row is named that way.
   const uaListId = useId()
   const [stored, setStored] = useState<Record<string, string> | undefined>(undefined)
@@ -290,6 +319,9 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
   }
 
   const cancel = (): void => {
+    // The extras' draft is this pane's too: dropping only the header rows would
+    // leave a disguise chosen and shown as if it were part of what was kept.
+    onResetExtras?.()
     setDraft(draftFrom(stored, nextRowId))
     setEditing(false)
     setMessage(undefined)
@@ -327,8 +359,8 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
     } catch (error) {
       reply = { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
-    setBusy(false)
     if (!reply.ok) {
+      setBusy(false)
       setMessage({
         kind: 'error',
         text: reply.error === 'no-route' ? t('headersNoRoute')
@@ -339,6 +371,20 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
     }
     setStored(next)
     setEditing(false)
+    // Both halves of the pane commit under this one button. The header dict is
+    // already written, so a failed extras write is reported against the pane
+    // rather than rolled back — and the pane stays open instead of dismissing
+    // as if everything had landed.
+    if (onCommitExtras !== undefined) {
+      try {
+        await onCommitExtras()
+      } catch {
+        setBusy(false)
+        setMessage({ kind: 'error', text: t('camouflageError') })
+        return
+      }
+    }
+    setBusy(false)
     const confirmation = Object.keys(next).length === 0 ? t('headersCleared') : t('headersSaved')
     if (tabbed) {
       // The pane commits the way the other two tabs do: the card closes. Its
@@ -551,7 +597,9 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
       */}
       {!loading && (inline || editing)
         ? (
-          <div className="bre-effort-actions bre-headers-actions">
+          <>
+            {extras}
+            <div className="bre-effort-actions bre-headers-actions">
             {/* Dismiss first, commit last — the official footer's own order
                 (`editorActions` renders the cancel button before the submit
                 button), which the two sibling panes wear and the fold view of
@@ -578,7 +626,8 @@ export function HeadersEditor({ route, api, t, onDismiss, deferred }: HeadersEdi
                   {t('headersSave')}
                 </button>
               )}
-          </div>
+            </div>
+          </>
         )
         : null}
 

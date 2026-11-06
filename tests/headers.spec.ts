@@ -11,6 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  buildHeaderIndex,
   buildUserAgentIndex,
   declaredUserAgent,
   emptyIndex,
@@ -21,6 +22,7 @@ import {
   requestUrlOf,
 } from '../src/headers-core.js'
 import { adapterSourcePatched } from '../src/headers-conflict.js'
+import { CLAUDE_CODE_SYSTEM_TEXT } from '../src/camouflage.js'
 import { headerOverlayBypass, headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from '../src/headers-fetch.js'
 import { keysForModel } from '../src/key-route-core.js'
 
@@ -251,6 +253,45 @@ describe('installHeaderOverlay', () => {
     expect(headers.get('x-route-key')).toBe('route-a')
     expect(headers.get('x-keep')).toBe('acme')
     expect(calls[0]?.init?.method).toBe('POST')
+  })
+
+  it('applies the Codex disguise to the wire, headers only', async () => {
+    install({ current: buildHeaderIndex({ relay: { baseURL: 'https://relay.example.com/v1' } }, { relay: 'codex' }) })
+    const body = JSON.stringify({ model: 'gpt-6.1-sol', input: [] })
+    await globalThis.fetch('https://relay.example.com/v1/chat/completions', { method: 'POST', body })
+    const headers = new Headers(calls[0]?.init?.headers)
+    expect(headers.get('user-agent')).toMatch(/^codex_cli_rs\//)
+    expect(headers.get('originator')).toBe('codex_cli_rs')
+    expect(headers.has('x-codex-session-id')).toBe(true)
+    // Codex's gate reads headers only: the caller's body keeps its identity.
+    expect(calls[0]?.init?.body).toBe(body)
+  })
+
+  it('applies the Claude disguise to the wire: headers plus the Messages body patch', async () => {
+    install({ current: buildHeaderIndex({ relay: { baseURL: 'https://relay.example.com/v1' } }, { relay: 'claude' }) })
+    await globalThis.fetch('https://relay.example.com/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'claude-x', system: 'be brief', messages: [] }),
+    })
+    const headers = new Headers(calls[0]?.init?.headers)
+    expect(headers.get('user-agent')).toMatch(/^claude-cli\//)
+    expect(headers.get('x-app')).toBe('cli')
+    const text = calls[0]?.init?.body as string
+    const body = JSON.parse(text) as Record<string, unknown>
+    expect((body['system'] as { text: string }[])[0]).toEqual({ type: 'text', text: CLAUDE_CODE_SYSTEM_TEXT })
+    expect((body['metadata'] as Record<string, unknown>)['user_id']).toMatch(/^user_/)
+    // The rewritten body and its length travel together.
+    expect(headers.get('content-length')).toBe(String(new TextEncoder().encode(text).byteLength))
+  })
+
+  it('sends no disguise at all when the route has none', async () => {
+    install({ current: buildHeaderIndex({ relay: { baseURL: 'https://relay.example.com/v1' } }) })
+    const body = JSON.stringify({ model: 'm', messages: [] })
+    await globalThis.fetch('https://relay.example.com/v1/messages', { method: 'POST', body })
+    const headers = new Headers(calls[0]?.init?.headers)
+    expect(headers.has('x-app')).toBe(false)
+    expect(headers.has('user-agent')).toBe(false)
+    expect(calls[0]?.init?.body).toBe(body)
   })
 
   it('matches the exact origin, never a prefix of another host', async () => {
@@ -911,5 +952,36 @@ describe('multi-key request signing and failover', () => {
       expect(body.message).toContain('all 2 keys of this provider refused model "gpt-6.1-sol"')
       expect(body.message).toContain('Keys panel')
     })
+  })
+})
+
+describe('camouflage on the request index', () => {
+  const providers = {
+    relay: {
+      baseURL: 'https://relay.example.com/v1',
+      models: [{ id: 'relay-model' }],
+      // No custom headers at all: the disguise must still be indexed.
+    },
+  }
+
+  it('carries the preset on the override and reaches the route list', () => {
+    const index = buildHeaderIndex(providers, { relay: 'claude' })
+    const override = index.routes.find(entry => entry.route === 'relay')
+    expect(override?.camouflage).toBe('claude')
+    expect(override?.hasHeaders).toBe(false)
+    // A disguise-only route is not in `overrides` (that list is the header
+    // table's own), but it IS in `routes`, which is what matches a request.
+    expect(index.overrides).toHaveLength(0)
+  })
+
+  it('leaves a route without a preset untouched', () => {
+    const index = buildHeaderIndex(providers, {})
+    expect(index.routes[0]?.camouflage).toBeUndefined()
+    expect(Object.hasOwn(index.routes[0] as object, 'camouflage')).toBe(false)
+  })
+
+  it('ignores a preset keyed by a route the index does not know', () => {
+    const index = buildHeaderIndex(providers, { other: 'codex' })
+    expect(index.routes[0]?.camouflage).toBeUndefined()
   })
 })

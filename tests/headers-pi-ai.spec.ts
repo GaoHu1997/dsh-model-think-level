@@ -912,3 +912,61 @@ describe('cross-seam: the fetch layer honours the wire seam\'s signature', () =>
     }
   })
 })
+
+describe('camouflage on the pi-ai transform', () => {
+  const MODEL_ALPHA = { id: 'alpha-model', baseUrl: 'https://relay.example.com/v1' }
+
+  function disguised(camouflage: 'codex' | 'claude', headers: Record<string, string> | undefined = undefined) {
+    const { adapter, source, calls } = setup()
+    source.current = buildHeaderIndex({
+      alpha: {
+        baseURL: 'https://relay.example.com/v1',
+        models: [{ id: 'alpha-model' }],
+        ...(headers === undefined ? {} : { headers }),
+      },
+    }, { alpha: camouflage })
+    const handle = installPiAiHeaderTransform(adapter, source)
+    callStream(adapter, MODEL_ALPHA, { headers: { 'user-agent': 'harness-default' } })
+    const transform = calls[0]?.['transformHeaders'] as HeaderTransform
+    return { transform, handle }
+  }
+
+  it('forces the Claude CLI identity over the SDK user agent', async () => {
+    const { transform, handle } = disguised('claude')
+    const headers = await transform({ 'user-agent': 'harness-default', 'x-existing': 'kept' })
+    expect(headers['user-agent']).toMatch(/^claude-cli\/\d+\.\d+\.\d+/)
+    expect(headers['x-app']).toBe('cli')
+    expect(headers['anthropic-version']).toBe('2023-06-01')
+    expect(headers['x-existing']).toBe('kept')
+    handle.dispose()
+  })
+
+  it('forces the Codex identity and its originator', async () => {
+    const { transform, handle } = disguised('codex')
+    const headers = await transform({})
+    expect(headers['user-agent']).toMatch(/^codex_cli_rs\//)
+    expect(headers['originator']).toBe('codex_cli_rs')
+    handle.dispose()
+  })
+
+  it('leaves a route without a preset alone', async () => {
+    const { adapter, source, calls } = setup()
+    const handle = installPiAiHeaderTransform(adapter, source)
+    callStream(adapter, MODEL_ALPHA, {})
+    const transform = calls[0]?.['transformHeaders'] as HeaderTransform
+    const headers = await transform({ 'user-agent': 'harness-default' })
+    expect(headers['x-app']).toBeUndefined()
+    expect(headers['originator']).toBeUndefined()
+    handle.dispose()
+  })
+
+  it('lets an explicit user-agent in the header table win over the preset', async () => {
+    const { transform, handle } = disguised('claude', { 'user-agent': 'my-client/1' })
+    const headers = await transform({})
+    expect(headers['user-agent']).toBe('my-client/1')
+    // The rest of the identity still lands: only the header the user wrote
+    // themselves is theirs.
+    expect(headers['x-app']).toBe('cli')
+    handle.dispose()
+  })
+})

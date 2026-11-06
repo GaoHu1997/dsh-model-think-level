@@ -1630,6 +1630,35 @@ export function writeOfficialCapacities(
  * way; this function only answers whether the user got to SEE it in the
  * official form.
  */
+/**
+ * Run a disclosure's open→work→close inside a fixed-height clip, so the short
+ * time a row spends open while we mirror a modality/capacity verdict is never
+ * PAINTED: the row keeps the height it had while folded, nothing below it moves,
+ * and what the user sees is a row that stayed shut (user report: every row of
+ * the provider opened and closed again, one after another). The work — ticking
+ * the official box, reading the capacities — still happens; only its visibility
+ * is clipped away. If the row is unmeasured (height 0) we do not clip, so the
+ * visit still works on a page that has not laid out yet.
+ */
+async function withClippedRow<T>(row: Element, run: () => Promise<T>): Promise<T> {
+  const el = row as HTMLElement
+  const height = el.offsetHeight
+  if (height <= 0) return run()
+  const prevHeight = el.style.height
+  const prevOverflow = el.style.overflow
+  const prevBoxSizing = el.style.boxSizing
+  el.style.boxSizing = 'border-box'
+  el.style.height = `${height}px`
+  el.style.overflow = 'hidden'
+  try {
+    return await run()
+  } finally {
+    el.style.height = prevHeight
+    el.style.overflow = prevOverflow
+    el.style.boxSizing = prevBoxSizing
+  }
+}
+
 async function imprintModality(
   container: HTMLElement | undefined,
   labels: HostLabels,
@@ -1646,15 +1675,17 @@ async function imprintModality(
   if (row.querySelector('[class*="modelAdvanced"]') !== null) return false
   const trigger = disclosureTriggerOf(row, labels.capacity)
   if (trigger === undefined || trigger.disabled) return false
-  trigger.click()
-  if (!officialInputTypesOf(row)) await settle()
-  try {
-    return officialInputTypesOf(row) && echoOfficialModality(row, true, imageLabels)
-  } finally {
-    // Restore the fold the user owns, whether or not there was a box to tick,
-    // and never leave a row this pass opened standing open.
+  return withClippedRow(row, async () => {
     trigger.click()
-  }
+    if (!officialInputTypesOf(row)) await settle()
+    try {
+      return officialInputTypesOf(row) && echoOfficialModality(row, true, imageLabels)
+    } finally {
+      // Restore the fold the user owns, whether or not there was a box to tick,
+      // and never leave a row this pass opened standing open.
+      trigger.click()
+    }
+  })
 }
 
 /**
@@ -1685,15 +1716,17 @@ async function visitRowDisclosure<T>(
   if (row.querySelector('[class*="modelAdvanced"]') !== null) return act(row)
   const trigger = disclosureTriggerOf(row, labels.capacity)
   if (trigger === undefined || trigger.disabled) return false
-  trigger.click()
-  if (row.querySelector('[class*="modelAdvanced"]') === null) await settle()
-  try {
-    return row.querySelector('[class*="modelAdvanced"]') !== null ? act(row) : false
-  } finally {
-    // Restore the fold the user owns, and never leave a row this pass opened
-    // standing open.
+  return withClippedRow(row, async () => {
     trigger.click()
-  }
+    if (row.querySelector('[class*="modelAdvanced"]') === null) await settle()
+    try {
+      return row.querySelector('[class*="modelAdvanced"]') !== null ? act(row) : false
+    } finally {
+      // Restore the fold the user owns, and never leave a row this pass opened
+      // standing open.
+      trigger.click()
+    }
+  })
 }
 
 /**
@@ -2712,6 +2745,9 @@ const LIST_SLACK_CLASS = 'bre-list-slack'
  */
 const LIST_OFFSET_TTL_MS = 3000
 
+/** The official model row's remove ("trash") button. */
+const REMOVE_MODEL_PROBE = 'button[class*="iconButtonDanger"]'
+
 /** Where one list's scroll containers stood when a click inside that list arrived. */
 interface ListOffset {
   /**
@@ -2797,6 +2833,7 @@ function forgetListOffset(): void {
 
 function onListClick(event: Event): void {
   recordListOffset(event.target)
+  reserveRemovalRange(event.target)
 }
 
 /**
@@ -2810,6 +2847,7 @@ function onListKey(event: KeyboardEvent): void {
     return
   }
   recordListOffset(event.target)
+  reserveRemovalRange(event.target)
 }
 
 /** How many live fibers have asked for the offset to be watched. */
@@ -2898,6 +2936,85 @@ function slackNeeded(host: HTMLElement, height: number): boolean {
 }
 
 /**
+ * Make sure `host` holds a blank exactly `height` pixels tall, creating it the
+ * first time. Returns the entry so callers can keep reading its height.
+ */
+function ensureListSlack(host: HTMLElement, height: number): ListSlack {
+  const existing = LIST_SLACKS.get(host)
+  if (existing !== undefined) {
+    if (existing.height !== height) {
+      existing.height = height
+      existing.spacer.style.height = `${height}px`
+    }
+    return existing
+  }
+  const spacer = document.createElement('div')
+  spacer.className = LIST_SLACK_CLASS
+  spacer.dataset['plugin'] = PLUGIN_ID
+  spacer.setAttribute('aria-hidden', 'true')
+  spacer.style.height = `${height}px`
+  // A blank belongs at the END of the content its container scrolls, where
+  // it lengthens the range without moving a single thing: inside a panel
+  // that is the host itself, and for the page's scroller it is the body,
+  // which is the page's own content area.
+  const holder = host === document.scrollingElement ? (document.body ?? host) : host
+  holder.appendChild(spacer)
+  // The scroll listener is the release for every move that is NOT a burst:
+  // the user scrolling up off the blank frees it mid-gesture, without
+  // waiting for the next mutation.
+  const onScroll = (): void => {
+    const current = LIST_SLACKS.get(host)
+    if (current !== undefined && !slackNeeded(host, current.height)) releaseListSlack(host)
+  }
+  const entry: ListSlack = { host, spacer, height, onScroll, scrollTarget: scrollEventTarget(host) }
+  LIST_SLACKS.set(host, entry)
+  LIVE_SLACKS.add(entry)
+  entry.scrollTarget.addEventListener('scroll', onScroll, { passive: true })
+  return entry
+}
+
+/**
+ * Reserve the range a pending model removal is about to take away, BEFORE the
+ * click's React commit shortens the list.
+ *
+ * Why before, not after: the official rows are wrapped in AnimatedRows, which
+ * measures every survivor's start position in `getSnapshotBeforeUpdate` and
+ * glides it home with a transform. If the list has been CLAMPED by the time it
+ * measures, every survivor's start is off by the row the view lost, and the
+ * glide lands them one notch too low — the "row slides into place wrong" the
+ * user sees. The clamp is a layout reaction to the commit, so the only moment
+ * that can prevent it is the event that starts the removal: pad the range by
+ * exactly the height the row will take, and the offset never has to move.
+ *
+ * Nothing here writes a scroll offset; the later {@link holdListSlack} pass
+ * still runs, finds the position already fits, and leaves it alone.
+ */
+function reserveRemovalRange(target: EventTarget | null): void {
+  if (!(target instanceof Element)) return
+  const button = target.closest<HTMLElement>(REMOVE_MODEL_PROBE)
+  if (button === null) return
+  const list = button.closest<HTMLElement>(MODEL_LIST_SELECTOR)
+  if (list === null) return
+  const row = button.closest<HTMLElement>('[class*="modelEntry"]')
+  if (row === null) return
+  const recorded = listOffset
+  if (recorded === undefined || performance.now() - recorded.at > LIST_OFFSET_TTL_MS) return
+  const gap = Number.parseFloat(getComputedStyle(list).rowGap) || 0
+  const shrink = row.getBoundingClientRect().height + gap
+  if (shrink <= 0) return
+  for (const { host, top } of recorded.targets) {
+    if (!host.isConnected) continue
+    const slack = LIST_SLACKS.get(host)
+    const held = slack === undefined ? 0 : slack.height
+    // Range the host has BELOW the position: if the removal takes more than
+    // this away the offset would be clamped, so pad exactly the shortfall.
+    const available = host.scrollHeight - host.clientHeight - held - top
+    if (available >= shrink) continue
+    ensureListSlack(host, Math.max(held, shrink - available))
+  }
+}
+
+/**
  * Hold the position the last click inside a model list was made from.
  *
  * Deleting a row makes the list shorter, and a scroll container holding an
@@ -2949,35 +3066,7 @@ function holdListSlack(now: number = performance.now()): void {
       if (slack !== undefined && !slackNeeded(host, slack.height)) releaseListSlack(host)
       continue
     }
-    let entry = slack
-    if (entry === undefined) {
-      const spacer = document.createElement('div')
-      spacer.className = LIST_SLACK_CLASS
-      spacer.dataset['plugin'] = PLUGIN_ID
-      spacer.setAttribute('aria-hidden', 'true')
-      spacer.style.height = '0px'
-      // A blank belongs at the END of the content its container scrolls, where
-      // it lengthens the range without moving a single thing: inside a panel
-      // that is the host itself, and for the page's scroller it is the body,
-      // which is the page's own content area.
-      const holder = host === document.scrollingElement ? (document.body ?? host) : host
-      holder.appendChild(spacer)
-      // The scroll listener is the release for every move that is NOT a burst:
-      // the user scrolling up off the blank frees it mid-gesture, without
-      // waiting for the next mutation.
-      const onScroll = (): void => {
-        const current = LIST_SLACKS.get(host)
-        if (current !== undefined && !slackNeeded(host, current.height)) releaseListSlack(host)
-      }
-      entry = { host, spacer, height: 0, onScroll, scrollTarget: scrollEventTarget(host) }
-      LIST_SLACKS.set(host, entry)
-      LIVE_SLACKS.add(entry)
-      entry.scrollTarget.addEventListener('scroll', onScroll, { passive: true })
-    }
-    if (entry.height !== needed) {
-      entry.height = needed
-      entry.spacer.style.height = `${needed}px`
-    }
+    ensureListSlack(host, needed)
     // The clamp is the only thing that can have moved this offset since the
     // click (a scroll gesture would have dropped the record), so handing the
     // recorded position back is handing the user's own view back.

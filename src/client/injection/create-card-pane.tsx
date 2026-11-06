@@ -36,6 +36,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { HeadersEditor, type DeferredHeaders } from '../HeadersEditor.js'
+import { CamouflageField } from '../CamouflageEditor.js'
 import { describeNamespace, routeIsDeclared } from '../ops.js'
 import type { RemoteApi } from '../types.js'
 import { EditorTabBar } from './editor-tab-bar.js'
@@ -157,11 +158,18 @@ export function CreateCardPane({ host, api, t, routeIdLabels, staged }: CreateCa
           withheld its rows until the form above was filled read as a pane with
           no way to add a header at all. The rows take edits either way, and the
           draft is staged the moment the id it belongs to is typed. */}
+      {/* The disguise is the second SECTION of the same pane, so it rides the
+          editor's `extras` seat: it lands under the header table and above the
+          pane's row, never as a sibling block with a Save of its own. This card
+          has no Save to hold a draft for — its 保存 is the official one that
+          declares the route — so the switch writes on click, through
+          `CamouflageField` (inert until the id field names a route). */}
       <HeadersEditor
         route={route}
         api={api}
         t={t}
         deferred={callbacks.current}
+        extras={<CamouflageField route={route} t={t} />}
       />
     </>
   )

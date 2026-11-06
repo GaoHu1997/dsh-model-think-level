@@ -2,12 +2,14 @@
  * Model-row drag reordering inside one provider's editor on the official Models
  * settings page.
  *
- * The official editor renders a provider's models as
+ * Older official editors render a provider's models as
  * `div.modelList > div.modelEntry > div.modelRow` (a four-column grid: id,
  * display name, and two icon buttons), straight from
  * `models.map((model, index) => …)`. React owns those children, so — exactly as
  * for the provider rows — a model is moved with a CSS `order`, and the id
  * sequence that results is stored per provider by `../model-order.js`.
+ * Editors with a native `modelDragHandle` own both ordering and responsive
+ * layout; those lists must not receive another grip or a legacy grid override.
  *
  * Two differences from the provider list, and both are in the adapter:
  *   - the row is a grid of INPUTS, so only the grip drags. A drag that began on
@@ -188,6 +190,19 @@ export function reconcileModelOrder(
   if (!root.isConnected) return
   const labels = deps.labels()
   for (const list of lists) {
+    if (list.querySelector('[class*="modelDragHandle"]') !== null) {
+      // Native rows have their own grid positions, narrow layout and draft
+      // ordering. Even a stored legacy order would fight their drag handlers.
+      // Release old injections too, in case this list was upgraded in place.
+      for (const seat of Array.from(list.querySelectorAll<HTMLElement>(`.${MODEL_ROW_CLASS}`))) {
+        for (const grip of Array.from(seat.querySelectorAll('[data-bre-drag-handle]'))) grip.remove()
+        seat.classList.remove(MODEL_ROW_CLASS)
+      }
+      const stamped = Array.from(list.querySelectorAll<HTMLElement>(`[${ROW_ID_ATTR}]`))
+      clearRowOrder(stamped)
+      for (const entry of stamped) entry.removeAttribute(ROW_ID_ATTR)
+      continue
+    }
     if (providerOfList(list, deps) === undefined) continue
     // Name the rows before the engine looks at them: a row with a blank id input
     // has no name, gets no grip, and is never moved.

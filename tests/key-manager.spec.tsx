@@ -14,6 +14,7 @@ import { setTimeout as nextTurn } from 'node:timers/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createElement } from 'react'
 import { KeyManager, type KeyManagerProps } from '../src/client/KeyManager.js'
+import { STYLES } from '../src/client/styles.js'
 import type { KeyAnswer, KeyManagerClient, KeyRow, KeyState } from '../src/client/key-manager-client.js'
 import { ENDPOINTS_CHANGED_EVENT, SETTINGS_CHANGED_EVENT } from '../src/client/events.js'
 import { mountReact, unmountReact, type ForeignMount } from '../src/client/injection/mount.js'
@@ -923,12 +924,12 @@ describe('the enable check and model scope', () => {
 })
 
 describe('the actions on a row', () => {
-  it('places delete last after label, models and edit', async () => {
+  it('keeps alias, edit and delete at the end after label and models', async () => {
     const { client } = recorder({ list: async () => state({ entries: [row({ ref: 'key-2', alias: 'key2' })] }) })
     const panel = mount({ client })
     await flush()
 
-    expect(actionsOf(rowOf(panel.root, 'key2'))).toEqual(['Label', 'All models', 'Edit', 'Delete'])
+    expect(actionsOf(rowOf(panel.root, 'key2'))).toEqual(['All models', 'Label', 'Edit', 'Delete'])
   })
 
   it('keeps the protocol picker inside the hover action tray, defaulting to the route', async () => {
@@ -1101,7 +1102,7 @@ describe('the actions on a row', () => {
 
     buttonByText(line, 'Cancel').click()
     await flush()
-    expect(actionsOf(line)).toEqual(['Label', 'All models', 'Edit', 'Delete'])
+    expect(actionsOf(line)).toEqual(['All models', 'Label', 'Edit', 'Delete'])
     expect(calls.some((call) => call.op === 'remove')).toBe(false)
 
     buttonByText(line, 'Delete').click()
@@ -1761,6 +1762,75 @@ describe('copying a key', () => {
     Reflect.deleteProperty(navigator, 'clipboard')
   })
 
+  it.each(['Team', undefined])('places copy immediately after the masked key (alias: %s)', async alias => {
+    const { client, calls } = recorder({
+      list: async () => state({ entries: [row({ ref: 'A', alias, masked: 'sk-…aaaa' })] }),
+    })
+    const { root } = mount({ client })
+    await flush()
+
+    const line = rowOf(root, alias ?? 'sk-…aaaa')
+    const mask = line.querySelector('.bre-keys-mask')!
+    const copyButton = line.querySelector<HTMLButtonElement>('.bre-keys-copy')!
+    expect(mask.nextElementSibling).toBe(copyButton)
+    expect(mask.compareDocumentPosition(copyButton)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(copyButton.parentElement).toBe(line.querySelector('.bre-keys-value'))
+    expect(copyButton.nextElementSibling).toBeNull()
+    if (alias !== undefined) expect(line.querySelector('.bre-keys-alias')!.nextElementSibling).toBe(mask)
+    // A layout change must not reveal a secret just to render the row.
+    expect(calls.filter(call => call.op === 'reveal')).toEqual([])
+  })
+
+  it('keeps every row on one line and reserves the hover verbs’ seat so nothing shifts', async () => {
+    const { client } = recorder({
+      list: async () => state({
+        entries: [
+          row({ ref: 'A', alias: 'A deliberately long alias', masked: 'sk-…aaaa' }),
+          row({ ref: 'B', masked: 'sk-…bbbb' }),
+        ],
+      }),
+    })
+    const { root } = mount({ client })
+    await flush()
+    const style = document.createElement('style')
+    // jsdom has no geometry: assert the effective layout contract, including
+    // the later overrides, rather than claiming to measure pointer stability.
+    style.textContent = STYLES.match(/^\.bre-keys-(?:row|value|alias|mask(?:-plain)?|copy|actions)\s*\{[^}]*\}/gm)?.join('\n') ?? ''
+    root.append(style)
+    for (const line of root.querySelectorAll<HTMLElement>('.bre-keys-row')) {
+      const value = line.querySelector<HTMLElement>('.bre-keys-value')!
+      const mask = line.querySelector<HTMLElement>('.bre-keys-mask')!
+      const copyButton = line.querySelector<HTMLButtonElement>('.bre-keys-copy')!
+      const actions = line.querySelector<HTMLElement>('.bre-keys-actions')!
+      // One line: a wrapped row would change height, and the copy glyph with it.
+      expect(window.getComputedStyle(line).flexWrap).toBe('nowrap')
+      expect(window.getComputedStyle(line).minHeight).toBe('40px')
+      expect(window.getComputedStyle(line).paddingTop).toBe('0px')
+      expect(window.getComputedStyle(line).paddingBottom).toBe('0px')
+      expect(window.getComputedStyle(actions).flexWrap).toBe('nowrap')
+      // The preview is what gives way when the tray needs room.
+      expect(window.getComputedStyle(value).flexShrink).toBe('1')
+      expect(window.getComputedStyle(value).maxWidth).toBe('calc(100% - 28px)')
+      expect(window.getComputedStyle(mask).flexGrow).toBe('0')
+      expect(window.getComputedStyle(mask).textOverflow).toBe('ellipsis')
+      expect(window.getComputedStyle(copyButton).flexShrink).toBe('0')
+      expect(window.getComputedStyle(copyButton).width).toBe('20px')
+      expect(window.getComputedStyle(actions).maxWidth).toBe('100%')
+    }
+    // verbs hold their width at rest, or the tray shrinks under the pointer and
+    // shoves the protocol pill and scope count sideways the instant it arrives.
+    // Their ink fades while the seats stay at the tail, after those two state
+    // controls, so the three actions remain last when they appear.
+    const verbRules = [...STYLES.matchAll(/\.bre-keys-actions \.bre-link-button:not\(\.bre-keys-scope\) \{([^}]*)\}/g)].map(m => m[1])
+    expect(verbRules.some(rule => /opacity:\s*0/.test(rule))).toBe(true)
+    expect(verbRules.some(rule => /order:\s*1/.test(rule))).toBe(true)
+    expect(verbRules.every(rule => !/display:\s*none/.test(rule))).toBe(true)
+    // Revealing is opacity alone: a display flip would re-flow the row.
+    const revealRules = [...STYLES.matchAll(/\.bre-keys-row:hover \.bre-keys-actions \.bre-link-button:not\(\.bre-keys-scope\),[\s\S]{0,160}?\{([^}]*)\}/g)].map(m => m[1])
+    expect(revealRules.length).toBeGreaterThan(0)
+    expect(revealRules.every(rule => !/display\s*:/.test(rule))).toBe(true)
+  })
+
   it('copies one row’s stored value and ticks only that row', async () => {
     const writes: string[] = []
     stubClipboard(writes)
@@ -1776,13 +1846,9 @@ describe('copying a key', () => {
     const { root } = mount({ client })
     await flush()
 
-    // The glyph leads the row: the hover tray grows from the right, so a copy
-    // button parked next to it would slide out from under the pointer.
     const team = rowOf(root, 'Team')
     const copyButton = team.querySelector<HTMLButtonElement>('.bre-keys-copy')!
-    expect(team.querySelector('.bre-keys-mask')!.compareDocumentPosition(copyButton)).toBe(
-      Node.DOCUMENT_POSITION_PRECEDING,
-    )
+    expect(team.querySelector('.bre-keys-mask')!.nextElementSibling).toBe(copyButton)
     copyButton.click()
     await flush()
 
@@ -1794,7 +1860,46 @@ describe('copying a key', () => {
     expect(root.textContent).not.toContain('Key copied.')
     expect(root.querySelector('.bre-effort-message.bre-status')).toBeNull()
     expect(rowOf(root, 'Team').querySelector('.bre-keys-copy')?.className).toContain('is-copied')
-    expect(rowOf(root, 'sk-…bbbb').querySelector('.bre-keys-copy')?.className).not.toContain('is-copied')
+    expect(copyButton.title).toBe(COPY.keysCopied)
+    const plainCopy = rowOf(root, 'sk-…bbbb').querySelector<HTMLButtonElement>('.bre-keys-copy')!
+    expect(plainCopy.className).not.toContain('is-copied')
+    plainCopy.click()
+    await flush()
+    expect(calls.filter(call => call.op === 'reveal')).toEqual([
+      { op: 'reveal', args: ['ofox', 'A'] },
+      { op: 'reveal', args: ['ofox', 'B'] },
+    ])
+    expect(writes).toEqual(['sk-plain-a', 'sk-plain-b'])
+    expect(copyButton.className).not.toContain('is-copied')
+    expect(plainCopy.className).toContain('is-copied')
+    expect(plainCopy.title).toBe(COPY.keysCopied)
+    expect(root.innerHTML).not.toContain('sk-plain-a')
+    expect(root.innerHTML).not.toContain('sk-plain-b')
+  })
+
+  it('disables copy while its reveal is pending and ignores a repeated click', async () => {
+    const writes: string[] = []
+    stubClipboard(writes)
+    let finish!: (value: string | undefined) => void
+    const { client, calls } = recorder({
+      list: async () => state({ entries: [row({ ref: 'A', alias: 'Team', masked: 'sk-…aaaa' })] }),
+      reveal: () => new Promise(resolve => { finish = resolve }),
+    })
+    const { root } = mount({ client })
+    await flush()
+    const copyButton = rowOf(root, 'Team').querySelector<HTMLButtonElement>('.bre-keys-copy')!
+    copyButton.click()
+    await flush()
+    expect(copyButton.disabled).toBe(true)
+    copyButton.click()
+    expect(calls.filter(call => call.op === 'reveal')).toEqual([{ op: 'reveal', args: ['ofox', 'A'] }])
+    expect(writes).toEqual([])
+    finish('sk-plain-a')
+    await flush()
+    expect(writes).toEqual(['sk-plain-a'])
+    expect(copyButton.disabled).toBe(false)
+    expect(copyButton.className).toContain('is-copied')
+    expect(root.innerHTML).not.toContain('sk-plain-a')
   })
 
   it('reports a value the store will not answer instead of ticking the row', async () => {

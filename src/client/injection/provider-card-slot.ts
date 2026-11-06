@@ -25,7 +25,7 @@ import { createElement, useCallback, useLayoutEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { PI_AI_NS, PLUGIN_ID } from '../../constants.js'
-import { HeadersEditor } from '../HeadersEditor.js'
+import { AdvancedPane } from '../AdvancedPane.js'
 import { FingerprintPane } from '../FingerprintPane.js'
 import { EditorTabBar } from './editor-tab-bar.js'
 import { editorCardOf } from './editor-tabs.js'
@@ -167,7 +167,10 @@ export function ProviderCardSlot({ provider, api, t, ctx }: ProviderCardSlotProp
     // with the tabbed editor and stays hidden on a card the pass left alone
     // (the DeepSeek account editor).
     createElement(EditorTabBar, { host, t }),
-    createElement(HeadersEditor, { route, api, t, onDismiss: dismiss }),
+    // The advanced pane is ONE form over its two sections (headers, then the
+    // disguise) and owns their single commit row, which is why it is a single
+    // child here rather than two siblings with a Save between them.
+    createElement(AdvancedPane, { route, api, t, onDismiss: dismiss }),
     // The fingerprint pane is a THIRD child of the mount, a sibling of the
     // headers section — never inside the official body. That is what lets the
     // tab pass treat the two as separate panes while the bar and both stay

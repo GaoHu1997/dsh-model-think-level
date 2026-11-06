@@ -2808,8 +2808,8 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-keys-row.is-off .bre-keys-mask { opacity: 0.45; }
 
 /* With an alias the alias is the row's name and the masked key follows it as a
-   quiet code pill; without one the masked key is the name and takes the row's
-   measure, so a key is always readable as itself. */
+   quiet code pill; without one the masked key is the name. Neither preview grows
+   past its text: copy must follow the mask, not the row's leftover whitespace. */
 .bre-keys-alias {
   flex: 0 1 auto;
   min-width: 0;
@@ -2836,7 +2836,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 
 .bre-keys-mask-plain {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   padding: 0;
   background: transparent;
   color: var(--dsw-alias-label-primary, #0f1115);
@@ -2844,13 +2844,9 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   font-size: 12px;
 }
 
-/* The copy affordance at the head of a row, right after the switch. Always on
-   the row: a saved value is write-only everywhere else, so this glyph is the
-   one way it can leave the store — hiding it until hover would hide the row's
-   own reason to exist. It leads the row instead of trailing the preview because
-   the hover tray grows in from the right and would otherwise shove the glyph
-   sideways the moment the pointer reaches it. It borrows the preview's quiet
-   tone and answers with a tick once the clipboard has the text. */
+/* The always-visible copy affordance follows the masked preview in the value
+   group. Its fixed hit area survives truncation, and it answers with a tick only
+   once the clipboard has the text. */
 .bre-keys-copy {
   flex: 0 0 auto;
   display: inline-flex;
@@ -2858,7 +2854,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   justify-content: center;
   width: 20px;
   height: 20px;
-  margin-right: -2px;
+  margin-left: -2px;
   padding: 0;
   border: 0;
   border-radius: 4px;
@@ -2885,14 +2881,9 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   color: var(--dsw-alias-state-success-primary, #18a058);
 }
 
-/* The row's three actions, revealed on hover or keyboard focus rather than
-   removed, so the row keeps its width and nothing shifts under the pointer.
-   Revealing is opacity alone; a pointer that cannot hover simply always sees
-   them, because a hidden action there would be an unreachable one. The model
-   scope rides on its own button here (its label is the count), so there is no
-   separate summary text beside the key any more. The tray parks at the right
-   edge: no status word is painted on a row any more (状态都移除——东西多了，
-   别名被省略), so the right edge is the tray's alone. */
+/* The action tray parks at the right edge. The visual refinement below keeps
+   protocol and scope visible, and removes hover-only verbs from the resting
+   layout rather than reserving their widths with opacity. */
 .bre-keys-actions {
   display: inline-flex;
   flex: 0 0 auto;
@@ -3058,12 +3049,21 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   position: relative;
   display: inline-flex;
   align-items: center;
+  /* The tray is one line now, so this label is where a narrow row gives: it
+     truncates instead of pushing the verbs past the row's right edge. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--dsw-alias-label-secondary, #61666b);
 }
 
 .bre-keys-protocol {
   display: inline-flex;
   align-items: center;
+  /* Follows the wrap's truncation rather than forcing it open. */
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
   gap: 2px;
   margin: 0;
   padding: 2px 6px;
@@ -3646,6 +3646,10 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 .bre-keys-list > li + li { border-top: 1px solid var(--bre-line-2); }
 
 .bre-keys-row {
+  /* One line, always: the preview gives way (it truncates) so the actions stay
+     on the same baseline. A row that wrapped would change height under the
+     pointer, and the copy glyph would move with it. */
+  flex-wrap: nowrap;
   gap: 8px;
   min-height: 40px;
   padding: 0 10px;
@@ -3654,6 +3658,18 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 }
 
 .bre-keys-row:hover { background: var(--bre-hover); }
+
+/* Alias, masked preview and copy share one compact group. The text can truncate
+   in a narrow row, but copy keeps its hit area. 28px is the enable switch's
+   20px plus the row's 8px gap. */
+.bre-keys-value {
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: calc(100% - 28px);
+}
 
 /* The enable check: a ring that fills. Filled is accent with a white tick, empty
    is a grey ring with nothing in it — the two readings of a checkbox, drawn at
@@ -3729,7 +3745,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   justify-content: center;
   width: 20px;
   height: 20px;
-  margin-right: -2px;
+  margin-left: -2px;
   padding: 0;
   border: none;
   border-radius: var(--bre-r-xs);
@@ -3758,30 +3774,43 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 
 /* The row's tray: the protocol and the model scope are STATE and stay on the
    row; the verbs appear on hover. The split is made here rather than in the
-   markup — the tray stays mounted and only the VERBS inside it are taken out of
-   the line, picked out by :not(.bre-keys-scope): the scope is a <button> too,
-   but its label is a count, not an action.
-   User item 2: they used to be kept in the line and painted away with opacity,
-   to stop the row shifting under the pointer. On a row with no alias that left
-   the two things that ARE always visible — the protocol pill and the scope
-   count — held apart by the width of three invisible buttons, so a resting list
-   read as scattered words. A verb that is not showing now takes no room: the
-   state stays together at the row's right edge, and the three actions open in
-   place on hover. The row keeps its own width either way (it is the list's
-   column), so nothing outside the row moves. */
+   markup — the tray stays mounted and only the VERBS inside it are hidden,
+   picked out by :not(.bre-keys-scope): the scope is a <button> too, but its
+   label is a count, not an action.
+   The verbs HOLD their width at rest and only their ink appears: take them out
+   of the line (display, or a bare opacity on a layout they no longer occupy)
+   and the tray shrinks under the pointer, shoving the protocol pill and the
+   scope count sideways the instant the pointer arrives — the click lands on a
+   different word than the one that was aimed at (user bug 3). "order: 1" keeps
+   the reserved seat at the TAIL of the tray, after the protocol and scope, so
+   nothing at rest sits apart: the protocol and scope keep their exact places
+   and the three verbs fade in to their right. "pointer-events: none" keeps the
+   invisible seat unclickable; the buttons stay in the tab order, so focusing the
+   protocol reveals them as well.
+   The row stays on one line — a second line would push its height under the
+   pointer — and the preview is what gives way if a narrow row runs out of room. */
 .bre-keys-actions {
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  justify-content: flex-end;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
   opacity: 1;
   pointer-events: auto;
 }
 
 .bre-keys-actions .bre-link-button:not(.bre-keys-scope) {
-  display: none;
+  order: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--bre-t) var(--bre-ease);
 }
 
 .bre-keys-row:hover .bre-keys-actions .bre-link-button:not(.bre-keys-scope),
 .bre-keys-row:focus-within .bre-keys-actions .bre-link-button:not(.bre-keys-scope) {
-  display: inline-flex;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 /* A row waiting on "confirm remove / cancel" must never hide its own question. */
@@ -3793,7 +3822,6 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 
 @media (hover: none) {
   .bre-keys-actions .bre-link-button:not(.bre-keys-scope) {
-    display: inline-flex;
     opacity: 1;
     pointer-events: auto;
   }
@@ -4823,6 +4851,32 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   color: var(--bre-ink-3);
   white-space: pre-line;
   overflow-wrap: anywhere;
+}
+
+/* The advanced pane's disguise switch, the pane's SECOND section. It is not a
+   card of its own: it renders inside the header section's container, under the
+   header table and above the pane's single commit row, and the hairline here is
+   the only thing that separates the two sections — the same one-item border the
+   header section draws at its own top, so the pane reads as one form with two
+   parts rather than two stacked cards. */
+.bre-camouflage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--dsw-alias-border-l2, #0000001a);
+}
+.bre-camouflage-options {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.bre-camouflage-option { flex: 0 0 auto; }
+.bre-camouflage-option:disabled { opacity: 0.6; cursor: default; }
+.bre-camouflage-option[data-active='1'] {
+  border-color: var(--dsw-alias-state-success-primary, #00a870);
+  color: var(--dsw-alias-state-success-primary, #00a870);
 }
 
 `

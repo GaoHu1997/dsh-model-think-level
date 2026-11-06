@@ -138,6 +138,12 @@ describe('ProviderCardSlot', () => {
       // The editor really is rendered (only hidden), so opening the card needs
       // no remount and no second read.
       expect(row.querySelector('.bre-headers')).not.toBeNull()
+      // The disguise switch is the advanced pane's SECOND section, and it renders
+      // through the header editor's `extras` seat — inside that section, above
+      // the pane's one commit row. It is part of the EDIT state, so a collapsed
+      // card shows neither it nor a stray sibling block of its own; the shape is
+      // asserted where the pane is actually opened (headers-editor.spec).
+      expect(row.querySelector('.bre-headers > .bre-camouflage')).toBeNull()
     } finally {
       await unmount()
     }

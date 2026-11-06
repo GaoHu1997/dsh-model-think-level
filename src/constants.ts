@@ -175,6 +175,22 @@ export const AUTOFILL_MARKER = 'reasoningEffortsAutofilled'
 export const DEFAULT_EFFORT_FIELD = 'defaultEffort'
 
 /**
+ * Same-origin host route owning the request-camouflage document: `GET` answers
+ * every route's selected client identity, `POST` saves one route's choice.
+ * Backing file: `<DSH_HOME>/dsh-model-think-level/camouflage.json` (see
+ * {@link CAMOUFLAGE_FILE}).
+ *
+ * The choice is plugin-owned rather than a pi-ai profile field because the
+ * official add-provider card writes the WHOLE profile, which would drop a key
+ * its schema does not know — and because a preset expands into several wire
+ * headers the user's own `headers` dictionary must not have to carry.
+ */
+export const CAMOUFLAGE_PATH = '/dsh-model-think-level/camouflage'
+
+/** File name of the camouflage document inside the plugin's home dir. */
+export const CAMOUFLAGE_FILE = 'camouflage.json'
+
+/**
  * Same-origin host route owning the image-generation config surface: `GET`
  * answers the derived image-model list merged with the stored overrides,
  * `POST` saves default model / default params / output dir / per-model rows.
