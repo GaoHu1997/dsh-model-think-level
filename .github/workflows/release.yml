@@ -7,10 +7,11 @@
 # preflight distinguishes a rejected credential from a missing package, so a
 # 404 after auth is never misread as a permission problem.
 #
-# When a body file exists for the tag (.github/releases/<tag>.md) it becomes
-# the release notes verbatim; otherwise GitHub's generated notes apply. That
-# body file is a LOCAL draft: .gitignore excludes .github/releases/, and it
-# stays excluded -- the workflow's fallback makes force-adding pointless.
+# The release body is committed, not local: .github/releases/<tag>.md is
+# checked out with the tag and becomes the release notes verbatim. A tag
+# without that file fails before npm is touched, because the plugin market
+# renders this body verbatim and generated notes on a rebase-merged history
+# are a single compare link.
 name: release
 
 on:
@@ -57,6 +58,31 @@ jobs:
             || { echo "::error::NPM_TOKEN was rejected by npm: $(cat /tmp/npm-user)"; exit 1; }
           echo "Authenticated on npm as: $(cat /tmp/npm-user)"
           rm -f "$NPMRC"
+      # The plugin market renders the GitHub Release body verbatim, so a tag
+      # without a committed body would ship a one-line compare link to users.
+      # This runs before the publish: a thin body fails here, npm stays clean,
+      # and re-pushing the tag after the fix is all it takes.
+      - name: Verify release notes
+        run: |
+          set -euo pipefail
+          notes=".github/releases/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::$notes is missing — every tag needs a committed release body (see AGENTS.md)"
+            exit 1
+          fi
+          bytes="$(wc -c < "$notes" | tr -d ' ')"
+          lines="$(grep -c . "$notes" || true)"
+          sections="$(grep -c '^## ' "$notes" || true)"
+          echo "$notes: ${bytes} bytes, ${lines} non-empty lines, ${sections} sections"
+          if [ "$bytes" -lt 300 ] || [ "$lines" -lt 8 ] || [ "$sections" -lt 1 ]; then
+            echo "::error::$notes is too thin — need >=300 bytes, >=8 non-empty lines and >=1 '## ' section"
+            exit 1
+          fi
+          if ! grep -q 'Full Changelog' "$notes"; then
+            echo "::error::$notes has no '**Full Changelog**' line"
+            exit 1
+          fi
+
       - name: Publish to npm
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -79,12 +105,11 @@ jobs:
           BODY=".github/releases/$GITHUB_REF_NAME.md"
           # Idempotence: a tag can be created out of band together with its
           # release (gh release create makes its own tag), which used to trip
-          # this step with HTTP 422 "tag_name already exists". When the
-          # release already exists, leave its notes and assets untouched.
+          # this step with HTTP 422 "tag_name already exists". Re-running now
+          # re-applies the committed body so stale notes cannot survive.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; leaving its notes and assets untouched"
-          elif [ -f "$BODY" ]; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$BODY"
+            # A re-run must not leave stale notes behind.
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$BODY"
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$BODY"
           fi

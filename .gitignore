@@ -42,8 +42,8 @@ research/
 .mnemon/
 .workbuddy/
 
-# Localized release notes are not released with the package: .github/releases/ never ships
-.github/releases/
+# Release notes are part of the repository: the workflow reads
+# .github/releases/<tag>.md at tag time and the market renders it verbatim.
 
 # Local planning/spec workspace of the superpowers skill — never committed.
 docs/superpowers/

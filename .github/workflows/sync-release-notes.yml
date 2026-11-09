@@ -1,0 +1,62 @@
+name: Sync release notes
+
+# The plugin market renders the GitHub Release body verbatim. A body generated
+# by GitHub (or edited by hand once) drifts from the repository, and on a repo
+# that pushes straight to main it is a single compare link. This re-applies
+# .github/releases/<tag>.md to a release that is already published, without
+# touching the tag, the npm version or the attached tarballs.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to refresh (empty = latest release)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the tag and check its body
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="$(gh release view --json tagName -q .tagName)"
+          fi
+          notes=".github/releases/${tag}.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::$notes is missing — commit the body first (see AGENTS.md)"
+            exit 1
+          fi
+          bytes="$(wc -c < "$notes" | tr -d ' ')"
+          lines="$(grep -c . "$notes" || true)"
+          sections="$(grep -c '^## ' "$notes" || true)"
+          echo "$notes: ${bytes} bytes, ${lines} non-empty lines, ${sections} sections"
+          if [ "$bytes" -lt 300 ] || [ "$lines" -lt 8 ] || [ "$sections" -lt 1 ]; then
+            echo "::error::$notes is too thin — need >=300 bytes, >=8 non-empty lines and >=1 '## ' section"
+            exit 1
+          fi
+          if ! grep -q 'Full Changelog' "$notes"; then
+            echo "::error::$notes has no '**Full Changelog**' line"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "notes=${notes}" >> "$GITHUB_OUTPUT"
+
+      - name: Apply the committed body
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.notes.outputs.tag }}"
+          gh release edit "$tag" --notes-file "${{ steps.notes.outputs.notes }}"
+          gh release view "$tag" --json url,isDraft,body -q '"Release \(.url) draft=\(.isDraft) body=\(.body|length) bytes"'
