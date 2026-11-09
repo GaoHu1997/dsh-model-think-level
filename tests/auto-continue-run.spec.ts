@@ -29,13 +29,16 @@ interface PromptCall {
   readonly mode: string
 }
 
+type PromptAnswer = { ok: true } | { ok: false; error: { code: string; message: string } }
+
 /** One fake session binding: snapshot, window, listeners, prompt record. */
 function makeBinding(sessionId: string) {
   const listeners = new Set<() => void>()
   const windowListeners = new Set<() => void>()
   const entries: { type: string; event?: DurableEventLike }[] = []
   const prompts: PromptCall[] = []
-  let promptAnswer: { ok: true } | { ok: false; error: { code: string; message: string } } = { ok: true }
+  let promptAnswer: PromptAnswer = { ok: true }
+  let deferredResponse: Promise<PromptAnswer> | undefined
   const snap = { running: false, pendingSubmissions: [] as unknown[], openState: 'open' }
   const binding = {
     sessionId,
@@ -44,7 +47,9 @@ function makeBinding(sessionId: string) {
       subscribe: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } },
       prompt: async (content: PromptCall['content'], mode: 'queue' | 'steer') => {
         prompts.push({ content: [...content], mode })
-        return promptAnswer
+        const response = deferredResponse
+        deferredResponse = undefined
+        return response ?? promptAnswer
       },
     },
     eventSource: {
@@ -56,10 +61,10 @@ function makeBinding(sessionId: string) {
       entries.push({ type: 'event', event: event(type, seq, data) })
       for (const fn of [...windowListeners]) fn()
     },
-    /** Host-side helper: flip the running bit and publish. */
-    setRunning(running: boolean): void {
+    /** Host-side helper: flip running, optionally coalescing away its notification. */
+    setRunning(running: boolean, publish = true): void {
       snap.running = running
-      for (const fn of [...listeners]) fn()
+      if (publish) for (const fn of [...listeners]) fn()
     },
     setPending(pending: unknown[]): void {
       snap.pendingSubmissions = pending
@@ -68,6 +73,12 @@ function makeBinding(sessionId: string) {
     setOpenState(openState: string): void {
       snap.openState = openState
       for (const fn of [...listeners]) fn()
+    },
+    deferNextPrompt(): { resolve: (answer: PromptAnswer) => void; reject: (error: Error) => void } {
+      let resolve!: (answer: PromptAnswer) => void
+      let reject!: (error: Error) => void
+      deferredResponse = new Promise<PromptAnswer>((accept, fail) => { resolve = accept; reject = fail })
+      return { resolve, reject }
     },
     refuseNextPrompt(): void {
       promptAnswer = { ok: false, error: { code: 'gateway/x', message: 'transport dead' } }
@@ -633,6 +644,158 @@ describe('auto-continue controller face', () => {
     vi.useFakeTimers()
     setAutoContinueEnabled(true)
     setAutoContinueConfig(DEFAULT_AUTO_CONTINUE_CONFIG)
+  })
+
+  async function delayedContinue() {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('delayed')
+    harness.bindings.set('delayed', binding)
+    harness.setCurrent('delayed')
+    binding.append('user/message', 1, { content: [{ type: 'text', text: '长任务' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    const response = binding.deferNextPrompt()
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(binding.prompts).toHaveLength(1)
+    return { harness, binding, response }
+  }
+
+  it('marks the automatic send in flight before its acknowledgement arrives', async () => {
+    const { harness, response } = await delayedContinue()
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 1, nextSendAt: 0 })
+    response.resolve({ ok: true })
+    await vi.advanceTimersByTimeAsync(10)
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 1 })
+  })
+
+  it.each(['completed', 'aborted', 'interrupted', 'blocked'])('does not revive %s after a late successful prompt acknowledgement', async (kind) => {
+    const { harness, binding, response } = await delayedContinue()
+    binding.setRunning(true)
+    binding.append('turn/end', 3, { turn: 2, reason: { kind } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0 })
+    response.resolve({ ok: true })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0, nextSendAt: 0 })
+    expect(binding.prompts).toHaveLength(1)
+  })
+
+  it.each(['refused', 'rejected'])('does not count a late %s acknowledgement against a completed chain', async (outcome) => {
+    const { harness, binding, response } = await delayedContinue()
+    binding.setRunning(true)
+    binding.append('turn/end', 3, { turn: 2, reason: { kind: 'completed' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(1_000)
+    if (outcome === 'refused') response.resolve({ ok: false, error: { code: 'TRANSPORT', message: 'late refusal' } })
+    else response.reject(new Error('late transport error'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0, nextSendAt: 0 })
+    expect(binding.prompts).toHaveLength(1)
+  })
+
+  it('keeps a user-requested stop intact when an in-flight acknowledgement arrives', async () => {
+    const { harness, binding, response } = await delayedContinue()
+    harness.runner.stop()
+    response.resolve({ ok: true })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', muted: true, consecutive: 0, nextSendAt: 0 })
+    expect(binding.prompts).toHaveLength(1)
+  })
+
+  it('clears a scheduled continuation as soon as completed lands, before running catches up', async () => {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('settled-before-running')
+    harness.bindings.set(binding.sessionId, binding)
+    harness.setCurrent(binding.sessionId)
+    binding.append('user/message', 1, { content: [{ type: 'text', text: '长任务' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status().phase).toBe('waiting')
+    // The snapshot is already running, but its notification is coalesced away.
+    // No turn/start arrives to cancel the wait: terminal settlement must do it.
+    binding.setRunning(true, false)
+    binding.append('assistant/message', 3, { message: { content: [{ type: 'text', text: '已完成' }] } })
+    binding.append('turn/end', 4, { turn: 2, reason: { kind: 'completed' } })
+    expect(binding.session.getSnapshot().running).toBe(true)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0, nextSendAt: 0 })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it('does not resurrect a completed wait when retry settings change', async () => {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('settled-settings')
+    harness.bindings.set(binding.sessionId, binding)
+    harness.setCurrent(binding.sessionId)
+    binding.append('user/message', 1, { content: [{ type: 'text', text: '长任务' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status().phase).toBe('waiting')
+    // A fast turn's running=true frame was coalesced away.
+    binding.append('assistant/message', 3, { message: { content: [{ type: 'text', text: '已完成' }] } })
+    binding.append('turn/end', 4, { turn: 2, reason: { kind: 'completed' } })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0 })
+    setAutoContinueConfig({ waitSeconds: 10 })
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', nextSendAt: 0 })
+    harness.runner.resumeNow()
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it.each(['successful', 'refused', 'rejected'])('keeps the retry cap intact after a late %s acknowledgement', async (outcome) => {
+    setAutoContinueConfig({ maxRetries: 1 })
+    const { harness, binding, response } = await delayedContinue()
+    binding.append('turn/end', 3, { turn: 2, reason: { kind: 'max-tokens' } })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status()).toMatchObject({ phase: 'exhausted', consecutive: 1, nextSendAt: 0 })
+    if (outcome === 'successful') response.resolve({ ok: true })
+    else if (outcome === 'refused') response.resolve({ ok: false, error: { code: 'TRANSPORT', message: 'late refusal' } })
+    else response.reject(new Error('late transport error'))
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(harness.runner.status()).toMatchObject({ phase: 'exhausted', consecutive: 1, nextSendAt: 0 })
+    expect(binding.prompts).toHaveLength(1)
+  })
+
+  it('preserves a newer retry when an older prompt is refused late', async () => {
+    const { harness, binding, response } = await delayedContinue()
+    binding.append('turn/end', 3, { turn: 2, reason: { kind: 'max-tokens' } })
+    await vi.advanceTimersByTimeAsync(500)
+    const waiting = harness.runner.status()
+    expect(waiting).toMatchObject({ phase: 'waiting', consecutive: 1 })
+    response.resolve({ ok: false, error: { code: 'TRANSPORT', message: 'old refusal' } })
+    await vi.advanceTimersByTimeAsync(10)
+    expect(harness.runner.status()).toMatchObject({ phase: 'waiting', consecutive: 1, nextSendAt: waiting.nextSendAt })
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(binding.prompts).toHaveLength(2)
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 2 })
+  })
+
+  it.each(['manual intent', 'disabled', 'reset', 'detached'])('ignores an in-flight reply after %s', async (action) => {
+    const { harness, binding, response } = await delayedContinue()
+    if (action === 'manual intent') binding.append('user/message', 3, { content: [{ type: 'text', text: '不要继续了' }] })
+    else if (action === 'disabled') setAutoContinueEnabled(false)
+    else if (action === 'reset') harness.runner.reset()
+    else {
+      harness.setCurrent(undefined)
+      await vi.advanceTimersByTimeAsync(1_100)
+    }
+    response.resolve({ ok: true })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: action === 'disabled' ? 1 : 0, nextSendAt: 0 })
+    expect(binding.prompts).toHaveLength(1)
   })
 
   it('reports idle → waiting → sent → idle and publishes each change', async () => {

@@ -110,11 +110,31 @@ describe('degradeForHistory', () => {
       encrypted_content: 'enc_1',
       summary: [],
     })
-    expect(JSON.parse(String(blocks[1]?.['textSignature']))).toEqual({ phase: 'final_answer' })
+    // The text signature is removed, not reduced to `{phase}`. pi-ai would
+    // otherwise send that JSON as the item id.
+    expect(Object.hasOwn(blocks[1] ?? {}, 'textSignature')).toBe(false)
+    expect(blocks[1]?.['text']).toBe('ok')
     expect(blocks[2]?.['id']).toBe('call_1')
     // The visible thinking text and the call name survive.
     expect(blocks[0]?.['thinking']).toBe('because')
     expect(blocks[2]?.['name']).toBe('run')
+  })
+
+  it('drops a v1 commentary signature instead of replaying it as the item id', () => {
+    const signature = JSON.stringify({
+      v: 1,
+      id: 'msg_0a94ca0d243a15dc016af15c57f6288196b87386fe405a26af',
+      phase: 'commentary',
+    })
+    const degraded = degradeForHistory({
+      messages: [{
+        role: 'assistant',
+        content: [{ type: 'text', text: 'thinking aloud', textSignature: signature }],
+      }],
+    }, 'portable_ids')
+    const blocks = ((degraded?.['messages'] as Record<string, unknown>[])[0]?.['content']) as Record<string, unknown>[]
+    expect(Object.hasOwn(blocks[0] ?? {}, 'textSignature')).toBe(false)
+    expect(blocks[0]?.['text']).toBe('thinking aloud')
   })
 
   it('drop_reasoning stops replaying the reasoning item but keeps its local text', () => {
@@ -124,7 +144,8 @@ describe('degradeForHistory', () => {
     expect(Object.hasOwn(blocks[0] ?? {}, 'thinkingSignature')).toBe(false)
     expect(blocks[0]?.['thinking']).toBe('because')
     // The escalation also applies the portable-id stage.
-    expect(JSON.parse(String(blocks[1]?.['textSignature']))).toEqual({ phase: 'final_answer' })
+    expect(Object.hasOwn(blocks[1] ?? {}, 'textSignature')).toBe(false)
+    expect(blocks[1]?.['text']).toBe('ok')
     expect(blocks[2]?.['id']).toBe('call_1')
   })
 

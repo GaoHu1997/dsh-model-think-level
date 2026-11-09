@@ -29,17 +29,39 @@ import type { AutoContinueRunner } from './injection/auto-continue-run.js'
 
 type Translate = (key: string, params?: Record<string, unknown>) => string
 
-/** The host tags every composer stat pill with this attribute. */
+/** The composer dock: the row that carries the pills and the context meter. */
+const DOCK = '[data-composer-dock]'
+/** 0.1 hosts wrap every pill in one element carrying this attribute. */
+const STAT_LINE = '[data-composer-stats]'
+/** 0.2 hosts tag each pill individually instead. */
 const STAT_PILL = '[data-composer-stat]'
 /** Marks the element this module owns. */
 const SLOT_ATTR = 'data-bre-autocontinue'
 
 /**
- * The stat line: the deepest element that still contains every visible pill.
- * Widen from the first pill's parent until it covers them all, so a nesting
- * change upstream cannot pin the chip to half the row.
+ * The row the chip belongs to.
+ *
+ * Hosts divested the stat line of a single wrapper: as of 0.2 the pills are
+ * independent slot entries and only each pill's own anchor keeps
+ * `data-composer-stat`. So the shared wrapper is gone and the pills' nearest
+ * common ancestor is the slot container — appending there would bury the chip
+ * between the pills and the context meter. The dock (`data-composer-dock`) is
+ * the one element that still spans the whole row, and it is also the row the
+ * chip is designed for: last child, right of the context meter.
+ *
+ * The older shapes stay as fallbacks so a downgrade keeps working.
  */
-function statsLine(): HTMLElement | undefined {
+function anchorRow(): HTMLElement | undefined {
+  // Several composer docks can exist at once (a subagent pane, a split view);
+  // the user is looking at the last visible one, which is the main composer.
+  const docks = Array.from(document.querySelectorAll<HTMLElement>(DOCK))
+    .filter(dock => dock.isConnected && dock.getClientRects().length > 0)
+  const dock = docks.at(-1)
+  if (dock !== undefined) return dock
+  const line = document.querySelector<HTMLElement>(STAT_LINE)
+  if (line !== null && line.isConnected && line.getClientRects().length > 0) return line
+  // Last resort: widen from the first visible pill until it covers them all,
+  // so a nesting change upstream cannot pin the chip to half the row.
   const pills = Array.from(document.querySelectorAll<HTMLElement>(STAT_PILL))
     .filter(pill => pill.isConnected && pill.getClientRects().length > 0)
   const first = pills[0]
@@ -142,7 +164,7 @@ export function mountAutoContinueController(deps: AutoContinueControllerDeps): (
   }
 
   const ensure = (): void => {
-    const line = statsLine()
+    const line = anchorRow()
     if (line === undefined) { detach(); return }
     if (host !== undefined && host.parentElement === line && host.isConnected) return
     detach()

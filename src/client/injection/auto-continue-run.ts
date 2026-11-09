@@ -42,6 +42,7 @@ import {
 import {
   judgeTurnTail,
   type DurableEventLike,
+  type TurnEndClass,
 } from '../auto-continue-rules.js'
 import { currentSessionId, type SessionsLike, type UiSessionLike } from './session-directory.js'
 
@@ -183,6 +184,8 @@ interface Attached {
   consecutive: number
   /** What the controller shows: the chain's phase on this attachment. */
   phase: 'idle' | 'waiting' | 'sent' | 'exhausted'
+  /** Invalidates prompt acknowledgements after this chain is settled or superseded. */
+  sendEpoch: number
   /** Epoch ms the armed reply fires at; 0 when none. */
   nextSendAt: number
   /** The interruption class that armed the chain (tooltip only). */
@@ -276,8 +279,22 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     return statusCache
   }
 
-  /** Back to invisible: the chip only exists while a chain is running. */
+  /** Clear the scheduled send without publishing an intermediate phase. */
+  const clearPendingSend = (state: Attached): void => {
+    if (state.sendTimer !== undefined) {
+      clearTimeout(state.sendTimer)
+      timers.delete(state.sendTimer)
+      state.sendTimer = undefined
+    }
+    state.pendingSendTurnEndSeq = undefined
+    state.pendingSendScheduledAt = 0
+    state.pendingRetryAfterMs = undefined
+  }
+
+  /** Back to invisible; neither a timer nor a late acknowledgement may revive it. */
   const settleChain = (state: Attached): void => {
+    clearPendingSend(state)
+    state.sendEpoch += 1
     state.phase = 'idle'
     state.nextSendAt = 0
     state.detail = ''
@@ -392,12 +409,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
 
   const cancelPendingSend = (state: Attached): void => {
     const armed = state.sendTimer !== undefined || state.pendingSendTurnEndSeq !== undefined
-    if (state.sendTimer !== undefined) {
-      clearTimeout(state.sendTimer)
-      timers.delete(state.sendTimer)
-      state.sendTimer = undefined
-    }
-    state.pendingSendTurnEndSeq = undefined
+    clearPendingSend(state)
     if (!armed) return
     state.nextSendAt = 0
     // Only a cancelled WAIT closes the chain; a 'sent' chain keeps showing
@@ -407,6 +419,8 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
 
   /** Recompute an already-armed wait from its original start, not from the edit. */
   const scheduleSend = (state: Attached): void => {
+    // A newer wait owns the chain now; an older prompt reply must not overwrite it.
+    state.sendEpoch += 1
     if (state.sendTimer !== undefined) {
       clearTimeout(state.sendTimer)
       timers.delete(state.sendTimer)
@@ -471,22 +485,6 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   }
 
   /**
-   * Arm the evaluation loop when a NEW durable `turn/end` is visible and the
-   * session already reads as idle. Reached from BOTH triggers:
-   *
-   *   - the event-window subscription (synchronous, per append): the durable
-   *     settlement itself is the authoritative "a turn ended" signal;
-   *   - the snapshot's running edge.
-   *
-   * Two triggers because neither alone is reliable. The snapshot notifier
-   * COALESCES flushes into one microtask, so a turn that starts and ends
-   * within one flush never shows the watcher a true→false edge; and the
-   * settlement can land while the running bit still reads true (the bit rides
-   * a separate wire frame), where the event alone must not arm yet. The event
-   * trigger fires only when the snapshot already reads idle; the edge trigger
-   * covers the settlement-first order.
-   */
-  /**
    * Flip the attachment to history-ready the first time the session's window
    * IS the truth (`open`). Everything the initial page carried becomes
    * baseline at that moment, except one unanswered failure inside the recovery
@@ -504,15 +502,44 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     )
   }
 
+  /** Terminal verdicts clear waits even if the running snapshot is a frame behind. */
+  const settleVerdict = (state: Attached, verdict: Exclude<TurnEndClass, { kind: 'continue' }>): void => {
+    if (verdict.kind === 'settled') {
+      state.consecutive = 0
+      settleChain(state)
+    } else {
+      cancelPendingSend(state)
+      // A stood-down chain remains visible until reset, as before.
+      if (state.phase !== 'exhausted') settleChain(state)
+    }
+  }
+
+  /**
+   * Observe NEW durable endings from the event window as well as snapshot
+   * changes: a short turn's running edge can be coalesced away. Terminal
+   * endings settle immediately, even if the running frame is still behind;
+   * retryable endings only arm evaluation once the session reads idle.
+   */
   const armForNewTurnEnd = (state: Attached): void => {
     if (!state.historyReady) return
-    const snap = snapshotOf(state.session)
-    if (snap === undefined || snap.running) return
     const events = durableEventsOf(state)
+    const pendingSeq = state.pendingSendTurnEndSeq
+    if (pendingSeq !== undefined && events.some(event => event.seq > pendingSeq
+      && (event.type === 'turn/start' || event.type === 'turn/end'))) {
+      cancelPendingSend(state)
+    }
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index]!
       if (event.type !== 'turn/end') continue
-      if (event.seq > state.lastHandledTurnEndSeq) armEvaluation(state)
+      if (event.seq <= state.lastHandledTurnEndSeq) return
+      const verdict = judgeTurnTail({ turnEnd: event, turnEvents: tailOf(events, index) }, autoContinueConfig().policy)
+      if (verdict.kind !== 'continue') {
+        state.lastHandledTurnEndSeq = event.seq
+        settleVerdict(state, verdict)
+        return
+      }
+      const snap = snapshotOf(state.session)
+      if (snap !== undefined && !snap.running) armEvaluation(state)
       return
     }
   }
@@ -549,22 +576,14 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     scanUserEvents(state)
     if (events.some(event => event.seq > turnEnd.seq && (isIntentMessage(event) || event.type === 'turn/start'))) return
     const verdict = judgeTurnTail({ turnEnd, turnEvents: tailOf(events, turnEndIndex) }, autoContinueConfig().policy)
-    if (verdict.kind === 'settled') {
-      // A completed / aborted / blocked turn is evidence the session is not
-      // stuck: the streak resets even though nothing is sent, and the next
-      // interruption starts over at one.
-      state.consecutive = 0
-      settleChain(state)
-      return
-    }
-    if (verdict.kind === 'refuse') {
-      // Nothing to continue: the chain ends here. A stood-down chain stays
-      // visible until its reset, exactly as the controller's exhausted state.
-      if (state.phase !== 'exhausted') settleChain(state)
+    if (verdict.kind !== 'continue') {
+      settleVerdict(state, verdict)
       return
     }
     const maxRetries = autoContinueConfig().maxRetries
     if (state.consecutive >= maxRetries) {
+      clearPendingSend(state)
+      state.sendEpoch += 1
       console.info(`[dsh-model-think-level] auto-continue: streak cap (${maxRetries}) reached, standing down (${verdict.detail})`)
       state.phase = 'exhausted'
       state.nextSendAt = 0
@@ -583,43 +602,45 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   const send = async (state: Attached, text: string): Promise<void> => {
     if (disposed || attached !== state) return
     scanUserEvents(state)
-    // A newer turn/end took over the attachment since this send was armed:
-    // the older reply would answer a turn that has already moved on.
+    // A newer ending or user intent makes this wait obsolete. Even a refused
+    // fire-time guard must remove the expired countdown, not leave it at zero.
     const armedSeq = state.pendingSendTurnEndSeq
     state.pendingSendTurnEndSeq = undefined
-    if (armedSeq === undefined || armedSeq !== state.lastHandledTurnEndSeq) return
-    if (!autoContinueEnabled() || muted.has(state.sessionId) || state.consecutive >= autoContinueConfig().maxRetries) return
+    const abandonWait = (): void => {
+      if (state.phase === 'waiting') settleChain(state)
+    }
+    if (armedSeq === undefined || armedSeq !== state.lastHandledTurnEndSeq) { abandonWait(); return }
+    if (!autoContinueEnabled() || muted.has(state.sessionId) || state.consecutive >= autoContinueConfig().maxRetries) { abandonWait(); return }
     const snap = snapshotOf(state.session)
-    // Re-checks at fire time: the user may have queued something, the model
-    // may have resumed itself, or the view may have moved on.
-    if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) return
-    if (!stillCurrent(state)) return
+    if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0 || !stillCurrent(state)) { abandonWait(); return }
     const events = durableEventsOf(state)
-    if (events.some(event => event.seq > armedSeq && (isIntentMessage(event) || event.type === 'turn/start' || event.type === 'turn/end'))) return
+    if (events.some(event => event.seq > armedSeq && (isIntentMessage(event) || event.type === 'turn/start' || event.type === 'turn/end'))) { abandonWait(); return }
+    clearPendingSend(state)
+    const epoch = ++state.sendEpoch
     state.lastAutoSentAt = Date.now()
     state.lastAutoSentText = text
+    // Count the attempt before awaiting admission. Durable echoes, terminal
+    // endings and even the next failure can arrive before the RPC response.
+    state.consecutive += 1
+    state.phase = 'sent'
+    state.nextSendAt = 0
+    notifyStatus()
+    const ownsSend = (): boolean => !disposed && attached === state && state.sendEpoch === epoch
+    if (!ownsSend()) return
     try {
       const answer = await state.session.prompt([{ type: 'text', text }], 'queue')
+      if (!ownsSend()) return
       if (answer?.ok !== true) {
-        // A refused prompt counts toward the streak: a transport that just
-        // failed the turn must not be hammered by the continuation either.
-        state.consecutive += 1
+        // Refusal already counts as an attempt, but a late reply belongs to
+        // its old chain and must not mutate a completed or newer one.
         state.lastAutoSentText = undefined
-        state.nextSendAt = 0
         state.phase = state.consecutive >= autoContinueConfig().maxRetries ? 'exhausted' : 'idle'
         notifyStatus()
         console.warn(`[dsh-model-think-level] auto-continue: prompt refused ${describeError(answer)}`)
-        return
       }
-      state.consecutive += 1
-      // The reply is in flight: the chip reports it until the turn ends.
-      state.phase = 'sent'
-      state.nextSendAt = 0
-      notifyStatus()
     } catch (error) {
-      state.consecutive += 1
+      if (!ownsSend()) return
       state.lastAutoSentText = undefined
-      state.nextSendAt = 0
       state.phase = state.consecutive >= autoContinueConfig().maxRetries ? 'exhausted' : 'idle'
       notifyStatus()
       console.warn('[dsh-model-think-level] auto-continue: prompt failed:', error)
@@ -768,6 +789,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
         : 0,
       consecutive: 0,
       phase: 'idle',
+      sendEpoch: 0,
       nextSendAt: 0,
       detail: '',
       pendingSendTurnEndSeq: undefined,

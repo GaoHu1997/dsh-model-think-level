@@ -637,9 +637,14 @@ describe('pi-ai history recovery', () => {
     // The refusal is repaired by replaying this candidate — never by rotating.
     expect(seen).toHaveLength(2)
     expect(seen.map(entry => entry.apiKey)).toEqual(['sk-a', 'sk-a'])
-    // The replay goes out with the ids gone but the content intact.
+    // The replay goes out with the foreign handles gone but the content intact.
+    // The text signature is dropped outright: a `{phase}` leftover would be
+    // replayed as the item id.
     expect(JSON.parse(signaturesOf(seen[1]?.context).thinking)).toEqual({ encrypted_content: 'enc_1' })
-    expect(JSON.parse(signaturesOf(seen[1]?.context).text)).toEqual({ phase: 'final' })
+    const replayMessages = (seen[1]?.context as Record<string, unknown>)['messages'] as Record<string, unknown>[]
+    const replayBlocks = replayMessages[0]?.['content'] as Record<string, unknown>[]
+    expect(Object.hasOwn(replayBlocks[1] ?? {}, 'textSignature')).toBe(false)
+    expect(replayBlocks[1]?.['text']).toBe('ok')
     expect(events.map(event => event['type'])).toEqual(['start', 'start', 'text_delta', 'done'])
     handle.dispose()
   })
@@ -658,7 +663,8 @@ describe('pi-ai history recovery', () => {
     // The reasoning item is no longer replayed, but its local text survives.
     expect(Object.hasOwn(blocks[0] ?? {}, 'thinkingSignature')).toBe(false)
     expect(blocks[0]?.['thinking']).toBe('why')
-    expect(JSON.parse(String(blocks[1]?.['textSignature']))).toEqual({ phase: 'final' })
+    expect(Object.hasOwn(blocks[1] ?? {}, 'textSignature')).toBe(false)
+    expect(blocks[1]?.['text']).toBe('ok')
     // Each refused attempt emitted its `start`; the successful one emitted `done`.
     expect(events.map(event => event['type'])).toEqual(['start', 'start', 'done'])
     handle.dispose()

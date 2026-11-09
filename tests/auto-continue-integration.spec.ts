@@ -68,6 +68,8 @@ interface RealPromptInput {
   content: readonly { type: string; text?: string }[]
 }
 
+type RemotePromptAnswer = { ok: true; value: { accepted: true } } | { ok: false; error: { code: string; message: string } }
+
 let real: { Session: new (sessionId: string, remote: unknown, options?: { address?: unknown }) => RealSession } | undefined
 
 /** Load the real client bundle once per worker; export the internal Session. */
@@ -107,7 +109,8 @@ function loadRealSessionClass(): typeof real extends undefined ? never : NonNull
 interface Harness {
   session: RealSession
   prompts: RealPromptInput[]
-  setPromptAnswer(answer: { ok: true; value: { accepted: true } } | { ok: false; error: { code: string; message: string } }): void
+  setPromptAnswer(answer: RemotePromptAnswer): void
+  deferNextPrompt(): { resolve: (answer: RemotePromptAnswer) => void }
   append(type: string, data: unknown): void
   runner: AutoContinueRunner
   setCurrent(id: string | undefined): void
@@ -116,12 +119,15 @@ interface Harness {
 function makeHarness(sessionId: string, options?: { address?: unknown }): Harness {
   const Session = loadRealSessionClass()
   const prompts: RealPromptInput[] = []
-  let answer: { ok: true; value: { accepted: true } } | { ok: false; error: { code: string; message: string } } = { ok: true, value: { accepted: true } }
+  let answer: RemotePromptAnswer = { ok: true, value: { accepted: true } }
+  let deferredResponse: Promise<RemotePromptAnswer> | undefined
   const remote = {
     session: {
       prompt: async (input: RealPromptInput) => {
         prompts.push(input)
-        return answer
+        const response = deferredResponse
+        deferredResponse = undefined
+        return response ?? answer
       },
     },
     subagents: {},
@@ -133,6 +139,11 @@ function makeHarness(sessionId: string, options?: { address?: unknown }): Harnes
     session,
     prompts,
     setPromptAnswer(next) { answer = next },
+    deferNextPrompt() {
+      let resolve!: (answer: RemotePromptAnswer) => void
+      deferredResponse = new Promise<RemotePromptAnswer>((accept) => { resolve = accept })
+      return { resolve }
+    },
     append(type, data) {
       seq += 1
       session.eventSource.append({ type: 'event', event: { type, seq, time: Date.now(), data } })
@@ -379,6 +390,84 @@ describe('auto-continue against the real session stack', () => {
     expect(harness.prompts).toHaveLength(0)
   })
 
+  it('removes the real controller on completion and ignores a delayed prompt admission reply', async () => {
+    const harness = makeHarness('late-admission')
+    disposer = harness.runner.dispose
+    harness.setCurrent('late-admission')
+    document.body.innerHTML = '<div data-composer-dock><span data-composer-stat="turns">1 轮</span></div>'
+    vi.spyOn(document.querySelector<HTMLElement>('[data-composer-stat]')!, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList)
+    const response = harness.deferNextPrompt()
+    await act(async () => {
+      unmountController = mountAutoContinueController({ runner: harness.runner, t: (key) => key, onSettings: () => {} })
+      harness.append('user/message', userMessage('长任务'))
+      harness.session.handleRunning(true)
+      await vi.advanceTimersByTimeAsync(1_100)
+      openHistory(harness)
+      harness.append('turn/end', { turn: 1, reason: { kind: 'max-tokens' } })
+      harness.session.handleRunning(false)
+      await vi.advanceTimersByTimeAsync(3_000)
+    })
+    expect(harness.prompts).toHaveLength(1)
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 1, nextSendAt: 0 })
+    expect(document.querySelector('.bre-ac-chip-sent')).not.toBeNull()
+    await act(async () => {
+      // Journal frames may settle the resumed turn before admission's RPC reply.
+      harness.append('turn/start', { turn: 2 })
+      harness.append('user/message', userMessage('继续'))
+      harness.session.handleRunning(true)
+      harness.append('assistant/message', assistantMessage('已完成'))
+      harness.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+      harness.session.handleRunning(false)
+      await vi.advanceTimersByTimeAsync(10)
+    })
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0 })
+    expect(document.querySelector('.bre-ac-chip')).toBeNull()
+    await act(async () => {
+      response.resolve({ ok: true, value: { accepted: true } })
+      await vi.advanceTimersByTimeAsync(10_000)
+    })
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0, nextSendAt: 0 })
+    expect(document.querySelector('.bre-ac-chip')).toBeNull()
+    expect(harness.prompts).toHaveLength(1)
+  })
+
+  it('continues the next real cutoff after an older prompt admission reply arrives', async () => {
+    const harness = makeHarness('late-admission-cutoff')
+    disposer = harness.runner.dispose
+    harness.setCurrent('late-admission-cutoff')
+    const response = harness.deferNextPrompt()
+    harness.append('user/message', userMessage('长任务'))
+    harness.session.handleRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    openHistory(harness)
+    harness.append('turn/end', { turn: 1, reason: { kind: 'max-tokens' } })
+    harness.session.handleRunning(false)
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(harness.prompts).toHaveLength(1)
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 1 })
+    // Unlike beginSubmission, the real automatic prompt does not manufacture
+    // a pending composer echo, even while its admission RPC is unresolved.
+    expect(harness.session.getSnapshot().pendingSubmissions).toHaveLength(0)
+    harness.append('turn/start', { turn: 2 })
+    harness.append('user/message', userMessage('继续'))
+    harness.session.handleRunning(true)
+    harness.append('assistant/message', assistantMessage('尚未完成的下一片段'))
+    harness.append('turn/end', { turn: 2, reason: { kind: 'max-tokens' } })
+    harness.session.handleRunning(false)
+    // A short turn can coalesce away its running edge; allow the poll and
+    // evaluation to arm, then follow the actual configurable send deadline.
+    await vi.advanceTimersByTimeAsync(2_000)
+    const waiting = harness.runner.status()
+    expect(waiting).toMatchObject({ phase: 'waiting', consecutive: 1 })
+    expect(harness.session.getSnapshot().pendingSubmissions).toHaveLength(0)
+    response.resolve({ ok: true, value: { accepted: true } })
+    await vi.advanceTimersByTimeAsync(10)
+    expect(harness.runner.status()).toMatchObject({ phase: 'waiting', consecutive: 1, nextSendAt: waiting.nextSendAt })
+    await vi.advanceTimersByTimeAsync(Math.max(0, waiting.nextSendAt - Date.now()) + 1)
+    expect(harness.prompts).toHaveLength(2)
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 2, nextSendAt: 0 })
+  })
+
   it('holds off while a real beginSubmission echo is pending', async () => {
     const harness = makeHarness('sess-1')
     disposer = harness.runner.dispose
@@ -455,5 +544,46 @@ describe('auto-continue against the real session stack', () => {
     harness.setCurrent('sess-2')
     await vi.advanceTimersByTimeAsync(10_000)
     expect(harness.prompts).toHaveLength(0)
+  })
+
+  // The 0.2 composer gives every pill its own slot entry, so no element wraps
+  // them all: widest-common-ancestor search lands on the slot container and the
+  // chip would sit left of the context meter — or vanish with the pills.
+  it('anchors to the composer dock when the pills share no stat line', async () => {
+    const harness = makeHarness('dock-anchor')
+    disposer = harness.runner.dispose
+    harness.setCurrent('dock-anchor')
+    document.body.innerHTML = [
+      '<div data-composer-dock>',
+      '<div class="pill-slot"><span data-composer-stat="activity">2 轮</span></div>',
+      '<span class="meter">2%</span>',
+      '</div>',
+    ].join('')
+    vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList)
+    const response = harness.deferNextPrompt()
+    await act(async () => {
+      unmountController = mountAutoContinueController({ runner: harness.runner, t: (key) => key, onSettings: () => {} })
+      harness.append('user/message', userMessage('长任务'))
+      harness.session.handleRunning(true)
+      await vi.advanceTimersByTimeAsync(1_100)
+      openHistory(harness)
+      harness.append('turn/end', { turn: 1, reason: { kind: 'max-tokens' } })
+      harness.session.handleRunning(false)
+      await vi.advanceTimersByTimeAsync(3_000)
+    })
+    const dock = document.querySelector('[data-composer-dock]')!
+    const seat = (): Element | null | undefined => (
+      Array.from(dock.children).find(child => child.hasAttribute('data-bre-autocontinue'))
+    )
+    expect(seat()).toBeDefined()
+    // Last child: right of the context meter, the row's end.
+    expect(dock.lastElementChild).toBe(seat())
+
+    // Every pill can disappear (activity reports 0 steps, usage has no tokens);
+    // the dock alone must keep the chip anchored.
+    document.querySelector('.pill-slot')!.remove()
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_100) })
+    expect(seat()).toBeDefined()
+    await act(async () => { response.resolve({ ok: true, value: { accepted: true } }) })
   })
 })

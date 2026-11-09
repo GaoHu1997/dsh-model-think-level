@@ -31,9 +31,11 @@
  * the provider demands:
  *
  * 1. `portable_ids` — drop the foreign item handle from every replayable block:
- *    the `id` inside a reasoning signature, the `id` inside a text signature,
- *    and the `itemId` half of a tool call's `callId|itemId`. The server then
- *    treats the item as new instead of resolving a foreign handle.
+ *    the `id` inside a reasoning signature, the whole `textSignature`, and the
+ *    `itemId` half of a tool call's `callId|itemId`. The server then treats the
+ *    item as new instead of resolving a foreign handle. A text signature cannot
+ *    keep its `phase` once the id is gone: pi-ai only reads `{v:1, id, phase?}`,
+ *    and a signature without a string `id` is sent verbatim as the item id.
  * 2. `drop_reasoning` — additionally stop replaying historical reasoning items
  *    altogether (the `thinkingSignature` is removed; the visible thinking text
  *    stays in the local history untouched). Reasoning is the other thing bound
@@ -128,7 +130,7 @@ export function degradeForHistory(context: unknown, stage: HistoryStage): Record
 /**
  * Degrade one content block, following the exact fields pi-ai replays:
  * `thinkingSignature` (a serialized reasoning item), `textSignature`
- * (`{id, phase}`) and the `callId|itemId` pair on tool calls.
+ * (`{v, id, phase?}`) and the `callId|itemId` pair on tool calls.
  */
 function degradeBlock(block: Record<string, unknown>, stage: HistoryStage): Record<string, unknown> | undefined {
   const type = block['type']
@@ -148,8 +150,14 @@ function degradeBlock(block: Record<string, unknown>, stage: HistoryStage): Reco
   if (type === 'text') {
     const signature = block['textSignature']
     if (typeof signature !== 'string') return undefined
-    const stripped = stripSignatureId(signature)
-    return stripped === undefined ? undefined : { ...block, textSignature: stripped }
+    // pi-ai's parseTextSignature returns the signature's id only when `v === 1`
+    // and `id` is a string. Removing `id` and leaving `{"v":1,"phase":"commentary"}`
+    // makes the JSON itself the item id (`__v__1__phase___commentary__`), which
+    // the relay rejects. Drop the field so pi-ai assigns `msg_pi_*`.
+    if (stripSignatureId(signature) === undefined) return undefined
+    const copy = { ...block }
+    delete copy['textSignature']
+    return copy
   }
 
   if (type === 'toolCall') {
