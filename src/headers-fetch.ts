@@ -47,6 +47,7 @@ import {
   type HeaderOverride,
 } from './headers-core.js'
 import { applyCamouflageHeaders, patchCamouflageBody } from './camouflage.js'
+import { isHistoryStateMismatch, reencodeHistoryRefusal } from './history-compat.js'
 import {
   applyKeyToHeaders,
   classifyFailure,
@@ -438,6 +439,32 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       return base(input, { ...init, headers })
     }
 
+    /** Whether the caller walked away; a cancelled request is not a key failure. */
+    const callerAborted = (): boolean =>
+      init?.signal?.aborted === true ||
+      (typeof Request !== 'undefined' && input instanceof Request && input.signal.aborted)
+
+    /**
+     * Send one attempt, and — when this route asked for it — re-encode a
+     * foreign-history refusal so the request seam can recognise it.
+     *
+     * The fetch layer cannot repair the history: what it holds is bytes, and
+     * the history the provider replays lives in the pi-ai message context. What
+     * it CAN do is guarantee that a `400` refusal reaches the stream error with
+     * its sentence intact (a relay may answer with an SSE body, or a shape the
+     * provider SDK folds into an opaque message). The request seam then sees
+     * the same sentence for a `400` that it sees for a `200` stream's
+     * `response.failed`, and drives the one recovery path for both.
+     *
+     * Non-refusals pass through byte-for-byte: an unrelated error keeps its
+     * body, its status and the ordinary error path.
+     */
+    const sendAttempt = async (keyValue: string | undefined): Promise<Response> => {
+      const response = await attempt(keyValue)
+      if (override.historyCompat !== true) return response
+      return (await reencodeHistoryRefusal(response)) ?? response
+    }
+
     // A request the wire seam (headers-pi-ai) already dispatched: it chose the
     // key, the wire and the endpoint, and it owns the failover for them (see
     // WIRE_DISPATCH_HEADER). Strip the marker, send exactly once with the
@@ -448,7 +475,11 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
     // original input/init here would ship the internal marker upstream.
     if (patched.get(WIRE_DISPATCH_HEADER) === '1') {
       patched.delete(WIRE_DISPATCH_HEADER)
-      return attempt(undefined)
+      // Still through `sendAttempt`: a wire-dispatched request is exactly the
+      // shape a foreign history failure arrives on, and it shares the one
+      // recovery path with everything else. The marker only suppresses the key
+      // failover, never the history recovery.
+      return sendAttempt(undefined)
     }
 
     // The ordered keys that may sign this request. Empty when this activation
@@ -510,7 +541,13 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       }
     }
 
-    if (!hasPatch && keyCandidates.length === 0) return base(input, passthroughInit(input, init))
+    // A route that asked for history recovery has to pass through
+    // `sendAttempt` even when it declares no headers and routes no keys: the
+    // recovery is a property of the route, not of the header patch, and this
+    // fast path exists only to avoid rebuilding a request nothing changes.
+    if (!hasPatch && keyCandidates.length === 0 && override.historyCompat !== true) {
+      return base(input, passthroughInit(input, init))
+    }
 
     /**
      * Read a failed attempt's body, bounded: enough to tell "out of quota" and
@@ -544,14 +581,9 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       keyRest.note(restKey, kind, retryAfterMs === undefined ? undefined : { retryAfterMs })
     }
 
-    /** Whether the caller walked away; a cancelled request is not a key failure. */
-    const callerAborted = (): boolean =>
-      init?.signal?.aborted === true ||
-      (typeof Request !== 'undefined' && input instanceof Request && input.signal.aborted)
-
     if (keyCandidates.length <= 1) {
       const solo = keyCandidates[0]
-      const response = await attempt(solo?.value)
+      const response = await sendAttempt(solo?.value)
       if (solo !== undefined) {
         if (response.status < 400) {
           clearRest(keyRest, override.route, solo.ref, model)
@@ -579,7 +611,7 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
       const candidate = keyCandidates[index]
       let response: Response
       try {
-        response = await attempt(candidate.value)
+        response = await sendAttempt(candidate.value)
       } catch (error) {
         // A transport failure (connection refused, DNS, a dropped connection) is
         // this attempt's failure too: the next key may still reach the provider.
@@ -597,6 +629,10 @@ function makeWrapper(base: typeof globalThis.fetch, entries: Map<symbol, Entry>)
         clearRest(keyRest, override.route, candidate.ref, model)
         return response
       }
+      // A history refusal is not a fact about this key: every key reaches the
+      // same relay pool, so rotating would only repeat the same refusal. The
+      // stream seam repairs it (and must keep the degraded replay on this key).
+      if (response.status >= 500 && isHistoryStateMismatch(bodyText)) return response
       const kind = classifyFailure(response.status, bodyText)
       if (kind === 'unserved') unserved += 1
       chargeFailure(candidate, response, kind)

@@ -13,7 +13,7 @@ import { act, createElement, useLayoutEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { Root } from 'react-dom/client'
-import { HeadersEditor, headersFromDraft, type HeadersEditorProps } from '../src/client/HeadersEditor.js'
+import { HeadersEditor, headersFromDraft, sameHeaders, type HeadersEditorProps } from '../src/client/HeadersEditor.js'
 import { teardownSavedNotice } from '../src/client/injection/saved-notice.js'
 import { teardownSettleGuard } from '../src/client/injection/settle-guard.js'
 import { en } from '../src/client/locales.js'
@@ -232,6 +232,19 @@ describe('headersFromDraft', () => {
   })
 })
 
+describe('sameHeaders', () => {
+  it('treats an identical dict as unchanged, whatever the key order', () => {
+    expect(sameHeaders({ a: '1', b: '2' }, { b: '2', a: '1' })).toBe(true)
+    expect(sameHeaders(undefined, {})).toBe(true)
+  })
+
+  it('sees a changed value, a dropped name and an added name', () => {
+    expect(sameHeaders({ a: '1' }, { a: '2' })).toBe(false)
+    expect(sameHeaders({ a: '1' }, {})).toBe(false)
+    expect(sameHeaders({}, { a: '1' })).toBe(false)
+  })
+})
+
 describe('HeadersEditor', () => {
   beforeEach(() => { stubEnvironment(CLEAN_ENVIRONMENT) })
   afterEach(() => {
@@ -425,6 +438,31 @@ describe('HeadersEditor', () => {
     }
   })
 
+  it('skips the settings write when the save leaves the headers as they were', async () => {
+    // The save button also commits the pane's other sections (disguise,
+    // old-topic recovery), so it fires on saves that never touch these headers.
+    // Rewriting an unchanged dict costs the whole pi-ai document, its revision
+    // fence and the list reload behind it -- the wait a one-switch save paid.
+    const api = fakeApi({ headers: { 'x-company': 'acme' } })
+    const onCommitExtras = vi.fn(async () => {})
+    const editor = await renderEditor({ route: 'aliyun', api, t, onCommitExtras })
+    try {
+      await expand(editor.container)
+      await expand(editor.container)
+      await act(async () => { buttonByText(editor.container, en.headersEdit).click() })
+      await act(async () => { buttonByText(editor.container, en.headersSave).click() })
+
+      // The extras half still commits, and the pane reports the save.
+      expect(onCommitExtras).toHaveBeenCalledTimes(1)
+      expect(api.mutate).not.toHaveBeenCalled()
+      expect(editor.container.textContent).toContain(en.headersSaved)
+      // Back to the read view, exactly like a real write.
+      expect(buttonByText(editor.container, en.headersEdit)).toBeDefined()
+    } finally {
+      await editor.unmount()
+    }
+  })
+
   it('adds a row and clears a row before saving', async () => {
     const api = fakeApi({ headers: { 'x-drop': 'me' } })
     const editor = await renderEditor({ route: 'aliyun', api, t })
@@ -477,8 +515,11 @@ describe('HeadersEditor', () => {
       await act(async () => { addedRemove!.click() })
       expect(rowNames()).toEqual(['x-first', 'x-second'])
 
+      // Give the save something to write: an unchanged dict is no longer
+      // rewritten (see sameHeaders), so a no-op save would leave the spy empty.
+      await type(inputsByLabel(editor.container, en.headersValue)[0]!, '1b')
       await act(async () => { buttonByText(editor.container, en.headersSave).click() })
-      expect(writtenHeaders(api.mutate)).toEqual({ 'x-first': '1', 'x-second': '2' })
+      expect(writtenHeaders(api.mutate)).toEqual({ 'x-first': '1b', 'x-second': '2' })
     } finally {
       await editor.unmount()
     }
@@ -531,6 +572,8 @@ describe('HeadersEditor', () => {
     try {
       await expand(editor.container)
       await act(async () => { buttonByText(editor.container, en.headersEdit).click() })
+      // A real change, or the save would skip the very write this test refuses.
+      await type(inputsByLabel(editor.container, en.headersValue)[0]!, '2')
       await act(async () => { buttonByText(editor.container, en.headersSave).click() })
       expect(editor.container.textContent).toContain('nope')
       // Still editing: the draft must not be lost to a refusal.
@@ -626,6 +669,9 @@ describe('HeadersEditor', () => {
     const onDismiss = vi.fn()
     const editor = await renderEditor({ route: 'aliyun', api, t, onDismiss }, { tabbed: 'after-mount' })
     try {
+      // Already in the pane's inline editor: change one value so this save is a
+      // write (an unchanged dict is skipped now).
+      await type(inputsByLabel(editor.container, en.headersValue)[0]!, 'acme-2')
       await act(async () => { buttonByText(editor.container, en.headersSave).click() })
 
       expect(api.mutate).toHaveBeenCalledTimes(1)
@@ -690,6 +736,9 @@ describe('HeadersEditor', () => {
     )
     try {
       expect(onCommitExtras).not.toHaveBeenCalled()
+      // One value changed, so the header write is real and its place in the
+      // order is what the assertion below can see.
+      await type(inputsByLabel(editor.container, en.headersValue)[0]!, 'acme-2')
       await act(async () => { buttonByText(editor.container, en.headersSave).click() })
       // One button, both halves, header dict first.
       expect(order).toEqual(['headers', 'extras'])

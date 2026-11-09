@@ -331,16 +331,53 @@ describe('auto-continue watcher', () => {
     await failTurn(binding, 2, { kind: 'max-tokens' })
     expect(binding.prompts).toHaveLength(1)
   })
-  it('ignores endings that predate the attachment (a page opened into an old failure)', async () => {
+  it('resumes a fresh unanswered failure when an existing session is opened', async () => {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    binding.append('user/message', 1, { id: 'mx', role: 'user', source: 'session', content: [{ type: 'text', text: '旧任务' }] })
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'error', error: { message: '429 rate limited', code: 'RATE_LIMIT' } } })
+    harness.setCurrent('s1')
+    await vi.advanceTimersByTimeAsync(1_100)
+    await vi.advanceTimersByTimeAsync(autoContinueConfig().waitSeconds * 1_000 + 1_000)
+    expect(binding.prompts).toHaveLength(1)
+  })
+
+  it('ignores endings older than the recovery window', async () => {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    binding.append('user/message', 1, { id: 'mx', role: 'user', source: 'session', content: [{ type: 'text', text: '旧任务' }] })
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'error', error: { message: 'died', code: 'TRANSPORT' } } })
+    vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1_000)
+    harness.setCurrent('s1')
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it('recovers a recent failure that ended while the view was on another session', async () => {
     const harness = makeHarness()
     disposer = harness.runner.dispose
     const binding = makeBinding('s1')
     harness.bindings.set('s1', binding)
     harness.setCurrent('s1')
-    binding.append('user/message', 1, { id: 'mx', role: 'user', source: 'session', content: [{ type: 'text', text: '旧任务' }] })
-    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'error', error: { message: 'died', code: 'TRANSPORT' } } })
-    await vi.advanceTimersByTimeAsync(30_000)
+    binding.append('user/message', 1, { id: 'mx', role: 'user', source: 'session', content: [{ type: 'text', text: '写个爬虫' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    // The user switches away; the turn then fails with nobody watching.
+    harness.setCurrent('s2')
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'error', error: { message: '429 rate limited', code: 'RATE_LIMIT' } } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(5_000)
     expect(binding.prompts).toHaveLength(0)
+    // Coming back within the recovery window continues it without a manual nudge.
+    harness.setCurrent('s1')
+    await vi.advanceTimersByTimeAsync(1_100)
+    await vi.advanceTimersByTimeAsync(autoContinueConfig().waitSeconds * 1_000 + 1_000)
+    expect(binding.prompts).toHaveLength(1)
   })
 
   it('never continues completed, aborted or blocked turns', async () => {
@@ -439,6 +476,8 @@ describe('auto-continue watcher', () => {
     // lands: still baseline, never auto-continued.
     binding.append('turn/end', 2, { turn: 1, reason: { kind: 'error', error: { message: 'died', code: 'TRANSPORT' } } })
     binding.setRunning(false)
+    // The page arrived long after that ending: it is history, not live work.
+    vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1_000)
     binding.setOpenState('open')
     await vi.advanceTimersByTimeAsync(10_000)
     expect(binding.prompts).toHaveLength(0)
@@ -539,6 +578,33 @@ describe('auto-continue watcher', () => {
     expect(binding.prompts).toHaveLength(0)
   })
 
+  it.each(['before evaluation', 'during wait', 'before attachment'])('ignores host context %s when continuing an unanswered failure', async (timing) => {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('context-guard')
+    harness.bindings.set('context-guard', binding)
+    binding.append('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text: '长任务' }] })
+    if (timing !== 'before attachment') {
+      harness.setCurrent('context-guard')
+      binding.setRunning(true)
+      await vi.advanceTimersByTimeAsync(1_100)
+    }
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    if (timing === 'during wait') {
+      await vi.advanceTimersByTimeAsync(500)
+      expect(harness.runner.status().phase).toBe('waiting')
+    }
+    binding.append('user/message', 3, {
+      source: { kind: 'time-context', form: 'snapshot' },
+      content: [{ type: 'text', text: 'Time sampled while preparing turn 2, step 1: …' }],
+    })
+    if (timing === 'before attachment') harness.setCurrent('context-guard')
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(binding.prompts).toHaveLength(1)
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 1 })
+  })
+
   it('counts a refused prompt toward the streak', async () => {
     const harness = makeHarness()
     disposer = harness.runner.dispose
@@ -559,5 +625,121 @@ describe('auto-continue watcher', () => {
     expect(binding.prompts).toHaveLength(5)
     await failTurn(binding, seq, { kind: 'max-tokens' })
     expect(binding.prompts).toHaveLength(5)
+  })
+})
+
+describe('auto-continue controller face', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    setAutoContinueEnabled(true)
+    setAutoContinueConfig(DEFAULT_AUTO_CONTINUE_CONFIG)
+  })
+
+  it('reports idle → waiting → sent → idle and publishes each change', async () => {
+    const harness = makeHarness()
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    const phases: string[] = []
+    const stopListening = harness.runner.subscribe(() => { phases.push(harness.runner.status().phase) })
+    disposer = () => { stopListening(); harness.runner.dispose() }
+
+    binding.append('user/message', 1, { id: 'm1', content: [{ type: 'text', text: '长任务' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status()).toMatchObject({ sessionId: 's1', phase: 'idle', consecutive: 0 })
+
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status()).toMatchObject({ phase: 'waiting', consecutive: 0, maxRetries: 5 })
+
+    await vi.advanceTimersByTimeAsync(2_100)
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 1 })
+
+    binding.append('turn/end', 4, { turn: 2, reason: { kind: 'completed' } })
+    binding.setRunning(true)
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0 })
+    expect(phases).toEqual(expect.arrayContaining(['waiting', 'sent', 'idle']))
+  })
+
+  it.each([
+    { kind: 'user' }, { kind: 'schedule' }, { kind: 'goal' },
+    { kind: 'user-question-reply' }, { kind: 'future-intent' }, 'session', undefined,
+  ])('keeps intent guards for source %j even when the text resembles context', async (source) => {
+    const harness = makeHarness()
+    const binding = makeBinding('intent-source')
+    harness.bindings.set('intent-source', binding)
+    harness.setCurrent('intent-source')
+    disposer = harness.runner.dispose
+    binding.append('user/message', 1, { content: [{ type: 'text', text: '长任务' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    await failTurn(binding, 2, { kind: 'max-tokens' })
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 1 })
+    binding.append('user/message', 3, {
+      source, content: [{ type: 'text', text: '[model changed: selected another model]' }],
+    })
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0 })
+  })
+
+  it('stop() hides the chip and mutes this session until the user speaks again', async () => {
+    const harness = makeHarness()
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    disposer = harness.runner.dispose
+
+    binding.append('user/message', 1, { id: 'm1', content: [{ type: 'text', text: '长任务' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status().phase).toBe('waiting')
+
+    harness.runner.stop()
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', muted: true })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(0)
+
+    // A further cut-off while muted stays silent.
+    binding.append('turn/end', 3, { turn: 2, reason: { kind: 'max-tokens' } })
+    binding.setRunning(true)
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(binding.prompts).toHaveLength(0)
+
+    // The user posts in this session: the mute lifts.
+    binding.append('user/message', 5, { id: 'm3', content: [{ type: 'text', text: '再来' }] })
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status().muted).toBe(false)
+  })
+
+  it('resumeNow() sends without waiting out the delay, reset() clears the streak', async () => {
+    const harness = makeHarness()
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    disposer = harness.runner.dispose
+
+    binding.append('user/message', 1, { id: 'm1', content: [{ type: 'text', text: '长任务' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status().phase).toBe('waiting')
+    expect(binding.prompts).toHaveLength(0)
+
+    harness.runner.resumeNow()
+    await vi.advanceTimersByTimeAsync(10)
+    expect(binding.prompts).toHaveLength(1)
+    expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: 1 })
+
+    harness.runner.reset()
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0, muted: false })
   })
 })

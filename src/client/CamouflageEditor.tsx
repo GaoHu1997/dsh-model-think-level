@@ -22,7 +22,7 @@
  * @module dsh-model-think-level/client/CamouflageEditor
  */
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { CAMOUFLAGE_PATH, PLUGIN_ID } from '../constants.js'
 
 /** One identity the host understands. Kept in step with `camouflage.ts`. */
@@ -96,24 +96,29 @@ export interface CamouflageEditorProps {
  * @returns the section.
  */
 export function CamouflageEditor({ t, value, installed, disabled = false, onChange }: CamouflageEditorProps): ReactNode {
+  // One row, not a stack: the title on the left, the three choices on the right.
+  // The paragraph that used to explain the choices above them is still in the
+  // DOM for assistive tech (`aria-describedby`) and in the row's `title` for a
+  // pointer, so the section costs a single line instead of four.
+  const id = useId()
+  const titleId = `${id}-title`
+  const hintId = `${id}-hint`
   return (
-    <div className="bre-camouflage" data-plugin={PLUGIN_ID} data-open="1">
-      <div className="bre-headers-head">
-        <span className="bre-effort-title">{t('camouflageTitle')}</span>
-        {value === undefined ? null : (
-          <span className="bre-headers-count">{t(value === 'codex' ? 'camouflageCodex' : 'camouflageClaude')}</span>
-        )}
-      </div>
-      <p className="bre-effort-note">{t('camouflageHint')}</p>
-      {installed ? null : <p className="bre-effort-note bre-warn">{t('camouflageUnavailable')}</p>}
-      <div className="bre-camouflage-options" role="radiogroup" aria-label={t('camouflageTitle')}>
+    <div className="bre-camouflage" data-plugin={PLUGIN_ID} data-open="1" title={t('camouflageHint')}>
+      <span className="bre-effort-title" id={titleId}>{t('camouflageTitle')}</span>
+      <div
+        className="bre-camouflage-options"
+        role="radiogroup"
+        aria-labelledby={titleId}
+        aria-describedby={hintId}
+      >
         {OPTIONS.map(option => (
           <button
             key={option.value ?? 'off'}
             type="button"
             role="radio"
             aria-checked={value === option.value}
-            className="bre-secondary-button bre-camouflage-option"
+            className="bre-camouflage-option"
             data-active={value === option.value ? '1' : '0'}
             disabled={disabled}
             onClick={() => { onChange(option.value) }}
@@ -122,6 +127,8 @@ export function CamouflageEditor({ t, value, installed, disabled = false, onChan
           </button>
         ))}
       </div>
+      <span className="bre-sr-only" id={hintId}>{t('camouflageHint')}</span>
+      {installed ? null : <p className="bre-camouflage-warn">{t('camouflageUnavailable')}</p>}
     </div>
   )
 }

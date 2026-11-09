@@ -20,6 +20,11 @@ import {
   AUTO_CONTINUE_CONFIG_KEY, DEFAULT_AUTO_CONTINUE_CONFIG, autoContinueConfig,
   setAutoContinueConfig, setAutoContinueEnabled,
 } from '../src/client/auto-continue-pref.js'
+import { DEFAULT_AUTO_CONTINUE_POLICY } from '../src/client/auto-continue-rules.js'
+
+const cfg = (waitSeconds: number, maxRetries: number): unknown => ({
+  waitSeconds, maxRetries, policy: DEFAULT_AUTO_CONTINUE_POLICY,
+})
 
 /** The config the host answers a GET with. */
 const CONFIG_VIEW = {
@@ -528,8 +533,8 @@ describe('ConfigPane', () => {
     let fields = [...card.querySelectorAll<HTMLInputElement>('input[type="number"]')]
     await editNumber(fields[0]!, '12')
     await editNumber(fields[1]!, '3', true)
-    expect(autoContinueConfig()).toEqual({ waitSeconds: 12, maxRetries: 3 })
-    expect(JSON.parse(window.localStorage.getItem(AUTO_CONTINUE_CONFIG_KEY)!)).toEqual({ waitSeconds: 12, maxRetries: 3 })
+    expect(autoContinueConfig()).toEqual(cfg(12, 3))
+    expect(JSON.parse(window.localStorage.getItem(AUTO_CONTINUE_CONFIG_KEY)!)).toEqual(cfg(12, 3))
     expect(card.querySelector('.bre-config-auto-summary')).toBeNull()
     expect(fields[0]!.value).toBe('12')
     await act(async () => {
@@ -560,7 +565,7 @@ describe('ConfigPane', () => {
     expect(fields.map(input => input.value)).toEqual(['1', '100'])
     await editNumber(fields[0]!, '5.8')
     await editNumber(fields[1]!, '')
-    expect(autoContinueConfig()).toEqual({ waitSeconds: 5, maxRetries: 100 })
+    expect(autoContinueConfig()).toEqual(cfg(5, 100))
     expect(fields.map(input => input.value)).toEqual(['5', '100'])
   })
 
@@ -607,8 +612,8 @@ describe('ConfigPane', () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})
     await flush()
-    // Two folded cards now: 生图 and 自动继续.
-    expect(document.querySelectorAll('.bre-config-card')).toHaveLength(2)
+    // Three folded cards now: 生图, 自动继续 and 错误详情.
+    expect(document.querySelectorAll('.bre-config-card')).toHaveLength(3)
     const card = [...document.querySelectorAll('.bre-config-card')]
       .find(node => node.querySelector('.bre-config-card-title')!.textContent === 'autoContinueSectionTitle')!
     // Same folded shape as the image card: switch on the head, body folded.
@@ -662,8 +667,8 @@ describe('ConfigPane', () => {
   })
 
   it('reserves one fixed pane height so expanding a card never stretches the dialog', () => {
-    // 400px holds both cards expanded; the body scrolls instead of the pane growing.
-    expect(STYLES).toMatch(/\.bre-config-pane\s*{[^}]*height:\s*min\(400px,\s*calc\(100vh - 48px\)\)/s)
+    // 460px holds the auto-continue card expanded; the body scrolls instead of the pane growing.
+    expect(STYLES).toMatch(/\.bre-config-pane\s*{[^}]*height:\s*min\(460px,\s*calc\(100vh - 48px\)\)/s)
     expect(STYLES).toMatch(/\.bre-config-body\s*{[^}]*overflow-y:\s*auto/s)
   })
 })

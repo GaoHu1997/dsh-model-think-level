@@ -32,6 +32,7 @@ import {
   DIAG_PATH,
   FINGERPRINT_PATH,
   HEADERS_CONFIG_PATH,
+  HISTORY_COMPAT_PATH,
   IMAGE_CONFIG_PATH,
   KEY_INDEX_PATH,
   ORDER_PATH,
@@ -77,6 +78,7 @@ import { keyRest, keysForModel, restKeyOf, type KeyCandidate, type ServingKnowle
 import { keyServesFilePath, readKeyServes, servesOfRoute, withServes, withoutServes, writeKeyServes, type KeyServesDocument } from './key-serves.js'
 import { commitUiOrderGuarded, readUiOrder, uiOrderFilePath } from './order-store.js'
 import { readCamouflage, setRouteCamouflage } from './camouflage-store.js'
+import { readHistoryCompat, setRouteHistoryCompat } from './history-compat-store.js'
 import { CAMOUFLAGE_PRESETS, isCamouflagePreset } from './camouflage.js'
 import { collectKeyListings, mergeKeyListings } from './multi-key-listing.js'
 import { listingTargetsOf, type ProbeTarget } from './key-probe.js'
@@ -1650,10 +1652,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     headerRetryTimers.add(timer)
   }
   const refreshHeaders = (): void => {
-    // Camouflage is an independent switch: a route may ask for an identity
-    // while the generic header override feature stays off, and vice versa.
+    // Camouflage and history compatibility are independent switches: a route may
+    // ask for an identity, for old-topic recovery, or both, while the generic
+    // header override feature stays off.
     const camouflage = readCamouflage().providers
-    if (!resolved.uaOverride && Object.keys(camouflage).length === 0) {
+    const historyCompat = readHistoryCompat().providers
+    if (!resolved.uaOverride && Object.keys(camouflage).length === 0 && Object.keys(historyCompat).length === 0) {
       overlaySource.current = emptyIndex()
       stopHeaderRetries()
       return
@@ -1671,7 +1675,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     const providers = isRecord(section) && isRecord(section['providers'])
       ? (section['providers'] as Record<string, Record<string, unknown>>)
       : {}
-    overlaySource.current = buildHeaderIndex(providers, camouflage)
+    overlaySource.current = buildHeaderIndex(providers, camouflage, historyCompat)
   }
   refreshHeaders()
   refreshKeyScopes()
@@ -3347,6 +3351,70 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         }),
       'dsh-model-think-level: camouflage route',
+    )
+
+    // The Responses history-compatibility switch, per route. Same-origin and
+    // POST-only for writes, like the camouflage route: the switch is read by the
+    // host's fetch seam, so the page needs this face to show and change it.
+    ctx.effect(
+      () =>
+        webServerCtx.webServer.register({
+          kind: 'exact',
+          path: HISTORY_COMPAT_PATH,
+          handler: async (req, res) => {
+            res.setHeader('cache-control', 'no-store')
+            if (!isTrustedRequest(req)) {
+              sendJson(res, 403, { ok: false, error: 'forbidden' })
+              return
+            }
+            if (req.method === 'GET') {
+              sendJson(res, 200, {
+                ok: true,
+                data: {
+                  providers: readHistoryCompat().providers,
+                  installed: requestSeamsInstalled(),
+                },
+              })
+              return
+            }
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { ok: false, error: 'method not allowed' })
+              return
+            }
+            const body = await readJsonBody(req, 16_384)
+            if (!isRecord(body)) {
+              sendJson(res, 400, { ok: false, error: 'the body is not a JSON document' })
+              return
+            }
+            const route = body['route']
+            const enabled = body['enabled']
+            if (typeof route !== 'string' || route.length === 0) {
+              sendJson(res, 400, { ok: false, error: 'route is required' })
+              return
+            }
+            if (typeof enabled !== 'boolean') {
+              sendJson(res, 400, { ok: false, error: 'enabled must be a boolean' })
+              return
+            }
+            try {
+              const document = setRouteHistoryCompat(route, enabled)
+              // Rebuild the fetch index now: the very next request must already
+              // carry (or stop carrying) the recovery this save selected.
+              refreshHeaders()
+              // The reply carries the same state GET does. The pane paints the
+              // switch from this answer, so a document-only body would leave
+              // `installed` undefined and make a successful save claim the
+              // request seams are missing.
+              sendJson(res, 200, {
+                ok: true,
+                data: { providers: document.providers, installed: requestSeamsInstalled() },
+              })
+            } catch (error) {
+              sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        }),
+      'dsh-model-think-level: history-compat route',
     )
 
     // The request-header overlay's status, for the browser half. Same-origin

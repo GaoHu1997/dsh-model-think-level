@@ -739,6 +739,41 @@ describe('multi-key request signing and failover', () => {
     expect(response.status).toBe(200)
   })
 
+  it('stops failover on a 5xx history refusal and re-encodes it as JSON', async () => {
+    statuses = [502, 200]
+    bodies = [
+      JSON.stringify({
+        error: {
+          message: 'The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.',
+        },
+      }),
+      '{}',
+    ]
+    install({
+      current: buildHeaderIndex(
+        { relay: { api: 'openai-responses', baseURL: 'https://relay.example.com/v1' } },
+        undefined,
+        { relay: true },
+      ),
+      keys: async ({ model }) => keysForModel([
+        { ref: 'A', value: 'sk-a' },
+        { ref: 'B', value: 'sk-b' },
+      ], model),
+    })
+    const response = await globalThis.fetch('https://relay.example.com/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer route-default' },
+      body: JSON.stringify({ model: 'glm-4', input: [] }),
+    })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.headers.get('authorization')).toBe('Bearer sk-a')
+    expect(response.status).toBe(502)
+    expect(response.headers.get('content-type')).toContain('application/json')
+    const body = JSON.parse(await response.text()) as { error?: { type?: string; message?: string } }
+    expect(body.error?.type).toBe('server_error')
+    expect(body.error?.message).toContain('different Azure OpenAI resource')
+  })
+
   it('stops at the first key that answers, without trying the rest', async () => {
     install(routeWithKeys([
       { ref: 'A', value: 'sk-a' },

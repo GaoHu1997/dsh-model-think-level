@@ -34,7 +34,19 @@ import {
   subscribeAutoContinueEnabled,
   subscribeAutoContinueConfig,
 } from './auto-continue-pref.js'
+import {
+  DEFAULT_AUTO_CONTINUE_POLICY,
+  KNOWN_ERROR_CODES,
+  OTHER_ERROR_CODES,
+  TRANSIENT_ERROR_CODES,
+  type AutoContinuePolicy,
+} from './auto-continue-rules.js'
 import { EffortBoundary, mountReact, unmountReact } from './injection/mount.js'
+import {
+  errorDetailEnabled,
+  setErrorDetailEnabled,
+  subscribeErrorDetailEnabled,
+} from './error-detail-pref.js'
 import {
   cachedImageConfigView,
   readImageConfigView,
@@ -293,9 +305,174 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
   )
 }
 
+/** How the card frames each interruption class. */
+const CODE_TAG: Record<string, 'continue' | 'useless' | 'depends'> = {
+  EMPTY_RESPONSE: 'continue',
+  RATE_LIMIT: 'continue',
+  SERVER: 'continue',
+  TIMEOUT: 'continue',
+  TRANSPORT: 'continue',
+  INVALID_REQUEST: 'useless',
+  AUTH: 'useless',
+  UNKNOWN_MODEL: 'useless',
+  UNSUPPORTED_REASONING_EFFORT: 'useless',
+  PI_AI_ERROR: 'depends',
+  MALFORMED_RESPONSE: 'depends',
+  LEGACY_CLI_OUTCOME_UNKNOWN: 'depends',
+}
+
+const TAG_KEY: Record<'continue' | 'useless' | 'depends', string> = {
+  continue: 'autoContinueTagContinue',
+  useless: 'autoContinueTagUseless',
+  depends: 'autoContinueTagDepends',
+}
+
+interface TriggerSelectProps {
+  t: (key: string, params?: Record<string, unknown>) => string
+  policy: AutoContinuePolicy
+  onFlag: (flag: 'maxTokens' | 'httpStatus', on: boolean) => void
+  onToggle: (code: string, on: boolean) => void
+  onBulk: (on: boolean) => void
+  onRestore: () => void
+}
+
+/**
+ * One control for everything that can make a turn worth continuing: the two
+ * built-in triggers and the error codes sit in the same checklist, so the card
+ * never shows a trigger half inside and half outside the picker. Closed, the
+ * chosen ones read back as chips. Plain elements — the pane lives in the host
+ * document and pulls in no UI library.
+ */
+function TriggerSelect(props: TriggerSelectProps): ReactNode {
+  const { t, policy } = props
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const buttonRef = useRef<HTMLButtonElement | null>(null)
+  // The settings pane clips its own overflow, so the checklist is fixed to the
+  // viewport and pinned to the button we measured on open.
+  const [box, setBox] = useState<{ left: number; width: number; top?: number; bottom?: number } | null>(null)
+  useEffect(() => {
+    if (!open) return undefined
+    const onDown = (event: globalThis.MouseEvent): void => {
+      const root = rootRef.current
+      if (root !== null && event.target instanceof Node && !root.contains(event.target)) setOpen(false)
+    }
+    const dismiss = (): void => setOpen(false)
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('resize', dismiss)
+    window.addEventListener('scroll', dismiss, true)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('resize', dismiss)
+      window.removeEventListener('scroll', dismiss, true)
+    }
+  }, [open])
+  const toggle = (): void => {
+    if (open) {
+      setOpen(false)
+      return
+    }
+    const button = buttonRef.current
+    if (button === null) {
+      setOpen(true)
+      return
+    }
+    const rect = button.getBoundingClientRect()
+    const width = Math.min(Math.max(rect.width, 400), window.innerWidth - 24)
+    const left = Math.min(Math.max(8, rect.right - width), window.innerWidth - width - 8)
+    const below = window.innerHeight - rect.bottom - 12
+    const tallest = 470
+    setBox(below >= tallest
+      ? { left, width, top: rect.bottom + 6 }
+      : rect.top > tallest
+        ? { left, width, bottom: window.innerHeight - rect.top + 6 }
+        : { left, width, top: Math.max(8, window.innerHeight - 8 - 460) })
+    setOpen(true)
+  }
+  const chosenCodes = KNOWN_ERROR_CODES.filter(code => policy.codes[code] === true)
+  const chips: ReactNode[] = []
+  if (policy.maxTokens) chips.push(createElement('span', { className: 'bre-config-chip', key: 'max-tokens' }, t('autoContinueMaxTokens')))
+  if (policy.httpStatus) chips.push(createElement('span', { className: 'bre-config-chip', key: 'http' }, t('autoContinueChipHttp')))
+  for (const code of chosenCodes) chips.push(createElement('span', { className: 'bre-config-chip', key: code }, code))
+  const shown = chips.slice(0, 3)
+  const hidden = chips.length - shown.length
+  const row = (key: string, checked: boolean, name: ReactNode, why: string, tag: string, onChange: (on: boolean) => void): ReactNode =>
+    createElement('label', { className: 'bre-config-code-row', key },
+      createElement('input', {
+        type: 'checkbox',
+        className: 'bre-config-code-input',
+        checked,
+        onChange: (event: ChangeEvent<HTMLInputElement>) => onChange(event.target.checked),
+      }),
+      createElement('span', { className: `bre-config-check${checked ? ' bre-config-check-on' : ''}`, 'aria-hidden': true }),
+      createElement('span', { className: 'bre-config-code-name' }, name),
+      createElement('span', { className: 'bre-config-code-why', title: why }, why),
+      createElement('span', { className: `bre-config-code-tag bre-config-code-tag-${tag}` }, t(TAG_KEY[tag as 'continue' | 'useless' | 'depends'])),
+    )
+  const group = (title: string, rows: ReactNode[]): ReactNode =>
+    createElement('div', { className: 'bre-config-code-group', key: title },
+      createElement('div', { className: 'bre-config-code-group-title' }, t(title)),
+      rows,
+    )
+  return createElement('div', { className: 'bre-config-trigger-control', ref: rootRef },
+    createElement('button', {
+      type: 'button',
+      className: 'bre-config-trigger-button',
+      ref: buttonRef,
+      'aria-expanded': open,
+      'aria-label': t('autoContinueTriggers'),
+      onClick: toggle,
+    },
+      shown,
+      hidden > 0 && createElement('span', { className: 'bre-config-chip bre-config-chip-more' }, t('autoContinueCodesMore', { count: hidden })),
+      chips.length === 0 && createElement('span', { className: 'bre-config-multiselect-empty' }, '—'),
+      createElement('span', { className: 'bre-config-multiselect-caret', 'aria-hidden': true }, '▾'),
+    ),
+    open && createElement('div', {
+      className: 'bre-config-multiselect-pop',
+      role: 'group',
+      'aria-label': t('autoContinueErrorTypes'),
+      style: box === null
+        ? undefined
+        : {
+          left: `${box.left}px`,
+          width: `${box.width}px`,
+          ...(box.top === undefined ? {} : { top: `${box.top}px` }),
+          ...(box.bottom === undefined ? {} : { bottom: `${box.bottom}px` }),
+        },
+    },
+      group('autoContinueGroupFlags', [
+        row('flag:max-tokens', policy.maxTokens,
+          t('autoContinueMaxTokens'),
+          t('autoContinueWhyMaxTokens'), 'continue',
+          on => props.onFlag('maxTokens', on)),
+        row('flag:http', policy.httpStatus,
+          t('autoContinueHttpStatus'),
+          t('autoContinueWhyHttpStatus'), 'continue',
+          on => props.onFlag('httpStatus', on)),
+      ]),
+      group('autoContinueGroupTransient', TRANSIENT_ERROR_CODES.map(code =>
+        row(code, policy.codes[code] === true,
+          createElement('code', { className: 'bre-config-code-name-inner' }, code),
+          t(`autoContinueWhy${code}`), CODE_TAG[code] ?? 'depends',
+          on => props.onToggle(code, on)))),
+      group('autoContinueGroupOther', OTHER_ERROR_CODES.map(code =>
+        row(code, policy.codes[code] === true,
+          createElement('code', { className: 'bre-config-code-name-inner' }, code),
+          t(`autoContinueWhy${code}`), CODE_TAG[code] ?? 'depends',
+          on => props.onToggle(code, on)))),
+      createElement('div', { className: 'bre-config-multiselect-foot' },
+        createElement('button', { type: 'button', className: 'bre-config-link', onClick: () => props.onBulk(true) }, t('autoContinueCodesAll')),
+        createElement('button', { type: 'button', className: 'bre-config-link', onClick: () => props.onBulk(false) }, t('autoContinueCodesNone')),
+        createElement('button', { type: 'button', className: 'bre-config-link bre-config-link-quiet', onClick: props.onRestore }, t('autoContinueRestore')),
+      ),
+    ),
+  )
+}
+
 /**
  * The 「自动继续」 card: one folded settings entry with a quiet summary.
- * The expanded card contains only the two compact controls.
+ * The expanded card holds the timing controls and the trigger conditions.
  */
 export function AutoContinueCard(props: { t: (key: string, params?: Record<string, unknown>) => string }): ReactNode {
   const { t } = props
@@ -315,6 +492,21 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
   }
   const [open, setOpen] = useState(false)
   const bodyId = 'bre-config-auto-continue-body'
+  const policy = config.policy
+  const setPolicyFlags = (patch: Partial<Pick<AutoContinuePolicy, 'maxTokens' | 'httpStatus'>>): void => {
+    setAutoContinueConfig({ policy: { ...policy, ...patch } })
+  }
+  const toggleCode = (code: string, on: boolean): void => {
+    setAutoContinueConfig({ policy: { ...policy, codes: { ...policy.codes, [code]: on } } })
+  }
+  const setAllCodes = (on: boolean): void => {
+    const codes: Record<string, boolean> = { ...policy.codes }
+    for (const code of KNOWN_ERROR_CODES) codes[code] = on
+    setAutoContinueConfig({ policy: { ...policy, codes } })
+  }
+  const restorePolicy = (): void => {
+    setAutoContinueConfig({ policy: DEFAULT_AUTO_CONTINUE_POLICY })
+  }
   return createElement('div', { className: 'bre-config-card bre-config-auto-card' },
     createElement('div', { className: 'bre-config-card-head' },
       createElement('button', {
@@ -393,6 +585,69 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
           ),
         ),
       ),
+      createElement('div', { className: 'bre-config-trigger-field' },
+        createElement('span', { className: 'bre-config-auto-label' }, t('autoContinueTriggers')),
+        createElement(TriggerSelect, {
+          t,
+          policy,
+          onFlag: (flag, on) => setPolicyFlags({ [flag]: on } as Partial<Pick<AutoContinuePolicy, 'maxTokens' | 'httpStatus'>>),
+          onToggle: toggleCode,
+          onBulk: setAllCodes,
+          onRestore: restorePolicy,
+        }),
+      ),
+    ),
+  )
+}
+
+/**
+ * The 「失败详情」 card: the switch that decides whether a failed turn grows the
+ * 「查看详情」 seat. Default ON — the seat only ever ADDS information, so the
+ * off state is the exception, and the folded body says what it adds.
+ */
+export function ErrorDetailCard(props: { t: (key: string, params?: Record<string, unknown>) => string }): ReactNode {
+  const { t } = props
+  const enabled = useSyncExternalStore(subscribeErrorDetailEnabled, errorDetailEnabled)
+  const [open, setOpen] = useState(false)
+  const bodyId = 'bre-config-error-detail-body'
+  return createElement('div', { className: 'bre-config-card' },
+    createElement('div', { className: 'bre-config-card-head' },
+      createElement('button', {
+        type: 'button',
+        className: 'bre-config-expand',
+        'aria-expanded': open,
+        'aria-controls': bodyId,
+        title: open ? t('autoContinueCollapse') : t('autoContinueExpand'),
+        onClick: () => setOpen(current => !current),
+      },
+        createElement('span', { className: 'bre-config-card-title' }, t('errorDetailSectionTitle')),
+        // The folded summary only: the switch beside it already says on/off,
+        // and the explanation belongs to the body once it is open.
+        !open && createElement('span', { className: 'bre-config-card-hint' }, t('errorDetailSummary')),
+      ),
+      createElement('span', { className: 'bre-config-card-state' }, enabled ? t('cardStateOn') : t('cardStateOff')),
+      createElement('label', { className: 'bre-config-switch', title: t('errorDetailAria') },
+        createElement('input', {
+          type: 'checkbox',
+          className: 'bre-config-switch-input',
+          role: 'switch',
+          'aria-label': t('errorDetailAria'),
+          checked: enabled,
+          onChange: (event: ChangeEvent<HTMLInputElement>) => {
+            setErrorDetailEnabled((event.target as HTMLInputElement).checked)
+          },
+        }),
+        createElement('span', { className: 'bre-config-switch-track', 'aria-hidden': true }),
+      ),
+      createElement('span', {
+        className: 'bre-config-chevron',
+        'aria-hidden': true,
+        'data-open': String(open),
+        onClick: () => setOpen(current => !current),
+      }, '›'),
+    ),
+    open && createElement('div', { className: 'bre-config-card-body', id: bodyId },
+      createElement('p', { className: 'bre-config-card-hint bre-config-error-detail-copy' }, t('errorDetailHint')),
     ),
   )
 }
@@ -432,6 +687,9 @@ export function ConfigPane(props: ConfigPaneProps): ReactNode {
       ),
       createElement(EffortBoundary, { fallbackText: t('configPaneFailed') },
         createElement(AutoContinueCard, { t: props.t }),
+      ),
+      createElement(EffortBoundary, { fallbackText: t('configPaneFailed') },
+        createElement(ErrorDetailCard, { t: props.t }),
       ),
     ),
   ),

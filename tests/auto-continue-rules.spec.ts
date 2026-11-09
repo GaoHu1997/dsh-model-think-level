@@ -58,8 +58,10 @@ describe('auto-continue rules', () => {
   })
 
   it('continues by HTTP status when the code does not classify', () => {
+    // A code the policy does not name falls through to the status ladder; a
+    // code the policy denies (e.g. PI_AI_ERROR) refuses before it is reached.
     for (const status of [408, 425, 429, 500, 502, 503]) {
-      const verdict = judgeTurnTail(activeTail(errorEnd(10, { message: 'gateway', code: 'PI_AI_ERROR', status })))
+      const verdict = judgeTurnTail(activeTail(errorEnd(10, { message: 'gateway', code: 'UNCLASSIFIED_CODE', status })))
       expect(verdict, String(status)).toMatchObject({ kind: 'continue', reason: 'transient-error' })
     }
   })
@@ -135,5 +137,27 @@ describe('auto-continue rules', () => {
       .toMatchObject({ kind: 'refuse' })
     expect(judgeTurnTail({ turnEnd: event('turn/end', 10, { turn: 1, reason: 'completed' }), turnEvents: [] }))
       .toMatchObject({ kind: 'settled' })
+  })
+})
+
+describe('auto-continue policy', () => {
+  it('refuses when the matching switch is off', () => {
+    const maxEnd = event('turn/end', 10, { turn: 1, reason: { kind: 'max-tokens' } })
+    expect(judgeTurnTail(activeTail(maxEnd), { maxTokens: false, httpStatus: true, codes: {} }))
+      .toMatchObject({ kind: 'refuse', detail: 'max-tokens (not enabled)' })
+    expect(judgeTurnTail(activeTail(errorEnd(10, { message: 'mystery', code: 'MYSTERY', status: 503 })), {
+      maxTokens: true, httpStatus: false, codes: {},
+    })).toMatchObject({ kind: 'refuse' })
+  })
+
+  it('lets the codes table override the defaults in both directions', () => {
+    // An always-classified code turned on explicitly.
+    expect(judgeTurnTail(activeTail(errorEnd(10, { message: 'content filtered', code: 'PI_AI_ERROR' })), {
+      maxTokens: true, httpStatus: true, codes: { PI_AI_ERROR: true },
+    })).toMatchObject({ kind: 'continue', reason: 'transient-error', detail: 'PI_AI_ERROR' })
+    // A transient code turned off refuses even though its status is retryable.
+    expect(judgeTurnTail(activeTail(errorEnd(10, { message: 'stream died', code: 'TRANSPORT', status: 503 })), {
+      maxTokens: true, httpStatus: true, codes: { TRANSPORT: false },
+    })).toMatchObject({ kind: 'refuse', detail: 'TRANSPORT (not enabled)' })
   })
 })

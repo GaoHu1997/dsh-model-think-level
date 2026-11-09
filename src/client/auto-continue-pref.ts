@@ -10,16 +10,24 @@
  * @module dsh-model-think-level/client/auto-continue-pref
  */
 
+import {
+  DEFAULT_AUTO_CONTINUE_POLICY,
+  normalizeAutoContinuePolicy,
+  type AutoContinuePolicy,
+} from './auto-continue-rules.js'
+
 /** localStorage key (own namespace, same convention as the slider pref). */
 export const AUTO_CONTINUE_PREF_KEY = 'dsh-model-think-level.auto-continue.enabled'
 
-/** Timing and retry limit, independent of the enable switch. */
+/** Timing, retry limit and interruption policy, independent of the enable switch. */
 export const AUTO_CONTINUE_CONFIG_KEY = 'dsh-model-think-level.auto-continue.config'
 
 /** Bounded, whole-number settings exposed by the advanced-config card. */
 export interface AutoContinueConfig {
   readonly waitSeconds: number
   readonly maxRetries: number
+  /** Which interruption classes are answered with 「继续」. */
+  readonly policy: AutoContinuePolicy
 }
 
 export const AUTO_CONTINUE_WAIT_MIN = 1
@@ -30,6 +38,7 @@ export const AUTO_CONTINUE_RETRIES_MAX = 100
 export const DEFAULT_AUTO_CONTINUE_CONFIG: AutoContinueConfig = Object.freeze({
   waitSeconds: 2,
   maxRetries: 5,
+  policy: DEFAULT_AUTO_CONTINUE_POLICY,
 })
 
 /** localStorage key prefix of a per-turn claim, followed by `<sessionId>.<seq>`. */
@@ -55,6 +64,7 @@ export function normalizeAutoContinueConfig(value: unknown): AutoContinueConfig 
   return Object.freeze({
     waitSeconds: boundedInteger(record.waitSeconds, DEFAULT_AUTO_CONTINUE_CONFIG.waitSeconds, AUTO_CONTINUE_WAIT_MIN, AUTO_CONTINUE_WAIT_MAX),
     maxRetries: boundedInteger(record.maxRetries, DEFAULT_AUTO_CONTINUE_CONFIG.maxRetries, AUTO_CONTINUE_RETRIES_MIN, AUTO_CONTINUE_RETRIES_MAX),
+    policy: normalizeAutoContinuePolicy(record.policy),
   })
 }
 
@@ -98,10 +108,15 @@ export function setAutoContinueEnabled(next: boolean): void {
   notify(listeners)
 }
 
+/** Structural equality of two normalized configs (the policy is plain JSON). */
+function sameConfig(left: AutoContinueConfig, right: AutoContinueConfig): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
 /** Save just the requested fields; toggling OFF never discards the configured values. */
 export function setAutoContinueConfig(patch: Partial<AutoContinueConfig>): void {
   const next = normalizeAutoContinueConfig({ ...config, ...patch })
-  if (config.waitSeconds === next.waitSeconds && config.maxRetries === next.maxRetries) return
+  if (sameConfig(config, next)) return
   config = next
   try {
     window.localStorage.setItem(AUTO_CONTINUE_CONFIG_KEY, JSON.stringify(next))
@@ -118,9 +133,9 @@ export function syncAutoContinueEnabled(next: boolean): void {
   notify(listeners)
 }
 
-export function syncAutoContinueConfig(next: AutoContinueConfig): void {
+export function syncAutoContinueConfig(next: Partial<AutoContinueConfig>): void {
   const normalized = normalizeAutoContinueConfig(next)
-  if (config.waitSeconds === normalized.waitSeconds && config.maxRetries === normalized.maxRetries) return
+  if (sameConfig(config, normalized)) return
   config = normalized
   notify(configListeners)
 }

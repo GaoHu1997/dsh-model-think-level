@@ -65,6 +65,18 @@
     },
     "client": {
       "platform": "web"
+    },
+    "webdavSync": {
+      "configFiles": [
+        {
+          "root": "home",
+          "path": "dsh-model-think-level/camouflage.json"
+        },
+        {
+          "root": "home",
+          "path": "dsh-model-think-level/topic-recovery.json"
+        }
+      ]
     }
   },
   "scripts": {

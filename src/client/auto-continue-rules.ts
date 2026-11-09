@@ -65,16 +65,93 @@ export interface LlmFailureLike {
 }
 
 /**
- * Failure codes worth one more try, mirroring the harness's own retryable
- * set (`EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`).
+ * Failure codes that mean "wait a moment and the same request may succeed":
+ * the transient class, mirroring the harness's own retryable set.
  */
-const CONTINUABLE_CODES: ReadonlySet<string> = new Set([
+export const TRANSIENT_ERROR_CODES: readonly string[] = Object.freeze([
   'EMPTY_RESPONSE',
   'RATE_LIMIT',
   'SERVER',
   'TIMEOUT',
   'TRANSPORT',
 ])
+
+/**
+ * The other codes the settings card can offer. None of them is retried by
+ * default: a fresh 「继续」 re-sends the very request that produced them.
+ */
+export const OTHER_ERROR_CODES: readonly string[] = Object.freeze([
+  'PI_AI_ERROR',
+  'INVALID_REQUEST',
+  'AUTH',
+  'LEGACY_CLI_OUTCOME_UNKNOWN',
+  'UNSUPPORTED_REASONING_EFFORT',
+  'MALFORMED_RESPONSE',
+  'UNKNOWN_MODEL',
+])
+
+/** Every code the policy can carry, in the settings card's order. */
+export const KNOWN_ERROR_CODES: readonly string[] = Object.freeze([
+  ...TRANSIENT_ERROR_CODES,
+  ...OTHER_ERROR_CODES,
+])
+
+/**
+ * Which interrupted turns a user wants answered. Stored beside the timing
+ * config; fields an old record does not carry fall back to today's
+ * behaviour (`max-tokens`, HTTP 408/425/429/5xx, the transient codes), so
+ * upgrading never changes what an existing installation retries.
+ */
+export interface AutoContinuePolicy {
+  /** Continue a turn cut off by the output-token ceiling. */
+  readonly maxTokens: boolean
+  /** Continue an `error` whose structured HTTP status is 408/425/429/5xx. */
+  readonly httpStatus: boolean
+  /** Per-code decision; only `KNOWN_ERROR_CODES` keys are honoured. */
+  readonly codes: Readonly<Record<string, boolean>>
+}
+
+function defaultCodes(): Record<string, boolean> {
+  const codes: Record<string, boolean> = {}
+  for (const code of TRANSIENT_ERROR_CODES) codes[code] = true
+  for (const code of OTHER_ERROR_CODES) codes[code] = false
+  return codes
+}
+
+/** The behaviour in force when no policy was ever saved. */
+export const DEFAULT_AUTO_CONTINUE_POLICY: AutoContinuePolicy = Object.freeze({
+  maxTokens: true,
+  httpStatus: true,
+  codes: Object.freeze(defaultCodes()),
+})
+
+/** Validate an untrusted policy record, filling every missing field from the default. */
+export function normalizeAutoContinuePolicy(value: unknown): AutoContinuePolicy {
+  const record = value !== null && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const raw = record.codes !== null && typeof record.codes === 'object' ? record.codes as Record<string, unknown> : {}
+  const codes = defaultCodes()
+  for (const code of KNOWN_ERROR_CODES) {
+    const flag = raw[code]
+    if (typeof flag === 'boolean') codes[code] = flag
+  }
+  return Object.freeze({
+    maxTokens: typeof record.maxTokens === 'boolean' ? record.maxTokens : DEFAULT_AUTO_CONTINUE_POLICY.maxTokens,
+    httpStatus: typeof record.httpStatus === 'boolean' ? record.httpStatus : DEFAULT_AUTO_CONTINUE_POLICY.httpStatus,
+    codes: Object.freeze(codes),
+  })
+}
+
+/**
+ * The policy's view of one failure code.
+ * `undefined` means the code is outside the vocabulary this file knows —
+ * the HTTP-status rule still gets its chance, exactly as before the policy
+ * existed.
+ */
+function policyCodeFlag(code: string, policy: AutoContinuePolicy): boolean | undefined {
+  const flag = policy.codes[code]
+  if (typeof flag === 'boolean') return flag
+  return TRANSIENT_ERROR_CODES.includes(code) ? true : undefined
+}
 
 /**
  * HTTP statuses worth one more try when the code alone does not classify:
@@ -185,9 +262,14 @@ function retryAfterOf(failure: LlmFailureLike | undefined): number | undefined {
 /**
  * Judge one ended turn.
  * @param tail - the final `turn/end` plus that turn's events.
+ * @param policy - which interruption classes the user wants answered
+ *   (defaults to the behaviour that shipped before the policy existed).
  * @returns what the watcher should do.
  */
-export function judgeTurnTail(tail: TurnTail): TurnEndClass {
+export function judgeTurnTail(
+  tail: TurnTail,
+  policy: AutoContinuePolicy = DEFAULT_AUTO_CONTINUE_POLICY,
+): TurnEndClass {
   const kind = reasonKindOf(tail.turnEnd)
   // A PROVEN empty turn (a visible turn/start closed with nothing under it)
   // has nothing to continue, whatever the reason says. An unreadable one
@@ -199,22 +281,29 @@ export function judgeTurnTail(tail: TurnTail): TurnEndClass {
     case 'max-tokens': {
       // The classic: the step hit its output-token ceiling mid-generation and
       // the turn stopped. A 「继续」 resumes exactly where it stopped.
+      if (!policy.maxTokens) return { kind: 'refuse', detail: 'max-tokens (not enabled)' }
       return { kind: 'continue', reason: 'max-tokens', detail: 'max-tokens' }
     }
     case 'error': {
       const failure = failureOf(tail.turnEnd)
       const code = typeof failure?.code === 'string' ? failure.code : undefined
       const status = typeof failure?.status === 'number' ? failure.status : undefined
-      if (code !== undefined && CONTINUABLE_CODES.has(code)) {
-        const waitMs = retryAfterOf(failure)
-        return {
-          kind: 'continue',
-          reason: 'transient-error',
-          detail: code,
-          ...(waitMs !== undefined ? { waitMs } : {}),
+      if (code !== undefined) {
+        const flag = policyCodeFlag(code, policy)
+        if (flag === true) {
+          const waitMs = retryAfterOf(failure)
+          return {
+            kind: 'continue',
+            reason: 'transient-error',
+            detail: code,
+            ...(waitMs !== undefined ? { waitMs } : {}),
+          }
         }
+        // A code the user switched off — or one this build never retried —
+        // stops here: the status rule must not override an explicit choice.
+        if (flag === false) return { kind: 'refuse', detail: `${code} (not enabled)` }
       }
-      if (status !== undefined && continuableStatus(status)) {
+      if (status !== undefined && policy.httpStatus && continuableStatus(status)) {
         return { kind: 'continue', reason: 'transient-error', detail: `status ${status}` }
       }
       // Auth, quota, invalid requests, context overflow, provider-specific
@@ -227,6 +316,11 @@ export function judgeTurnTail(tail: TurnTail): TurnEndClass {
     case 'aborted':
       // The user stopped it on purpose; auto-continuing a stop would fight them.
       return { kind: 'settled', detail: 'aborted' }
+    case 'interrupted':
+      // The turn was closed while the app went away (a reload, a crash
+      // recovery). Nothing is running and nothing failed: the session is at
+      // rest, and the streak resets exactly as after `completed`.
+      return { kind: 'settled', detail: 'interrupted' }
     case 'blocked':
       // Waiting on the user (an approval, a question): silence is the point.
       return { kind: 'settled', detail: 'blocked' }

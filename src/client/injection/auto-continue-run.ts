@@ -5,11 +5,15 @@
  * The decision is {@link judgeTurnTail} (auto-continue-rules.ts); this module
  * owns the OBSERVATION and the GUARDS around it:
  *
- *   - Only the CURRENT session is watched, and only LIVE endings: the running
- *     edge (`running` true → false) must be observed on the attached session
- *     before anything is evaluated. A page that loads into a session whose
- *     last turn failed yesterday does nothing — auto-continuing stale
+ *   - Only the CURRENT session is watched. The one exception is an ending
+ *     nobody answered: when the watcher first sees a session whose newest
+ *     turn/end is a continuable failure with no user message or new run after
+ *     it, that ending is judged once (within a day). A failure the user already
+ *     moved past, or one older than the window, stays history — replaying old
  *     failures is exactly the mindless behaviour the switch must not have.
+ *   - A page that loads into a session whose last turn failed yesterday does
+ *     nothing — auto-continuing stale failures is exactly the mindless
+ *     behaviour the switch must not have.
  *   - The durable `turn/end` is what is judged, not the running edge, so the
  *     evaluation waits briefly for the settlement to reach the event window.
  *   - Guards at send time: the switch still on, the turn still ended, nothing
@@ -63,6 +67,15 @@ const RETRY_AFTER_MAX_MS = 120_000
 
 /** How far a user event may sit from the auto-send and still be attributed to it. */
 const AUTO_SEND_ECHO_TOLERANCE_MS = 30_000
+
+/**
+ * How long an unanswered failure stays resumable when the watcher first sees
+ * it (a session opened later, a view reopened after a restart, or a return
+ * from another session). Measured on the `turn/end`'s own timestamp and only
+ * while no user message or new run sits after it, so work the user already
+ * moved past stays history.
+ */
+const RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1_000
 
 /** The session face the watcher needs, structurally (the official Session). */
 interface SessionFaceLike {
@@ -124,6 +137,35 @@ export interface AutoContinueDeps {
 export interface AutoContinueRunner {
   /** Stop the poll, detach every listener and cancel every pending send. */
   dispose: () => void
+  /** What the in-session controller should render right now. */
+  status: () => AutoContinueStatus
+  /** Subscribe to status changes; returns the disposer. */
+  subscribe: (listener: () => void) => () => void
+  /** Stand down for THIS session: cancel the wait, hide the controller, stay quiet. */
+  stop: () => void
+  /** Clear a stood-down chain so the next ending starts again at one. */
+  reset: () => void
+  /** Skip the wait and reply now. */
+  resumeNow: () => void
+}
+
+/**
+ * One session's auto-continue chain, as the controller renders it.
+ * `idle` is never shown; the chip only exists while a chain is running.
+ */
+export interface AutoContinueStatus {
+  /** The watched session, undefined while nothing is open. */
+  readonly sessionId: string | undefined
+  readonly phase: 'idle' | 'waiting' | 'sent' | 'exhausted'
+  /** Automatic replies already sent in THIS chain. */
+  readonly consecutive: number
+  readonly maxRetries: number
+  /** Epoch ms the pending reply fires at; 0 when no timer is armed. */
+  readonly nextSendAt: number
+  /** The judged interruption, e.g. `RATE_LIMIT` or `max-tokens` (tooltip only). */
+  readonly detail: string
+  /** Whether the user stopped this session's chain. */
+  readonly muted: boolean
 }
 
 /** One attached session's live state. */
@@ -139,6 +181,12 @@ interface Attached {
   lastHandledTurnEndSeq: number
   /** Consecutive automatic replies since the last reset. */
   consecutive: number
+  /** What the controller shows: the chain's phase on this attachment. */
+  phase: 'idle' | 'waiting' | 'sent' | 'exhausted'
+  /** Epoch ms the armed reply fires at; 0 when none. */
+  nextSendAt: number
+  /** The interruption class that armed the chain (tooltip only). */
+  detail: string
   /** Whether the initial history page has landed; everything before it is baseline. */
   historyReady: boolean
   /** The turn/end seq the pending send timer belongs to, if one is queued. */
@@ -171,6 +219,70 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   let attached: Attached | undefined
   let disposed = false
   const timers = new Set<ReturnType<typeof setTimeout>>()
+  /** Sessions the user stopped: quiet until they post in this session again. */
+  const muted = new Set<string>()
+  const statusListeners = new Set<() => void>()
+
+  /**
+   * One cached snapshot. React's useSyncExternalStore re-reads getSnapshot on
+   * every render and during subscription checks, so it MUST return the same
+   * object until something really changed (otherwise React loops).
+   */
+  let statusCache: AutoContinueStatus | undefined
+
+  const buildStatus = (): AutoContinueStatus => {
+    const state = attached
+    const config = autoContinueConfig()
+    if (state === undefined) {
+      return {
+        sessionId: undefined,
+        phase: 'idle',
+        consecutive: 0,
+        maxRetries: config.maxRetries,
+        nextSendAt: 0,
+        detail: '',
+        muted: false,
+      }
+    }
+    return {
+      sessionId: state.sessionId,
+      phase: state.phase,
+      consecutive: state.consecutive,
+      maxRetries: config.maxRetries,
+      nextSendAt: state.nextSendAt,
+      detail: state.detail,
+      muted: muted.has(state.sessionId),
+    }
+  }
+
+  const sameStatus = (a: AutoContinueStatus, b: AutoContinueStatus): boolean =>
+    a.sessionId === b.sessionId
+    && a.phase === b.phase
+    && a.consecutive === b.consecutive
+    && a.maxRetries === b.maxRetries
+    && a.nextSendAt === b.nextSendAt
+    && a.detail === b.detail
+    && a.muted === b.muted
+
+  const notifyStatus = (): void => {
+    const next = buildStatus()
+    if (statusCache !== undefined && sameStatus(statusCache, next)) return
+    statusCache = next
+    for (const listener of [...statusListeners]) listener()
+  }
+
+  const status = (): AutoContinueStatus => {
+    statusCache ??= buildStatus()
+    return statusCache
+  }
+
+  /** Back to invisible: the chip only exists while a chain is running. */
+  const settleChain = (state: Attached): void => {
+    state.phase = 'idle'
+    state.nextSendAt = 0
+    state.detail = ''
+    notifyStatus()
+  }
 
   const later = (fn: () => void, ms: number): void => {
     const timer = setTimeout(() => {
@@ -182,11 +294,11 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
 
   // ---- Event-window reads ----
 
-  /** The attachment's durable events, oldest first. */
-  const durableEventsOf = (state: Attached): DurableEventLike[] => {
+  /** The durable events of one window, oldest first. */
+  const durableEventsOfSource = (source: EventSourceLike): DurableEventLike[] => {
     let entries: readonly { readonly type?: string; readonly event?: DurableEventLike }[] = []
     try {
-      entries = state.eventSource.getSnapshot().entries ?? []
+      entries = source.getSnapshot().entries ?? []
     } catch {
       return []
     }
@@ -198,18 +310,42 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     return out
   }
 
-  /** Consume at most one matching event per automatic send. */
+  /** The attachment's durable events, oldest first. */
+  const durableEventsOf = (state: Attached): DurableEventLike[] => durableEventsOfSource(state.eventSource)
+
+  /** Host context notices are user/message events, but do not express new intent. */
+  const isIntentMessage = (event: DurableEventLike): boolean => {
+    if (event.type !== 'user/message') return false
+    const data = event.data
+    if (typeof data !== 'object' || data === null) return true
+    const message = (data as { message?: unknown }).message ?? data
+    if (typeof message !== 'object' || message === null) return true
+    const source = (message as { source?: unknown }).source
+    // Legacy, unknown, scheduled and question-reply sources keep their guards.
+    if (typeof source !== 'object' || source === null) return true
+    const kind = (source as { kind?: unknown }).kind
+    return kind !== 'model-selection' && kind !== 'time-context'
+  }
+
+  /** Consume at most one matching submitted message per automatic send. */
   const scanUserEvents = (state: Attached): void => {
     const events = durableEventsOf(state)
     const seenSeq = state.lastUserSeq
     for (const event of events) {
       if (event.type !== 'user/message' || event.seq <= seenSeq) continue
       state.lastUserSeq = Math.max(state.lastUserSeq, event.seq)
+      // Model-selection notices and time snapshots must not consume our echo
+      // attribution, clear the streak, or lift a user-requested stop.
+      if (!isIntentMessage(event)) continue
       const ownEcho = isOwnEcho(state, event)
       state.lastAutoSentText = undefined
       if (ownEcho) continue
+      // A hand-typed message is intent: the streak resets and a session the
+      // user stopped starts listening again (from the next ending, at one).
+      muted.delete(state.sessionId)
       state.consecutive = 0
       cancelPendingSend(state)
+      settleChain(state)
     }
   }
 
@@ -255,12 +391,18 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   }
 
   const cancelPendingSend = (state: Attached): void => {
+    const armed = state.sendTimer !== undefined || state.pendingSendTurnEndSeq !== undefined
     if (state.sendTimer !== undefined) {
       clearTimeout(state.sendTimer)
       timers.delete(state.sendTimer)
       state.sendTimer = undefined
     }
     state.pendingSendTurnEndSeq = undefined
+    if (!armed) return
+    state.nextSendAt = 0
+    // Only a cancelled WAIT closes the chain; a 'sent' chain keeps showing
+    // while the continued turn runs.
+    if (state.phase === 'waiting') settleChain(state)
   }
 
   /** Recompute an already-armed wait from its original start, not from the edit. */
@@ -276,6 +418,9 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       void send(state, t('autoContinueMessage'))
     }, remaining)
     state.sendTimer = timer
+    state.nextSendAt = Date.now() + remaining
+    state.phase = 'waiting'
+    notifyStatus()
     timers.add(timer)
   }
 
@@ -343,16 +488,20 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
    */
   /**
    * Flip the attachment to history-ready the first time the session's window
-   * IS the truth (`open`). Everything the initial page carried - including a
-   * failure the session already ended before the page arrived - becomes
-   * baseline at that moment: only endings appended AFTER the page are live.
+   * IS the truth (`open`). Everything the initial page carried becomes
+   * baseline at that moment, except one unanswered failure inside the recovery
+   * window — that ending stays live so it can be judged once.
    */
   const ensureHistoryReady = (state: Attached): void => {
     if (state.historyReady) return
     const snap = snapshotOf(state.session)
     if (snap === undefined || !snap.open) return
     state.historyReady = true
-    state.lastHandledTurnEndSeq = Math.max(state.lastHandledTurnEndSeq, newestSeqOf(state.eventSource, 'turn/end'))
+    const recoveredBaseline = recoverableBaselineOf(state.eventSource)
+    state.lastHandledTurnEndSeq = Math.max(
+      state.lastHandledTurnEndSeq,
+      recoveredBaseline ?? newestSeqOf(state.eventSource, 'turn/end'),
+    )
   }
 
   const armForNewTurnEnd = (state: Attached): void => {
@@ -374,6 +523,8 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     // The switch is consulted per evaluation: turning it off stops the loop
     // mid-wait, and turning it on only affects the NEXT ending.
     if (!autoContinueEnabled()) return
+    // Stopped for THIS session: the user said no; wait for a hand-typed message.
+    if (muted.has(state.sessionId)) return
     const snap = snapshotOf(state.session)
     if (!state.historyReady) return
     if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) return
@@ -396,24 +547,36 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     // Handled BEFORE the async path: one ending is judged exactly once.
     state.lastHandledTurnEndSeq = turnEnd.seq
     scanUserEvents(state)
-    if (events.some(event => event.seq > turnEnd.seq && (event.type === 'user/message' || event.type === 'turn/start'))) return
-    const verdict = judgeTurnTail({ turnEnd, turnEvents: tailOf(events, turnEndIndex) })
+    if (events.some(event => event.seq > turnEnd.seq && (isIntentMessage(event) || event.type === 'turn/start'))) return
+    const verdict = judgeTurnTail({ turnEnd, turnEvents: tailOf(events, turnEndIndex) }, autoContinueConfig().policy)
     if (verdict.kind === 'settled') {
       // A completed / aborted / blocked turn is evidence the session is not
-      // stuck: the streak resets even though nothing is sent.
+      // stuck: the streak resets even though nothing is sent, and the next
+      // interruption starts over at one.
       state.consecutive = 0
+      settleChain(state)
       return
     }
-    if (verdict.kind === 'refuse') return
+    if (verdict.kind === 'refuse') {
+      // Nothing to continue: the chain ends here. A stood-down chain stays
+      // visible until its reset, exactly as the controller's exhausted state.
+      if (state.phase !== 'exhausted') settleChain(state)
+      return
+    }
     const maxRetries = autoContinueConfig().maxRetries
     if (state.consecutive >= maxRetries) {
       console.info(`[dsh-model-think-level] auto-continue: streak cap (${maxRetries}) reached, standing down (${verdict.detail})`)
+      state.phase = 'exhausted'
+      state.nextSendAt = 0
+      state.detail = verdict.detail
+      notifyStatus()
       return
     }
     if (!claimTurn(state.sessionId, turnEnd.seq)) return
     state.pendingSendTurnEndSeq = turnEnd.seq
     state.pendingSendScheduledAt = Date.now()
     state.pendingRetryAfterMs = verdict.waitMs
+    state.detail = verdict.detail
     scheduleSend(state)
   }
 
@@ -425,14 +588,14 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const armedSeq = state.pendingSendTurnEndSeq
     state.pendingSendTurnEndSeq = undefined
     if (armedSeq === undefined || armedSeq !== state.lastHandledTurnEndSeq) return
-    if (!autoContinueEnabled() || state.consecutive >= autoContinueConfig().maxRetries) return
+    if (!autoContinueEnabled() || muted.has(state.sessionId) || state.consecutive >= autoContinueConfig().maxRetries) return
     const snap = snapshotOf(state.session)
     // Re-checks at fire time: the user may have queued something, the model
     // may have resumed itself, or the view may have moved on.
     if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) return
     if (!stillCurrent(state)) return
     const events = durableEventsOf(state)
-    if (events.some(event => event.seq > armedSeq && (event.type === 'user/message' || event.type === 'turn/start' || event.type === 'turn/end'))) return
+    if (events.some(event => event.seq > armedSeq && (isIntentMessage(event) || event.type === 'turn/start' || event.type === 'turn/end'))) return
     state.lastAutoSentAt = Date.now()
     state.lastAutoSentText = text
     try {
@@ -442,13 +605,23 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
         // failed the turn must not be hammered by the continuation either.
         state.consecutive += 1
         state.lastAutoSentText = undefined
+        state.nextSendAt = 0
+        state.phase = state.consecutive >= autoContinueConfig().maxRetries ? 'exhausted' : 'idle'
+        notifyStatus()
         console.warn(`[dsh-model-think-level] auto-continue: prompt refused ${describeError(answer)}`)
         return
       }
       state.consecutive += 1
+      // The reply is in flight: the chip reports it until the turn ends.
+      state.phase = 'sent'
+      state.nextSendAt = 0
+      notifyStatus()
     } catch (error) {
       state.consecutive += 1
       state.lastAutoSentText = undefined
+      state.nextSendAt = 0
+      state.phase = state.consecutive >= autoContinueConfig().maxRetries ? 'exhausted' : 'idle'
+      notifyStatus()
       console.warn('[dsh-model-think-level] auto-continue: prompt failed:', error)
     }
   }
@@ -482,6 +655,70 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     state.wasRunning = snap.running
   }
 
+  /** The turn/end seq just before the newest one, 0 when there is none. */
+  const previousTurnEndSeqOf = (source: EventSourceLike): number => {
+    const seqs: number[] = []
+    for (const event of durableEventsOfSource(source)) {
+      if (event.type === 'turn/end') seqs.push(event.seq)
+    }
+    if (seqs.length < 2) return 0
+    seqs.sort((a, b) => a - b)
+    return seqs[seqs.length - 2]!
+  }
+
+  /**
+   * The baseline to start from when the newest ending is a failure nobody
+   * answered: keep that ending ABOVE the baseline so the first evaluation
+   * judges it. Undefined for an ending that is stale, already answered, or not
+   * worth continuing — those stay history.
+   */
+  const recoverableBaselineOf = (source: EventSourceLike): number | undefined => {
+    const events = durableEventsOfSource(source)
+    let index = -1
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      if (events[i]!.type === 'turn/end') {
+        index = i
+        break
+      }
+    }
+    if (index < 0) return undefined
+    const ending = events[index]!
+    const endedAt = typeof ending.time === 'number' ? ending.time : Date.now()
+    if (Date.now() - endedAt > RECOVERY_WINDOW_MS) return undefined
+    // Anything the user typed or any run that started after the ending means
+    // the failure was already dealt with; it must never be replayed.
+    if (events.some(event => event.seq > ending.seq && (isIntentMessage(event) || event.type === 'turn/start'))) {
+      return undefined
+    }
+    return judgeTurnTail({ turnEnd: ending, turnEvents: tailOf(events, index) }, autoContinueConfig().policy).kind === 'continue'
+      ? previousTurnEndSeqOf(source)
+      : undefined
+  }
+
+  /**
+   * Self-healing poll: when the session is idle and an unjudged `turn/end`
+   * sits in the window, arm the evaluation. This recovers endings whose
+   * running edge was never delivered and the one kept by a re-attach; it never
+   * invents work, because anything already judged (or baselined) sits at or
+   * below {@link Attached.lastHandledTurnEndSeq}.
+   */
+  const sweep = (state: Attached): void => {
+    if (disposed || attached !== state) return
+    if (state.evalTimer !== undefined) return
+    if (!autoContinueEnabled() || muted.has(state.sessionId)) return
+    if (!state.historyReady) return
+    const snap = snapshotOf(state.session)
+    if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) return
+    const events = durableEventsOf(state)
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]!
+      if (event.type === 'turn/end' && event.seq > state.lastHandledTurnEndSeq) {
+        armEvaluation(state)
+        return
+      }
+    }
+  }
+
   const detach = (): void => {
     const state = attached
     if (state === undefined) return
@@ -503,27 +740,36 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       timers.delete(state.sendTimer)
       state.sendTimer = undefined
     }
+    notifyStatus()
   }
 
   const attach = (binding: SessionBindingLike): void => {
     // A subagent view is watched by nobody: skip before any listener exists.
     const first = snapshotOf(binding.session)
     if (first === undefined || first.subagent) return
+    // An unanswered failure keeps its ending above the baseline; every other
+    // pre-existing ending stays history.
+    const recoveredBaseline = first.open ? recoverableBaselineOf(binding.eventSource) : undefined
     const state: Attached = {
       sessionId: binding.sessionId,
       session: binding.session,
       eventSource: binding.eventSource,
       // Recording the live value WITHOUT an edge: a session that was already
-      // running when attached, or already ended before it, is never judged.
+      // running when attached is never judged from that edge alone.
       wasRunning: readRunning(binding.session),
       lastUserSeq: newestSeqOf(binding.eventSource, 'user/message'),
-      // Pre-existing endings are invisible to this attachment: only endings
-      // observed live are judged. While the history page has not landed yet
-      // the window holds nothing, so the baseline waits for it (see
-      // ensureHistoryReady) instead of treating the page's endings as live.
+      // Pre-existing endings are invisible to this attachment, except an
+      // unanswered failure inside the recovery window. While the history page
+      // has not landed yet the window holds nothing, so the baseline waits for
+      // it (see ensureHistoryReady) instead of treating its endings as live.
       historyReady: first.open,
-      lastHandledTurnEndSeq: first.open ? newestSeqOf(binding.eventSource, 'turn/end') : 0,
+      lastHandledTurnEndSeq: first.open
+        ? recoveredBaseline ?? newestSeqOf(binding.eventSource, 'turn/end')
+        : 0,
       consecutive: 0,
+      phase: 'idle',
+      nextSendAt: 0,
+      detail: '',
       pendingSendTurnEndSeq: undefined,
       pendingSendScheduledAt: 0,
       pendingRetryAfterMs: undefined,
@@ -535,6 +781,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       sendTimer: undefined,
     }
     attached = state
+    notifyStatus()
     try {
       state.unsubs.push(binding.session.subscribe(() => onSnapshot(state)))
     } catch {
@@ -598,9 +845,13 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       detach()
       return
     }
-    if (attached !== undefined && attached.session === binding.session) return
+    if (attached !== undefined && attached.session === binding.session) {
+      sweep(attached)
+      return
+    }
     detach()
     attach(binding)
+    if (attached !== undefined) sweep(attached)
   }
 
   const interval = setInterval(track, TICK_MS)
@@ -619,6 +870,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const state = attached
     if (autoContinueEnabled() || state === undefined) return
     cancelPendingSend(state)
+    settleChain(state)
     if (state.evalTimer !== undefined) {
       clearTimeout(state.evalTimer)
       timers.delete(state.evalTimer)
@@ -627,12 +879,59 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   })
   const disposeConfig = subscribeAutoContinueConfig(() => {
     const state = attached
+    notifyStatus()
     if (state?.pendingSendTurnEndSeq === undefined) return
     if (!autoContinueEnabled() || state.consecutive >= autoContinueConfig().maxRetries) cancelPendingSend(state)
     else scheduleSend(state)
   })
 
+  /** Stand down for this session only: hide the chip and stop judging endings. */
+  const stop = (): void => {
+    const state = attached
+    if (state === undefined) return
+    cancelPendingSend(state)
+    if (state.evalTimer !== undefined) {
+      clearTimeout(state.evalTimer)
+      timers.delete(state.evalTimer)
+      state.evalTimer = undefined
+    }
+    state.evalDeadline = 0
+    state.consecutive = 0
+    muted.add(state.sessionId)
+    settleChain(state)
+  }
+
+  /** Clear a stood-down chain so the next ending starts again at one. */
+  const reset = (): void => {
+    const state = attached
+    if (state === undefined) return
+    state.consecutive = 0
+    muted.delete(state.sessionId)
+    settleChain(state)
+  }
+
+  /** Skip the remaining wait and reply now. */
+  const resumeNow = (): void => {
+    const state = attached
+    if (state === undefined) return
+    if (state.pendingSendTurnEndSeq === undefined) return
+    if (state.sendTimer !== undefined) {
+      clearTimeout(state.sendTimer)
+      timers.delete(state.sendTimer)
+      state.sendTimer = undefined
+    }
+    void send(state, t('autoContinueMessage'))
+  }
+
   return {
+    status,
+    subscribe: (listener: () => void): (() => void) => {
+      statusListeners.add(listener)
+      return () => { statusListeners.delete(listener) }
+    },
+    stop,
+    reset,
+    resumeNow,
     dispose: (): void => {
       disposed = true
       disposeEnabled()
@@ -640,6 +939,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       disposeReset?.()
       clearInterval(interval)
       detach()
+      statusListeners.clear()
       for (const timer of timers) clearTimeout(timer)
       timers.clear()
     },

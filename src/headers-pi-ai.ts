@@ -40,6 +40,11 @@ import {
   type KeyCandidate,
 } from './key-route-core.js'
 import { endpointFamilyOf, type RouteProtocol } from './key-refs.js'
+import {
+  degradeForHistory,
+  HISTORY_STAGES,
+  isHistoryStateMismatch,
+} from './history-compat.js'
 
 /**
  * The wire each (route, model) was last served on, learned from the request that
@@ -318,6 +323,21 @@ function errorTextOf(event: Record<string, unknown>): string {
   return parts.filter((part): part is string => typeof part === 'string').join(' ')
 }
 
+/**
+ * Stream events that hand content to the caller. `start` is deliberately not
+ * one of them: it has no downstream effect (the DSH bridge drops it), so a
+ * history replay may safely repeat it.
+ */
+const CONTENT_EVENTS = new Set([
+  'thinking_start', 'thinking_delta', 'thinking_end',
+  'text_start', 'text_delta', 'text_end',
+  'toolcall_start', 'toolcall_delta', 'toolcall_end',
+])
+
+function isContentEvent(type: unknown): boolean {
+  return typeof type === 'string' && CONTENT_EVENTS.has(type)
+}
+
 function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike {
   return new Proxy(models, {
     get(target, property, receiver): unknown {
@@ -379,7 +399,11 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
         // otherwise delegate to the route provider (still honouring the key).
         // `avoid` keeps the attempt's resolution in step with the plan's: an
         // automatic key must not re-pick the wire the plan already skipped.
-        const startAttempt = async (candidate: KeyCandidate, avoid?: RouteProtocol): Promise<AsyncIterable<Record<string, unknown>>> => {
+        const startAttempt = async (
+          candidate: KeyCandidate,
+          avoid?: RouteProtocol,
+          requestContext: unknown = context,
+        ): Promise<AsyncIterable<Record<string, unknown>>> => {
           const api = typeof modelObject['api'] === 'string' ? modelObject['api'] as RouteProtocol : 'openai-completions'
           const protocol = wireOf(candidate, api, modelId, avoid)
           // An endpoint only rides along when its family is the one this request
@@ -401,7 +425,7 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
             : selectedBaseUrl
           const switched = protocol !== api || baseUrl !== modelObject['baseUrl']
           if (!switched) {
-            return (streamSimple as UnknownFunction).call(target, model, context, {
+            return (streamSimple as UnknownFunction).call(target, model, requestContext, {
               ...options,
               apiKey: candidate.value,
               transformHeaders: markedTransformHeaders,
@@ -422,7 +446,7 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
           // The registry call the adapter normally makes folds the context for
           // us; this direct re-dispatch must do it itself or the target
           // implementation never sees the request's tool declarations.
-          const normalized = await normalizeDispatchedContext(context)
+          const normalized = await normalizeDispatchedContext(requestContext)
           const dispatchedContext = switchedToClaude ? withClaudeIdentityContext(normalized) : normalized
           const existingMetadata = isRecord(options['metadata']) ? options['metadata'] : undefined
           const suppliedUserId = existingMetadata?.['user_id']
@@ -475,6 +499,10 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
           // The plan is reproduced in `?diag=1`; it carries references and ranks,
           // never a key value.
           recordRoutePlan(route ?? '', plan, { model: modelId })
+          // The replay lives here — where the message context, the thing that
+          // has to be degraded, is available — but it is still a per-route
+          // opt-in: an unopened route keeps the ordinary error/failover path.
+          const recoversHistory = routeOverrideOf(source, model)?.historyCompat === true
           const wireOfAttempt = (candidate: KeyCandidate): RouteProtocol =>
             plan.entries.find(entry => entry.candidate === candidate)?.wire ?? wireOf(candidate, api, modelId, avoidWire)
           /**
@@ -491,48 +519,93 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
           let lastErrorEvent: Record<string, unknown> | undefined
           let lastError: unknown
           for (const candidate of plan.ordered) {
-            let stream: AsyncIterable<Record<string, unknown>>
-            try {
-              stream = await startAttempt(candidate, avoidWire)
-            } catch (error) {
-              // A synchronous setup failure (e.g. a missing client key) is a
-              // pre-content failure: bench the key and try the next one. An
-              // AUTOMATIC resolution's wire is marked refused for this model, so
-              // the next request resolves elsewhere; a pin's failure blames the
-              // credential, not the wire.
-              lastError = error
-              if (candidate.protocol === undefined) rememberWireFact(failedWire, servedKey, wireOfAttempt(candidate))
-              const kind = classifyFailure(undefined, error instanceof Error ? error.message : '') ?? 'refused'
-              keyRest.note(restKeyFor(candidate, kind), kind)
-              continue
-            }
-            let committed = false
-            let failed = false
-            for await (const event of stream) {
-              const type = isRecord(event) ? event['type'] : undefined
-              if (!committed) {
-                if (type === 'error') {
-                  // The key was rejected before any content streamed: fail over,
-                  // and remember why so the next request does not start here.
-                  lastErrorEvent = event as Record<string, unknown>
-                  failed = true
-                  if (candidate.protocol === undefined) rememberWireFact(failedWire, servedKey, wireOfAttempt(candidate))
-                  const kind = classifyFailure(undefined, errorTextOf(event as Record<string, unknown>)) ?? 'refused'
-                  keyRest.note(restKeyFor(candidate, kind), kind)
-                  break
-                }
-                committed = true
-                clearRest(keyRest, route ?? '', candidate.ref, modelId)
-                // This is the wire that actually serves the model; start here
-                // next time instead of paying the rejected round trip again.
-                // The refused-wire memory is deliberately kept: a wire that
-                // refused the model stays out of the automatic resolution.
-                rememberWireFact(servedWire, servedKey, wireOfAttempt(candidate))
+            // A foreign-history refusal is never repaired by rotating keys:
+            // every key reaches the same relay pool, so a rotation only
+            // multiplies the attempts. The inner loop re-enters `startAttempt`
+            // for THIS candidate with the history degraded one stage at a time.
+            let attemptContext: unknown = context
+            let historyStage = -1
+            let historyExhausted = false
+            let setupFailed = false
+            while (true) {
+              let stream: AsyncIterable<Record<string, unknown>>
+              try {
+                stream = await startAttempt(candidate, avoidWire, attemptContext)
+              } catch (error) {
+                // A synchronous setup failure (e.g. a missing client key) is a
+                // pre-content failure: bench the key and try the next one. An
+                // AUTOMATIC resolution's wire is marked refused for this model, so
+                // the next request resolves elsewhere; a pin's failure blames the
+                // credential, not the wire.
+                lastError = error
+                if (candidate.protocol === undefined) rememberWireFact(failedWire, servedKey, wireOfAttempt(candidate))
+                const kind = classifyFailure(undefined, error instanceof Error ? error.message : '') ?? 'refused'
+                keyRest.note(restKeyFor(candidate, kind), kind)
+                setupFailed = true
+                break
               }
-              yield event
+              let committed = false
+              let contentStarted = false
+              let failed = false
+              let retried = false
+              for await (const event of stream) {
+                const type = isRecord(event) ? event['type'] : undefined
+                if (recoversHistory && type === 'error' && !contentStarted) {
+                  const text = errorTextOf(event as Record<string, unknown>)
+                  if (isHistoryStateMismatch(text)) {
+                    // The relay refused history minted under another backend
+                    // resource. It says so either as a 400 (re-encoded by the
+                    // fetch seam so its sentence survives) or as a 200 stream's
+                    // `response.failed`. Both reach this seam as the same error
+                    // event, which is why the repair lives on the stream rather
+                    // than on an HTTP status.
+                    for (let next = historyStage + 1; next < HISTORY_STAGES.length; next += 1) {
+                      const degraded = degradeForHistory(context, HISTORY_STAGES[next])
+                      if (degraded === undefined) continue
+                      attemptContext = degraded
+                      historyStage = next
+                      retried = true
+                      break
+                    }
+                    if (retried) break
+                    // Nothing left to remove: a replay would repeat the same
+                    // refusal, so surface it instead of failing over.
+                    lastErrorEvent = event as Record<string, unknown>
+                    historyExhausted = true
+                    break
+                  }
+                }
+                if (!committed) {
+                  if (type === 'error') {
+                    // The key was rejected before any content streamed: fail over,
+                    // and remember why so the next request does not start here.
+                    lastErrorEvent = event as Record<string, unknown>
+                    failed = true
+                    if (candidate.protocol === undefined) rememberWireFact(failedWire, servedKey, wireOfAttempt(candidate))
+                    const kind = classifyFailure(undefined, errorTextOf(event as Record<string, unknown>)) ?? 'refused'
+                    keyRest.note(restKeyFor(candidate, kind), kind)
+                    break
+                  }
+                  committed = true
+                  clearRest(keyRest, route ?? '', candidate.ref, modelId)
+                  // This is the wire that actually serves the model; start here
+                  // next time instead of paying the rejected round trip again.
+                  // The refused-wire memory is deliberately kept: a wire that
+                  // refused the model stays out of the automatic resolution.
+                  rememberWireFact(servedWire, servedKey, wireOfAttempt(candidate))
+                }
+                yield event
+                if (isContentEvent(type)) contentStarted = true
+              }
+              if (retried) continue
+              if (historyExhausted) {
+                if (lastErrorEvent !== undefined) yield lastErrorEvent
+                return
+              }
+              if (failed) break
+              return
             }
-            if (failed) continue
-            return
+            if (setupFailed) continue
           }
           if (lastErrorEvent !== undefined) {
             yield lastErrorEvent

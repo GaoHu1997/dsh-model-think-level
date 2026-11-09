@@ -85,9 +85,14 @@ function setup() {
   return { adapter, models, source, calls }
 }
 
-function callStream(adapter: PiAiAdapter, model: Record<string, unknown>, options: Record<string, unknown> = {}) {
+function callStream(
+  adapter: PiAiAdapter,
+  model: Record<string, unknown>,
+  options: Record<string, unknown> = {},
+  context: unknown = {},
+) {
   const snapshot = adapter.current()
-  return snapshot.models.streamSimple(model, {}, options)
+  return snapshot.models.streamSimple(model, context, options)
 }
 
 describe('pi-ai request-level header bridge', () => {
@@ -554,6 +559,165 @@ describe('pi-ai key routing and failover', () => {
     // The delegate was reached without an explicit apiKey injected by us.
     expect(seen).toEqual([undefined])
     expect(events.map((event) => event['type'])).toEqual(['start', 'done'])
+    handle.dispose()
+  })
+})
+
+describe('pi-ai history recovery', () => {
+  const MODEL = { id: 'alpha-model', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }
+  const MISMATCH = 'The requested item was created under a different Azure OpenAI resource. '
+    + 'Use the same resource that created the item to access it.'
+
+  /** An adapter that also exposes the context each attempt was handed. */
+  function historySetup(
+    plan: (apiKey: string | undefined, context: unknown, call: number) => AsyncIterable<Record<string, unknown>>,
+  ) {
+    const seen: { apiKey: string | undefined; context: unknown }[] = []
+    const models: CapturedModels = {
+      streamSimple(_model, context, options) {
+        seen.push({ apiKey: typeof options['apiKey'] === 'string' ? options['apiKey'] : undefined, context })
+        return plan(options['apiKey'] as string | undefined, context, seen.length - 1)
+      },
+    }
+    const adapter: PiAiAdapter = { current: () => ({ models }) }
+    return { adapter, seen }
+  }
+
+  function historySource(keys: () => Promise<{ ref: string; value: string }[]>, historyCompat = true) {
+    return {
+      current: buildHeaderIndex(
+        { alpha: { baseURL: 'https://relay.example.com/v1', models: [{ id: 'alpha-model' }] } },
+        undefined,
+        historyCompat ? { alpha: true } : undefined,
+      ),
+      keys,
+    }
+  }
+
+  /** A replayable assistant turn: reasoning and text both carry foreign handles. */
+  function historyContext(): Record<string, unknown> {
+    return {
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'why',
+              thinkingSignature: JSON.stringify({ id: 'rs_1', encrypted_content: 'enc_1' }),
+            },
+            {
+              type: 'text',
+              text: 'ok',
+              textSignature: JSON.stringify({ id: 'msg_1', phase: 'final' }),
+            },
+          ],
+        },
+      ],
+    }
+  }
+
+  function signaturesOf(context: unknown): { thinking: string; text: string } {
+    const messages = (context as Record<string, unknown>)['messages'] as Record<string, unknown>[]
+    const blocks = messages[0]?.['content'] as Record<string, unknown>[]
+    return {
+      thinking: String(blocks[0]?.['thinkingSignature']),
+      text: String(blocks[1]?.['textSignature']),
+    }
+  }
+
+  it('replays a 200 stream refusal on the same key with the history degraded', async () => {
+    const { adapter, seen } = historySetup((_key, _context, call) =>
+      call === 0
+        ? emit({ type: 'start' }, { type: 'error', reason: 'error', error: { message: `server_error: AgentRouter: ${MISMATCH}` } })
+        : emit({ type: 'start' }, { type: 'text_delta', delta: 'ok' }, { type: 'done' }))
+    const handle = installPiAiHeaderTransform(adapter, historySource(async () => [{ ref: 'A', value: 'sk-a' }]))
+    const events = await drain(callStream(adapter, MODEL, {}, historyContext()))
+
+    // The refusal is repaired by replaying this candidate — never by rotating.
+    expect(seen).toHaveLength(2)
+    expect(seen.map(entry => entry.apiKey)).toEqual(['sk-a', 'sk-a'])
+    // The replay goes out with the ids gone but the content intact.
+    expect(JSON.parse(signaturesOf(seen[1]?.context).thinking)).toEqual({ encrypted_content: 'enc_1' })
+    expect(JSON.parse(signaturesOf(seen[1]?.context).text)).toEqual({ phase: 'final' })
+    expect(events.map(event => event['type'])).toEqual(['start', 'start', 'text_delta', 'done'])
+    handle.dispose()
+  })
+
+  it('escalates to dropping the reasoning item when ids alone did not help', async () => {
+    const { adapter, seen } = historySetup((_key, _context, call) =>
+      call < 2
+        ? emit({ type: 'start' }, { type: 'error', reason: 'error', error: { message: MISMATCH } })
+        : emit({ type: 'done' }))
+    const handle = installPiAiHeaderTransform(adapter, historySource(async () => [{ ref: 'A', value: 'sk-a' }]))
+    const events = await drain(callStream(adapter, MODEL, {}, historyContext()))
+
+    expect(seen).toHaveLength(3)
+    const replayMessages = (seen[2]?.context as Record<string, unknown>)['messages'] as Record<string, unknown>[]
+    const blocks = replayMessages[0]?.['content'] as Record<string, unknown>[]
+    // The reasoning item is no longer replayed, but its local text survives.
+    expect(Object.hasOwn(blocks[0] ?? {}, 'thinkingSignature')).toBe(false)
+    expect(blocks[0]?.['thinking']).toBe('why')
+    expect(JSON.parse(String(blocks[1]?.['textSignature']))).toEqual({ phase: 'final' })
+    // Each refused attempt emitted its `start`; the successful one emitted `done`.
+    expect(events.map(event => event['type'])).toEqual(['start', 'start', 'done'])
+    handle.dispose()
+  })
+
+  it('surfaces the refusal without failing over when the history cannot be degraded', async () => {
+    const { adapter, seen } = historySetup(() =>
+      emit({ type: 'start' }, { type: 'error', reason: 'error', error: { message: MISMATCH } }))
+    const handle = installPiAiHeaderTransform(adapter, historySource(async () => [
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+    ]))
+    const events = await drain(callStream(adapter, MODEL, {}, { messages: [] }))
+
+    // Rotating keys only multiplies the same refusal, so it is not attempted.
+    expect(seen.map(entry => entry.apiKey)).toEqual(['sk-a'])
+    expect(events.map(event => event['type'])).toEqual(['start', 'error'])
+    expect(String((events[1]?.['error'] as Record<string, unknown>)['message'])).toContain('different Azure OpenAI resource')
+    handle.dispose()
+  })
+
+  it('does not replay once content reached the caller', async () => {
+    const { adapter, seen } = historySetup(() =>
+      emit({ type: 'start' }, { type: 'text_delta', delta: 'partial' }, { type: 'error', reason: 'error', error: { message: MISMATCH } }))
+    const handle = installPiAiHeaderTransform(adapter, historySource(async () => [{ ref: 'A', value: 'sk-a' }]))
+    const events = await drain(callStream(adapter, MODEL, {}, historyContext()))
+
+    expect(seen).toHaveLength(1)
+    expect(events.map(event => event['type'])).toEqual(['start', 'text_delta', 'error'])
+    handle.dispose()
+  })
+
+  it('leaves a non-history stream error on the ordinary failover path', async () => {
+    const { adapter, seen } = historySetup((apiKey) =>
+      apiKey === 'sk-a'
+        ? emit({ type: 'error', reason: 'error', error: { message: 'bad key' } })
+        : emit({ type: 'done' }))
+    const handle = installPiAiHeaderTransform(adapter, historySource(async () => [
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+    ]))
+    const events = await drain(callStream(adapter, MODEL, {}, historyContext()))
+
+    expect(seen.map(entry => entry.apiKey)).toEqual(['sk-a', 'sk-b'])
+    expect(events.map(event => event['type'])).toEqual(['done'])
+    handle.dispose()
+  })
+
+  it('does not recover on a route that did not opt in', async () => {
+    const { adapter, seen } = historySetup(() =>
+      emit({ type: 'error', reason: 'error', error: { message: MISMATCH } }))
+    const handle = installPiAiHeaderTransform(adapter, historySource(async () => [
+      { ref: 'A', value: 'sk-a' },
+      { ref: 'B', value: 'sk-b' },
+    ], false))
+    await drain(callStream(adapter, MODEL, {}, historyContext()))
+
+    // Not a history route, so the refusal takes the ordinary failover path.
+    expect(seen.map(entry => entry.apiKey)).toEqual(['sk-a', 'sk-b'])
     handle.dispose()
   })
 })

@@ -26,9 +26,12 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { setAutoContinueEnabled } from '../src/client/auto-continue-pref.js'
-import { createAutoContinue } from '../src/client/injection/auto-continue-run.js'
+import { DEFAULT_AUTO_CONTINUE_CONFIG, setAutoContinueConfig, setAutoContinueEnabled } from '../src/client/auto-continue-pref.js'
+import { mountAutoContinueController } from '../src/client/AutoContinueController.js'
+import { createAutoContinue, type AutoContinueRunner } from '../src/client/injection/auto-continue-run.js'
+import { zh } from '../src/client/locales.js'
 import type { DurableEventLike } from '../src/client/auto-continue-rules.js'
 
 // ---- Real bundle loading ----
@@ -106,7 +109,7 @@ interface Harness {
   prompts: RealPromptInput[]
   setPromptAnswer(answer: { ok: true; value: { accepted: true } } | { ok: false; error: { code: string; message: string } }): void
   append(type: string, data: unknown): void
-  runner: { dispose(): void }
+  runner: AutoContinueRunner
   setCurrent(id: string | undefined): void
 }
 
@@ -134,7 +137,7 @@ function makeHarness(sessionId: string, options?: { address?: unknown }): Harnes
       seq += 1
       session.eventSource.append({ type: 'event', event: { type, seq, time: Date.now(), data } })
     },
-    runner: undefined as unknown as { dispose(): void },
+    runner: undefined as unknown as AutoContinueRunner,
     setCurrent: undefined as unknown as (id: string | undefined) => void,
   }
 
@@ -165,8 +168,8 @@ function openHistory(harness: Harness): void {
 }
 
 /** The real UserMessage payload a durable `user/message` event carries. */
-function userMessage(text: string): unknown {
-  return { id: `u${Math.random()}`, role: 'user', source: 'session', content: [{ type: 'text', text }] }
+function userMessage(text: string, source: unknown = { kind: 'user' }): unknown {
+  return { id: `u${Math.random()}`, role: 'user', source, content: [{ type: 'text', text }] }
 }
 
 /** The real AssistantMessage-bearing payload of a durable `assistant/message`. */
@@ -208,17 +211,25 @@ async function failTurn(
 }
 
 let disposer: (() => void) | undefined
+let unmountController: (() => void) | undefined
 
 beforeEach(() => {
   vi.useFakeTimers()
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   setAutoContinueEnabled(true)
+  setAutoContinueConfig(DEFAULT_AUTO_CONTINUE_CONFIG)
 })
 
-afterEach(() => {
+afterEach(async () => {
+  if (unmountController !== undefined) await act(async () => { unmountController?.() })
+  unmountController = undefined
   disposer?.()
   disposer = undefined
   vi.useRealTimers()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   window.localStorage.clear()
+  document.body.innerHTML = ''
 })
 
 describe('auto-continue against the real session stack', () => {
@@ -282,6 +293,76 @@ describe('auto-continue against the real session stack', () => {
     ])
     expect(harness.prompts).toHaveLength(6)
     expect(harness.prompts.at(-1)).toMatchObject({ content: [{ type: 'text', text: '继续' }] })
+  })
+
+  it('keeps the visible controller and streak cap through model/time context notices', async () => {
+    setAutoContinueConfig({ ...DEFAULT_AUTO_CONTINUE_CONFIG, maxRetries: 2 })
+    const harness = makeHarness('context-chain')
+    disposer = harness.runner.dispose
+    harness.setCurrent('context-chain')
+    document.body.innerHTML = '<div data-composer-dock><span data-composer-stat="turns">1 轮</span><span data-composer-stat="steps">2 步</span></div>'
+    for (const pill of document.querySelectorAll<HTMLElement>('[data-composer-stat]')) {
+      vi.spyOn(pill, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList)
+    }
+    const t = (key: string, params?: Record<string, unknown>): string => (
+      (zh[key as keyof typeof zh] ?? key).replace(/\{(\w+)\}/g, (_match, name: string) => String(params?.[name] ?? ''))
+    )
+    await act(async () => {
+      unmountController = mountAutoContinueController({ runner: harness.runner, t, onSettings: () => {} })
+      harness.append('user/message', userMessage('继续完成发布工作'))
+      harness.session.handleRunning(true)
+      await vi.advanceTimersByTimeAsync(1_100)
+      openHistory(harness)
+    })
+    const notice = () => harness.append('user/message', userMessage('[model changed: selected another model]', {
+      kind: 'model-selection', form: 'notice',
+    }))
+    const clock = () => harness.append('user/message', userMessage('Time sampled while preparing the next step', {
+      kind: 'time-context', form: 'snapshot',
+    }))
+    for (let turn = 1; turn <= 2; turn += 1) {
+      await act(async () => {
+        await failTurn(harness, turn, { kind: 'max-tokens' }, [], () => {
+          // Exercise both orders: context before the durable echo must not
+          // consume its attribution; context after it must not clear the chain.
+          if (turn === 1) notice()
+          harness.append('user/message', userMessage('继续'))
+          if (turn === 2) notice()
+          clock()
+          harness.session.handleRunning(true)
+        })
+      })
+      expect(harness.prompts).toHaveLength(turn)
+      expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: turn })
+      expect(document.querySelector('.bre-ac-chip-sent')?.textContent).toContain(`第 ${turn}/2 次`)
+      expect(document.querySelector('[data-composer-dock] [data-bre-autocontinue]')).not.toBeNull()
+    }
+    await act(async () => { await failTurn(harness, 3, { kind: 'max-tokens' }) })
+    expect(harness.prompts).toHaveLength(2)
+    expect(harness.runner.status()).toMatchObject({ phase: 'exhausted', consecutive: 2 })
+    expect(document.querySelector('.bre-ac-chip-exhausted')?.textContent).toContain('连续 2 次后停手')
+  })
+
+  it.each(['model-selection', 'time-context'])('keeps a stopped session muted after %s context but respects real user intent', async (kind) => {
+    const harness = makeHarness('stopped-context')
+    disposer = harness.runner.dispose
+    harness.setCurrent('stopped-context')
+    harness.append('user/message', userMessage('长任务'))
+    harness.session.handleRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    openHistory(harness)
+    await failTurn(harness, 1, { kind: 'max-tokens' })
+    harness.runner.stop()
+    const text = kind === 'model-selection' ? '[model changed: selected another model]' : 'Time sampled while preparing the next step'
+    harness.append('user/message', userMessage(text, { kind }))
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', muted: true })
+    await failTurn(harness, 2, { kind: 'max-tokens' })
+    expect(harness.prompts).toHaveLength(1)
+    // Identical text submitted by the user still re-enables the session.
+    harness.append('user/message', userMessage(text))
+    expect(harness.runner.status().muted).toBe(false)
+    await failTurn(harness, 3, { kind: 'max-tokens' })
+    expect(harness.prompts).toHaveLength(2)
   })
 
   it('never continues a turn that completed', async () => {

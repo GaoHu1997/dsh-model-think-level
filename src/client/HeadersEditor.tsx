@@ -179,6 +179,25 @@ export function headersFromDraft(draft: Draft): Record<string, string> {
 }
 
 /**
+ * Whether a save would store exactly what is already stored.
+ *
+ * The section's save button commits the pane's other sections too, so it fires
+ * on saves that never touch these headers. Telling those apart is what lets
+ * {@link HeadersEditor} skip a settings write — and the full document rewrite,
+ * revision fence and list reload behind it — instead of repeating it to store
+ * the same values.
+ * @param stored - the headers the route carries now.
+ * @param next - the headers the draft would store.
+ * @returns true when both hold the same names and the same values.
+ */
+export function sameHeaders(stored: Record<string, string> | undefined, next: Record<string, string>): boolean {
+  const current = stored ?? {}
+  const keys = Object.keys(current)
+  if (keys.length !== Object.keys(next).length) return false
+  return keys.every((key) => Object.prototype.hasOwnProperty.call(next, key) && next[key] === current[key])
+}
+
+/**
  * Render the provider card's request-header section.
  * @param props - route identity, write seam, copy and the card dismiss seam.
  * @returns the section.
@@ -347,29 +366,40 @@ export function HeadersEditor({
   const save = async (next: Record<string, string>): Promise<void> => {
     setBusy(true)
     setMessage(undefined)
-    // Armed before the wire: this write is what invalidates the settings
-    // document, and the section's post-apply reload (which disables every closed
-    // row's actions for a beat) can begin before the mutate reply lands. The
-    // guard holds those buttons' painted opacity at full until the reload
-    // re-enables them, so the list does not blink under the confirmation.
-    armSettleGuard()
-    let reply: ProviderHeadersReply
-    try {
-      reply = await writeProviderHeaders(api, route, next)
-    } catch (error) {
-      reply = { ok: false, error: error instanceof Error ? error.message : String(error) }
+    // This one button also commits the pane's other sections (disguise,
+    // old-topic recovery), and those keep their state in their own files. A
+    // save that leaves the header dict alone therefore has nothing to write
+    // here, and skipping the write is the difference between a switch flip and
+    // a visible wait: the settings write rewrites the whole pi-ai document,
+    // fences it by revision and sets off the list reload that greys every row
+    // for a beat. Compare first, write only on a real change.
+    const headersUnchanged = sameHeaders(stored, next)
+    if (!headersUnchanged) {
+      // Armed before the wire: this write is what invalidates the settings
+      // document, and the section's post-apply reload (which disables every
+      // closed row's actions for a beat) can begin before the mutate reply
+      // lands. The guard holds those buttons' painted opacity at full until the
+      // reload re-enables them, so the list does not blink under the
+      // confirmation.
+      armSettleGuard()
+      let reply: ProviderHeadersReply
+      try {
+        reply = await writeProviderHeaders(api, route, next)
+      } catch (error) {
+        reply = { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+      if (!reply.ok) {
+        setBusy(false)
+        setMessage({
+          kind: 'error',
+          text: reply.error === 'no-route' ? t('headersNoRoute')
+            : reply.error === 'read-only' ? t('headersReadOnly')
+              : t('headersError', { error: reply.error }),
+        })
+        return
+      }
+      setStored(next)
     }
-    if (!reply.ok) {
-      setBusy(false)
-      setMessage({
-        kind: 'error',
-        text: reply.error === 'no-route' ? t('headersNoRoute')
-          : reply.error === 'read-only' ? t('headersReadOnly')
-            : t('headersError', { error: reply.error }),
-      })
-      return
-    }
-    setStored(next)
     setEditing(false)
     // Both halves of the pane commit under this one button. The header dict is
     // already written, so a failed extras write is reported against the pane
@@ -385,7 +415,13 @@ export function HeadersEditor({
       }
     }
     setBusy(false)
-    const confirmation = Object.keys(next).length === 0 ? t('headersCleared') : t('headersSaved')
+    // "Cleared" is only news when there was something to clear. A route that
+    // never carried extra headers saves through this same button whenever the
+    // pane's other sections (disguise, old-topic recovery) are committed, and
+    // telling that save it "cleared" something it never had reads like a
+    // warning that the headers were just wiped.
+    const hadHeaders = Object.keys(stored ?? {}).length > 0
+    const confirmation = Object.keys(next).length === 0 && hadHeaders ? t('headersCleared') : t('headersSaved')
     if (tabbed) {
       // The pane commits the way the other two tabs do: the card closes. Its
       // inline message would go down with the card, so the confirmation rides

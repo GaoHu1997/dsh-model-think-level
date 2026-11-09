@@ -4454,7 +4454,7 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
      (12px apart), which leaves the pane with visible bottom breathing room; both
      cards expanded reach 337px of the body, so the widest state still fits
      without a scrollbar and only a notice (or a longer translation) scrolls. */
-  height: min(400px, calc(100vh - 48px));
+  height: min(460px, calc(100vh - 48px));
   display: flex;
   flex-direction: column;
   border-radius: 16px;
@@ -4853,30 +4853,456 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   overflow-wrap: anywhere;
 }
 
-/* The advanced pane's disguise switch, the pane's SECOND section. It is not a
-   card of its own: it renders inside the header section's container, under the
-   header table and above the pane's single commit row, and the hairline here is
-   the only thing that separates the two sections — the same one-item border the
-   header section draws at its own top, so the pane reads as one form with two
-   parts rather than two stacked cards. */
+/* The advanced pane's two side-settings — request disguise and old-topic
+   recovery — are ONE-LINE rows, not blocks: the title on the left, the control
+   on the right, and the hairline that separates each from what precedes it.
+   (They used to be a title, one or two hint paragraphs and a row of buttons;
+   the hints moved into the row's tooltip plus an off-screen description, so the
+   pane no longer grows two extra blocks per route.) */
 .bre-camouflage {
+  position: relative;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-height: 28px;
   margin-top: 4px;
-  padding-top: 12px;
+  padding-top: 9px;
   border-top: 1px solid var(--dsw-alias-border-l2, #0000001a);
 }
+.bre-camouflage > .bre-effort-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* The three disguise presets as one small segmented control: a quiet tray with
+   the chosen pill lifted onto the card's own surface. A row of full-size
+   secondary buttons belonged to a section with two hint lines above it; at one
+   line it only has to read as a choice among three. */
 .bre-camouflage-options {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--bre-r-sm);
+  background: var(--bre-hover);
 }
-.bre-camouflage-option { flex: 0 0 auto; }
-.bre-camouflage-option:disabled { opacity: 0.6; cursor: default; }
+.bre-camouflage-option {
+  flex: none;
+  height: 20px;
+  padding: 0 8px;
+  border: 0.5px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--bre-ink-3);
+  font-size: 11px;
+  line-height: 19px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.bre-camouflage-option:hover:not(:disabled) {
+  color: var(--bre-ink);
+  background: var(--bre-active);
+}
+.bre-camouflage-option:disabled { opacity: 0.5; cursor: default; }
 .bre-camouflage-option[data-active='1'] {
-  border-color: var(--dsw-alias-state-success-primary, #00a870);
-  color: var(--dsw-alias-state-success-primary, #00a870);
+  border-color: var(--bre-line-3);
+  background: var(--bre-surface);
+  color: var(--bre-ok);
+  font-weight: 500;
 }
+/* The recovery switch rides the board's 28x16 track; the label only wraps the
+   native checkbox and the drawn track, so clicking the track toggles it. */
+.bre-camouflage-toggle { flex: none; }
+.bre-camouflage-warn {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--bre-warn);
+}
+/* Visible only to assistive tech: the hint paragraphs the compact rows moved
+   off screen. One pixel, clipped, out of flow — never in the tab order. */
+.bre-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- Auto-continue chip: the in-session chain indicator ----
+   It rides the composer stat line, right of the context meter, so it borrows
+   that row's height (22px) and a 12px tabular face to keep one baseline. The
+   slot is ours and stays empty while no chain runs. */
+.bre-ac-host { display: inline-flex; align-items: center; }
+.bre-ac { position: relative; display: inline-flex; align-items: center; }
+.bre-ac-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--bre-line-3);
+  border-radius: var(--bre-r-pill);
+  background: var(--bre-surface);
+  color: var(--bre-ink-2);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--bre-t) var(--bre-ease), border-color var(--bre-t) var(--bre-ease);
+}
+.bre-ac-chip:hover { background: var(--bre-hover); }
+.bre-ac-chip:focus-visible { outline: 2px solid var(--bre-accent-line); outline-offset: 1px; }
+.bre-ac-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--bre-ink-4);
+}
+.bre-ac-chip-waiting {
+  border-color: var(--bre-accent-line);
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
+}
+.bre-ac-chip-waiting .bre-ac-dot { background: var(--bre-accent); animation: bre-ac-pulse 1.2s var(--bre-ease) infinite; }
+.bre-ac-chip-sent .bre-ac-dot { background: var(--bre-accent); opacity: 0.55; }
+.bre-ac-chip-exhausted {
+  border-color: var(--bre-warn);
+  background: var(--bre-warn-weak);
+  color: var(--bre-warn);
+}
+.bre-ac-chip-exhausted .bre-ac-dot { background: var(--bre-warn); }
+@keyframes bre-ac-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+.bre-ac-text { font-variant-numeric: tabular-nums; }
+.bre-ac-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 1200;
+  min-width: 128px;
+  padding: 4px;
+  border: 1px solid var(--bre-line-2);
+  border-radius: var(--bre-r-md);
+  background: var(--bre-surface);
+  box-shadow: var(--bre-shadow-pop);
+  display: flex;
+  flex-direction: column;
+}
+.bre-ac-action {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: var(--bre-r-sm);
+  font: inherit;
+  font-size: 12px;
+  color: var(--bre-ink-2);
+  cursor: pointer;
+}
+.bre-ac-action:hover { background: var(--bre-hover); color: var(--bre-ink); }
+@media (prefers-reduced-motion: reduce) {
+  .bre-ac-chip-waiting .bre-ac-dot { animation: none; }
+}
+
+/* --- auto-continue: the trigger picker -------------------------------- */
+.bre-config-trigger-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.bre-config-trigger-control { position: relative; }
+/* Same box as the two number fields, so the three controls read as one row
+   of settings rather than as three different widgets. */
+.bre-config-trigger-button {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+  min-height: 34px;
+  padding: 4px 10px;
+  border: 1px solid var(--bre-line-2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.bre-config-trigger-button:hover { border-color: var(--bre-ink-4); }
+.bre-config-trigger-button:focus-visible {
+  outline: none;
+  border-color: var(--bre-accent-line);
+  box-shadow: 0 0 0 2px var(--bre-accent-weak);
+}
+.bre-config-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bre-line-1);
+  color: var(--bre-ink-2);
+  font-size: 11px;
+  line-height: 17px;
+}
+.bre-config-chip-more {
+  padding: 1px 2px;
+  background: none;
+  color: var(--bre-ink-3);
+}
+.bre-config-multiselect-empty { color: var(--bre-ink-3); font-size: 12px; }
+.bre-config-multiselect-caret { margin-left: auto; color: var(--bre-ink-3); font-size: 10px; }
+.bre-config-multiselect-pop {
+  /* Fixed, because the settings pane clips its own overflow. */
+  position: fixed;
+  z-index: 1300;
+  box-sizing: border-box;
+  max-height: min(460px, calc(100vh - 40px));
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--bre-line-2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+  box-shadow: var(--bre-shadow-pop);
+}
+.bre-config-code-group + .bre-config-code-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--bre-line-1);
+}
+.bre-config-code-group-title {
+  padding: 4px 8px 2px;
+  color: var(--bre-ink-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+.bre-config-code-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 152px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.bre-config-code-row:hover { background: var(--bre-line-1); }
+.bre-config-code-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.bre-config-check {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--bre-line-2);
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-elevated, #ffffff);
+}
+.bre-config-code-input:focus-visible + .bre-config-check {
+  border-color: var(--bre-accent-line);
+  box-shadow: 0 0 0 2px var(--bre-accent-weak);
+}
+.bre-config-check-on {
+  border-color: var(--bre-accent-ink);
+  background: var(--bre-accent-ink);
+}
+.bre-config-check-on::after {
+  content: '';
+  width: 8px;
+  height: 4px;
+  border-left: 1.6px solid #ffffff;
+  border-bottom: 1.6px solid #ffffff;
+  transform: rotate(-45deg) translateY(-1px);
+}
+.bre-config-code-name {
+  overflow: hidden;
+  color: var(--bre-ink-1);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bre-config-code-name-inner {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.bre-config-code-why {
+  overflow: hidden;
+  color: var(--bre-ink-3);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bre-config-code-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.bre-config-code-tag-continue { background: var(--bre-ok-weak); color: var(--bre-ok-ink); }
+.bre-config-code-tag-useless { background: var(--bre-danger-weak); color: var(--bre-danger); }
+.bre-config-code-tag-depends { background: var(--bre-line-1); color: var(--bre-ink-3); }
+.bre-config-multiselect-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 4px;
+  padding: 7px 8px 3px;
+  border-top: 1px solid var(--bre-line-1);
+}
+.bre-config-link-quiet { margin-right: auto; color: var(--bre-ink-3); }
+.bre-config-link-quiet:hover { color: var(--bre-accent-ink); }
+
+/* ---------------------------------------------------------------------------
+   Failure detail: the 「查看详情」 text run appended to an official failure row,
+   and the popover it opens. The row is the client's own (*turnErrorRow),
+   so these rules only ever style OUR additions: a bare text run that borrows
+   the row's font, and a floating card that borrows the pane's surface tokens.
+   --------------------------------------------------------------------------- */
+.bre-ed-view {
+  display: inline;
+  margin: 0 0 0 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  color: var(--bre-ink-3);
+  cursor: pointer;
+  white-space: nowrap;
+  vertical-align: baseline;
+  transition: color var(--bre-t) var(--bre-ease);
+}
+.bre-ed-view::before { content: '·'; margin-right: 5px; opacity: .55; }
+.bre-ed-view:hover { color: var(--bre-accent-ink); text-decoration: underline; text-underline-offset: 2px; }
+.bre-ed-view:focus-visible { outline: 2px solid var(--bre-accent-line); outline-offset: 2px; border-radius: var(--bre-r-xs); }
+
+#bre-error-detail-popover {
+  position: fixed;
+  z-index: 2147483200;
+  display: none;
+  width: min(468px, calc(100vw - 24px));
+  box-sizing: border-box;
+  padding: 13px 15px 11px;
+  border-radius: var(--bre-r-md);
+  background: var(--bre-surface);
+  color: var(--bre-ink);
+  border: 1px solid var(--bre-line-3);
+  box-shadow: var(--bre-shadow-pop);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  line-height: 1.55;
+  animation: bre-ed-pop-in .14s ease-out;
+}
+@keyframes bre-ed-pop-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.bre-ed-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.bre-ed-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bre-danger); flex: none; }
+.bre-ed-title { font-size: 13px; font-weight: 600; letter-spacing: .2px; flex: none; color: var(--bre-ink); }
+.bre-ed-chips { display: flex; gap: 5px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.bre-ed-chip {
+  font: 500 10.5px/17px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 0 6px;
+  border-radius: var(--bre-r-xs);
+  background: var(--bre-sunken-2);
+  color: var(--bre-ink-2);
+  border: 1px solid var(--bre-line-1);
+  white-space: nowrap;
+}
+.bre-ed-chip-strong { background: var(--bre-danger-weak); color: var(--bre-danger); border-color: var(--bre-line-2); }
+.bre-ed-x {
+  margin-left: auto;
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--bre-ink-3);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--bre-r-xs);
+}
+.bre-ed-x:hover { color: var(--bre-ink); background: var(--bre-hover); }
+.bre-ed-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--bre-line-1);
+  padding-top: 9px;
+}
+.bre-ed-row { display: flex; align-items: flex-start; gap: 10px; }
+.bre-ed-label { flex: none; width: 74px; font-size: 11.5px; color: var(--bre-ink-3); padding-top: 1px; }
+.bre-ed-value { flex: 1; min-width: 0; word-break: break-word; font-size: 12.5px; color: var(--bre-ink-2); }
+.bre-ed-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; letter-spacing: -.1px; }
+.bre-ed-muted { color: var(--bre-ink-3); font-size: 11.5px; }
+.bre-ed-copy {
+  flex: none;
+  border: 1px solid var(--bre-line-3);
+  background: transparent;
+  color: var(--bre-ink-2);
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 7px;
+  border-radius: var(--bre-r-xs);
+  cursor: pointer;
+}
+.bre-ed-copy:hover { background: var(--bre-hover); color: var(--bre-ink); }
+.bre-ed-raw { margin-top: 9px; }
+.bre-ed-raw-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--bre-ink-3);
+  font-size: 11.5px;
+  cursor: pointer;
+  padding: 0;
+}
+.bre-ed-raw-toggle:hover { color: var(--bre-ink); }
+.bre-ed-pre {
+  margin: 7px 0 0;
+  padding: 8px 9px;
+  border-radius: var(--bre-r-sm);
+  background: var(--bre-sunken);
+  border: 1px solid var(--bre-line-1);
+  color: var(--bre-ink-2);
+  font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 170px;
+  overflow: auto;
+}
+.bre-ed-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bre-line-1);
+}
+.bre-ed-src { flex: 1; min-width: 0; font-size: 10.5px; color: var(--bre-ink-3); }
+.bre-config-error-detail-copy { margin: 0; max-width: none; }
 
 `

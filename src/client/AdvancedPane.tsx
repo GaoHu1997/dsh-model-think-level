@@ -1,25 +1,26 @@
 /**
  * The advanced-configuration pane of one provider card, assembled.
  *
- * The pane is one form over two sections — the request headers, then how the
- * route presents itself — and ends in ONE commit row under both. Splitting the
- * sections into two components with two commit rows would have made the pane
- * read as two forms and put a 保存 between them, which is exactly the shape
- * that was wrong: a Save above the disguise looked like a Save for the headers
- * alone, and the section below it looked left out of the form.
+ * The pane is one form over three sections — the request headers, how the route
+ * presents itself, and whether it recovers old Responses topics — and ends in
+ * ONE commit row under all three. Splitting the sections into separate
+ * components with separate commit rows would have made the pane read as several
+ * forms and put a 保存 between them, which is exactly the shape that was wrong:
+ * a Save above a section looked like a Save for the headers alone, and the
+ * sections below it looked left out of the form.
  *
- * So this component owns what the sections share: the disguise draft lives
- * here, the header editor renders it as {@link CamouflageEditor} through its
- * `extras` seat, and the editor's own Save commits both ({@link
- * useCamouflage}'s `commit` runs after the header write, before the card
- * closes). The disguise therefore only reaches the host on Save; picking a
- * preset and pressing 取消 leaves nothing behind.
+ * So this component owns what the sections share: the disguise and
+ * history-compatibility drafts live here, the header editor renders them as
+ * {@link CamouflageEditor} and {@link HistoryCompatEditor} through its `extras`
+ * seat, and the editor's own Save commits all of them. A switch clicked and
+ * then abandoned with 取消 therefore leaves nothing behind.
  *
  * @module dsh-model-think-level/client/AdvancedPane
  */
 
 import type { ReactNode } from 'react'
 import { CamouflageEditor, useCamouflage } from './CamouflageEditor.js'
+import { HistoryCompatEditor, useHistoryCompat } from './HistoryCompatEditor.js'
 import { HeadersEditor } from './HeadersEditor.js'
 import type { RemoteApi } from './types.js'
 
@@ -42,6 +43,7 @@ export interface AdvancedPaneProps {
  */
 export function AdvancedPane({ route, api, t, onDismiss }: AdvancedPaneProps): ReactNode {
   const camouflage = useCamouflage(route, t)
+  const historyCompat = useHistoryCompat(route)
   return (
     <HeadersEditor
       route={route}
@@ -49,16 +51,35 @@ export function AdvancedPane({ route, api, t, onDismiss }: AdvancedPaneProps): R
       t={t}
       onDismiss={onDismiss}
       extras={(
-        <CamouflageEditor
-          t={t}
-          value={camouflage.value}
-          installed={camouflage.installed}
-          disabled={camouflage.loading}
-          onChange={camouflage.setValue}
-        />
+        <>
+          <CamouflageEditor
+            t={t}
+            value={camouflage.value}
+            installed={camouflage.installed}
+            disabled={camouflage.loading}
+            onChange={camouflage.setValue}
+          />
+          <HistoryCompatEditor
+            t={t}
+            value={historyCompat.value}
+            installed={historyCompat.installed}
+            disabled={historyCompat.loading}
+            onChange={historyCompat.setValue}
+          />
+        </>
       )}
-      onCommitExtras={camouflage.commit}
-      onResetExtras={camouflage.reset}
+      onCommitExtras={async () => {
+        // Both sections commit under this one Save. A rejected write must not
+        // skip the other one, but the pane still has to stay open, so the first
+        // failure is re-thrown once both writes have settled.
+        const results = await Promise.allSettled([camouflage.commit(), historyCompat.commit()])
+        const failed = results.find(result => result.status === 'rejected')
+        if (failed !== undefined) throw (failed as PromiseRejectedResult).reason
+      }}
+      onResetExtras={() => {
+        camouflage.reset()
+        historyCompat.reset()
+      }}
     />
   )
 }

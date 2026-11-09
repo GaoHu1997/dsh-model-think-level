@@ -1,12 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AutoContinueConfig } from '../src/client/auto-continue-pref.js'
+import { DEFAULT_AUTO_CONTINUE_POLICY } from '../src/client/auto-continue-rules.js'
 
 type Preferences = typeof import('../src/client/auto-continue-pref.js')
 
 const ENABLE_KEY = 'dsh-model-think-level.auto-continue.enabled'
 const CONFIG_KEY = 'dsh-model-think-level.auto-continue.config'
-const DEFAULTS = { waitSeconds: 2, maxRetries: 5 }
+const cfg = (waitSeconds: unknown, maxRetries: unknown): AutoContinueConfig => ({
+  waitSeconds: waitSeconds as number,
+  maxRetries: maxRetries as number,
+  policy: DEFAULT_AUTO_CONTINUE_POLICY,
+})
+const DEFAULTS = cfg(2, 5)
 const disposers: Array<() => void> = []
 
 // Do not statically import the store: its initial state is read at module load.
@@ -72,10 +78,10 @@ describe('auto-continue preference defaults and persistence', () => {
   })
 
   it.each([
-    { name: 'valid', stored: '{"waitSeconds":17,"maxRetries":9}', expected: { waitSeconds: 17, maxRetries: 9 } },
+    { name: 'valid', stored: '{"waitSeconds":17,"maxRetries":9}', expected: cfg(17, 9) },
     { name: 'malformed', stored: '{broken', expected: DEFAULTS },
-    { name: 'out of range', stored: '{"waitSeconds":0.9,"maxRetries":1000.5}', expected: { waitSeconds: 1, maxRetries: 100 } },
-    { name: 'partially invalid', stored: '{"waitSeconds":"17","maxRetries":9}', expected: { waitSeconds: 2, maxRetries: 9 } },
+    { name: 'out of range', stored: '{"waitSeconds":0.9,"maxRetries":1000.5}', expected: cfg(1, 100) },
+    { name: 'partially invalid', stored: '{"waitSeconds":"17","maxRetries":9}', expected: cfg(2, 9) },
   ])('safely reads $name stored config without rewriting it or disabling legacy opt-in', async ({ stored, expected }) => {
     window.localStorage.setItem(ENABLE_KEY, 'true')
     window.localStorage.setItem(CONFIG_KEY, stored)
@@ -92,11 +98,11 @@ describe('auto-continue preference defaults and persistence', () => {
 
   it('re-imports enabled and disabled preferences from JSON storage after a page refresh', async () => {
     const prefs = await loadPreferences()
-    prefs.setAutoContinueConfig({ waitSeconds: 21, maxRetries: 8 })
+    prefs.setAutoContinueConfig(cfg(21, 8))
     prefs.setAutoContinueEnabled(true)
     const previousSnapshot = prefs.autoContinueConfig()
     const stored = window.localStorage.getItem(CONFIG_KEY)
-    expect(JSON.parse(stored!)).toEqual({ waitSeconds: 21, maxRetries: 8 })
+    expect(JSON.parse(stored!)).toEqual(cfg(21, 8))
     expect(window.localStorage.getItem(ENABLE_KEY)).toBe('true')
 
     vi.resetModules()
@@ -112,7 +118,7 @@ describe('auto-continue preference defaults and persistence', () => {
     vi.resetModules()
     const disabledRefresh = await loadPreferences()
     expect(disabledRefresh.autoContinueEnabled()).toBe(false)
-    expect(disabledRefresh.autoContinueConfig()).toEqual({ waitSeconds: 21, maxRetries: 8 })
+    expect(disabledRefresh.autoContinueConfig()).toEqual(cfg(21, 8))
     expect(window.localStorage.getItem(CONFIG_KEY)).toBe(stored)
     expect(window.localStorage.getItem(ENABLE_KEY)).toBe('false')
   })
@@ -133,16 +139,16 @@ describe('auto-continue config setters and subscriptions', () => {
   it('merges each partial update without losing the other field and persists both fields', async () => {
     const prefs = await loadPreferences()
     prefs.setAutoContinueConfig({ waitSeconds: 13 })
-    expect(prefs.autoContinueConfig()).toEqual({ waitSeconds: 13, maxRetries: 5 })
-    expect(JSON.parse(window.localStorage.getItem(CONFIG_KEY)!)).toEqual({ waitSeconds: 13, maxRetries: 5 })
+    expect(prefs.autoContinueConfig()).toEqual(cfg(13, 5))
+    expect(JSON.parse(window.localStorage.getItem(CONFIG_KEY)!)).toEqual(cfg(13, 5))
 
     prefs.setAutoContinueConfig({ maxRetries: 7 })
-    expect(prefs.autoContinueConfig()).toEqual({ waitSeconds: 13, maxRetries: 7 })
-    expect(JSON.parse(window.localStorage.getItem(CONFIG_KEY)!)).toEqual({ waitSeconds: 13, maxRetries: 7 })
+    expect(prefs.autoContinueConfig()).toEqual(cfg(13, 7))
+    expect(JSON.parse(window.localStorage.getItem(CONFIG_KEY)!)).toEqual(cfg(13, 7))
 
     prefs.setAutoContinueConfig({ waitSeconds: 19 })
-    expect(prefs.autoContinueConfig()).toEqual({ waitSeconds: 19, maxRetries: 7 })
-    expect(JSON.parse(window.localStorage.getItem(CONFIG_KEY)!)).toEqual({ waitSeconds: 19, maxRetries: 7 })
+    expect(prefs.autoContinueConfig()).toEqual(cfg(19, 7))
+    expect(JSON.parse(window.localStorage.getItem(CONFIG_KEY)!)).toEqual(cfg(19, 7))
     expect(prefs.autoContinueEnabled()).toBe(false)
     expect(window.localStorage.getItem(ENABLE_KEY)).toBeNull()
   })
@@ -157,8 +163,8 @@ describe('auto-continue config setters and subscriptions', () => {
     const write = vi.spyOn(Storage.prototype, 'setItem')
 
     prefs.setAutoContinueConfig({})
-    prefs.setAutoContinueConfig({ waitSeconds: 2, maxRetries: 5 })
-    prefs.setAutoContinueConfig({ waitSeconds: 2.9, maxRetries: 5.9 })
+    prefs.setAutoContinueConfig(cfg(2, 5))
+    prefs.setAutoContinueConfig(cfg(2.9, 5.9))
     expect(prefs.autoContinueConfig()).toBe(original)
     expect(listener).not.toHaveBeenCalled()
     expect(write).not.toHaveBeenCalled()
@@ -167,7 +173,7 @@ describe('auto-continue config setters and subscriptions', () => {
     prefs.setAutoContinueConfig(patch)
     const changed = prefs.autoContinueConfig()
     patch.waitSeconds = 99
-    expect(changed).toEqual({ waitSeconds: 12, maxRetries: 5 })
+    expect(changed).toEqual(cfg(12, 5))
     expect(changed).not.toBe(original)
     expect(Object.isFrozen(changed)).toBe(true)
     expect(Reflect.set(changed, 'maxRetries', 99)).toBe(false)
@@ -190,25 +196,25 @@ describe('auto-continue config setters and subscriptions', () => {
     disposers.push(prefs.subscribeAutoContinueConfig(listener))
     const write = vi.spyOn(Storage.prototype, 'setItem')
 
-    prefs.setAutoContinueConfig({ waitSeconds: -4.8, maxRetries: 1000.5 })
+    prefs.setAutoContinueConfig(cfg(-4.8, 1000.5))
     const snapshot = prefs.autoContinueConfig()
-    expect(snapshot).toEqual({ waitSeconds: 1, maxRetries: 100 })
-    expect(write).toHaveBeenCalledExactlyOnceWith(CONFIG_KEY, '{"waitSeconds":1,"maxRetries":100}')
+    expect(snapshot).toEqual(cfg(1, 100))
+    expect(write).toHaveBeenCalledExactlyOnceWith(CONFIG_KEY, JSON.stringify(cfg(1, 100)))
     expect(listener).toHaveBeenCalledTimes(1)
 
-    prefs.setAutoContinueConfig({ waitSeconds: 0, maxRetries: 999 })
+    prefs.setAutoContinueConfig(cfg(0, 999))
     expect(prefs.autoContinueConfig()).toBe(snapshot)
     expect(write).toHaveBeenCalledTimes(1)
     expect(listener).toHaveBeenCalledTimes(1)
 
     prefs.setAutoContinueConfig({ waitSeconds: NaN })
-    expect(prefs.autoContinueConfig()).toEqual({ waitSeconds: 2, maxRetries: 100 })
+    expect(prefs.autoContinueConfig()).toEqual(cfg(2, 100))
     expect(listener).toHaveBeenCalledTimes(2)
   })
 
   it('does not reset, replace, or notify config when enabling or disabling auto-continue', async () => {
     const prefs = await loadPreferences()
-    prefs.setAutoContinueConfig({ waitSeconds: 11, maxRetries: 7 })
+    prefs.setAutoContinueConfig(cfg(11, 7))
     const snapshot = prefs.autoContinueConfig()
     const stored = window.localStorage.getItem(CONFIG_KEY)
     const configListener = vi.fn()
@@ -223,7 +229,7 @@ describe('auto-continue config setters and subscriptions', () => {
 
     expect(prefs.autoContinueEnabled()).toBe(false)
     expect(prefs.autoContinueConfig()).toBe(snapshot)
-    expect(prefs.autoContinueConfig()).toEqual({ waitSeconds: 11, maxRetries: 7 })
+    expect(prefs.autoContinueConfig()).toEqual(cfg(11, 7))
     expect(window.localStorage.getItem(CONFIG_KEY)).toBe(stored)
     expect(window.localStorage.getItem(ENABLE_KEY)).toBe('false')
     expect(write.mock.calls).toEqual([[ENABLE_KEY, 'true'], [ENABLE_KEY, 'false']])
@@ -281,19 +287,19 @@ describe('untrusted config normalization and parsing', () => {
     { name: 'negative Infinity', value: -Infinity },
   ])('defaults each $name field independently, retaining the other valid field', async ({ value }) => {
     const prefs = await loadPreferences()
-    expect(prefs.normalizeAutoContinueConfig({ waitSeconds: value, maxRetries: 9 })).toEqual({ waitSeconds: 2, maxRetries: 9 })
-    expect(prefs.normalizeAutoContinueConfig({ waitSeconds: 17, maxRetries: value })).toEqual({ waitSeconds: 17, maxRetries: 5 })
+    expect(prefs.normalizeAutoContinueConfig(cfg(value, 9))).toEqual(cfg(2, 9))
+    expect(prefs.normalizeAutoContinueConfig(cfg(17, value))).toEqual(cfg(17, 5))
   })
 
   it.each([
-    { name: 'lower endpoints', input: { waitSeconds: 1, maxRetries: 1 }, expected: { waitSeconds: 1, maxRetries: 1 } },
-    { name: 'upper endpoints', input: { waitSeconds: 3600, maxRetries: 100 }, expected: { waitSeconds: 3600, maxRetries: 100 } },
-    { name: 'positive fractions', input: { waitSeconds: 3.9, maxRetries: 7.9 }, expected: { waitSeconds: 3, maxRetries: 7 } },
-    { name: 'sub-one fractions', input: { waitSeconds: 0.9, maxRetries: 0.9 }, expected: { waitSeconds: 1, maxRetries: 1 } },
-    { name: 'zero', input: { waitSeconds: 0, maxRetries: 0 }, expected: { waitSeconds: 1, maxRetries: 1 } },
-    { name: 'negative fractions', input: { waitSeconds: -8.9, maxRetries: -3.9 }, expected: { waitSeconds: 1, maxRetries: 1 } },
-    { name: 'above upper bounds', input: { waitSeconds: 3601.9, maxRetries: 101.9 }, expected: { waitSeconds: 3600, maxRetries: 100 } },
-    { name: 'huge finite numbers', input: { waitSeconds: Number.MAX_VALUE, maxRetries: Number.MAX_VALUE }, expected: { waitSeconds: 3600, maxRetries: 100 } },
+    { name: 'lower endpoints', input: cfg(1, 1), expected: cfg(1, 1) },
+    { name: 'upper endpoints', input: cfg(3600, 100), expected: cfg(3600, 100) },
+    { name: 'positive fractions', input: cfg(3.9, 7.9), expected: cfg(3, 7) },
+    { name: 'sub-one fractions', input: cfg(0.9, 0.9), expected: cfg(1, 1) },
+    { name: 'zero', input: cfg(0, 0), expected: cfg(1, 1) },
+    { name: 'negative fractions', input: cfg(-8.9, -3.9), expected: cfg(1, 1) },
+    { name: 'above upper bounds', input: cfg(3601.9, 101.9), expected: cfg(3600, 100) },
+    { name: 'huge finite numbers', input: cfg(Number.MAX_VALUE, Number.MAX_VALUE), expected: cfg(3600, 100) },
   ])('truncates and clamps $name to whole-number limits', async ({ input, expected }) => {
     const prefs = await loadPreferences()
     const config = prefs.normalizeAutoContinueConfig(input)
@@ -324,11 +330,11 @@ describe('untrusted config normalization and parsing', () => {
   })
 
   it.each([
-    { stored: '{"waitSeconds":17}', expected: { waitSeconds: 17, maxRetries: 5 } },
-    { stored: '{"maxRetries":9}', expected: { waitSeconds: 2, maxRetries: 9 } },
-    { stored: '{"waitSeconds":"bad","maxRetries":9}', expected: { waitSeconds: 2, maxRetries: 9 } },
-    { stored: '{"waitSeconds":17,"maxRetries":null}', expected: { waitSeconds: 17, maxRetries: 5 } },
-    { stored: '{"waitSeconds":3600.9,"maxRetries":-5.8}', expected: { waitSeconds: 3600, maxRetries: 1 } },
+    { stored: '{"waitSeconds":17}', expected: cfg(17, 5) },
+    { stored: '{"maxRetries":9}', expected: cfg(2, 9) },
+    { stored: '{"waitSeconds":"bad","maxRetries":9}', expected: cfg(2, 9) },
+    { stored: '{"waitSeconds":17,"maxRetries":null}', expected: cfg(17, 5) },
+    { stored: '{"waitSeconds":3600.9,"maxRetries":-5.8}', expected: cfg(3600, 1) },
   ])('normalizes partial or bounded JSON $stored field by field', async ({ stored, expected }) => {
     const prefs = await loadPreferences()
     expect(prefs.parseAutoContinueConfig(stored)).toEqual(expected)
@@ -348,7 +354,7 @@ describe('cross-tab synchronization and unavailable storage', () => {
 
     prefs.syncAutoContinueConfig(incoming)
     const adopted = prefs.autoContinueConfig()
-    expect(adopted).toEqual(incoming)
+    expect(adopted).toEqual({ ...incoming, policy: DEFAULT_AUTO_CONTINUE_POLICY })
     expect(adopted).not.toBe(incoming)
     expect(adopted).not.toBe(original)
     expect(Object.isFrozen(adopted)).toBe(true)
@@ -357,8 +363,8 @@ describe('cross-tab synchronization and unavailable storage', () => {
     incoming.waitSeconds = 99
     expect(adopted.waitSeconds).toBe(23)
 
-    prefs.syncAutoContinueConfig({ waitSeconds: 23, maxRetries: 8 })
-    prefs.syncAutoContinueConfig({ waitSeconds: 23.9, maxRetries: 8.9 })
+    prefs.syncAutoContinueConfig(cfg(23, 8))
+    prefs.syncAutoContinueConfig(cfg(23.9, 8.9))
     expect(prefs.autoContinueConfig()).toBe(adopted)
     expect(listener).toHaveBeenCalledTimes(1)
     expect(enabledListener).not.toHaveBeenCalled()
@@ -374,16 +380,16 @@ describe('cross-tab synchronization and unavailable storage', () => {
     const write = vi.spyOn(Storage.prototype, 'setItem')
     const defaults = prefs.autoContinueConfig()
 
-    prefs.syncAutoContinueConfig({ waitSeconds: NaN, maxRetries: Infinity })
+    prefs.syncAutoContinueConfig(cfg(NaN, Infinity))
     expect(prefs.autoContinueConfig()).toBe(defaults)
     expect(listener).not.toHaveBeenCalled()
 
-    prefs.syncAutoContinueConfig({ waitSeconds: -3.9, maxRetries: 999.8 })
+    prefs.syncAutoContinueConfig(cfg(-3.9, 999.8))
     const bounded = prefs.autoContinueConfig()
-    expect(bounded).toEqual({ waitSeconds: 1, maxRetries: 100 })
+    expect(bounded).toEqual(cfg(1, 100))
     expect(Object.isFrozen(bounded)).toBe(true)
     expect(listener).toHaveBeenCalledTimes(1)
-    prefs.syncAutoContinueConfig({ waitSeconds: 0, maxRetries: 1000 })
+    prefs.syncAutoContinueConfig(cfg(0, 1000))
     expect(prefs.autoContinueConfig()).toBe(bounded)
     expect(listener).toHaveBeenCalledTimes(1)
 
@@ -400,7 +406,7 @@ describe('cross-tab synchronization and unavailable storage', () => {
 
   it('syncs enable changes without a write-back, config reset, or duplicate notification', async () => {
     const prefs = await loadPreferences()
-    prefs.setAutoContinueConfig({ waitSeconds: 16, maxRetries: 6 })
+    prefs.setAutoContinueConfig(cfg(16, 6))
     const config = prefs.autoContinueConfig()
     const stored = window.localStorage.getItem(CONFIG_KEY)
     const configListener = vi.fn()
@@ -438,10 +444,10 @@ describe('cross-tab synchronization and unavailable storage', () => {
     expect(() => prefs.setAutoContinueConfig({ maxRetries: 10 })).not.toThrow()
     expect(() => prefs.setAutoContinueEnabled(true)).not.toThrow()
     const changed = prefs.autoContinueConfig()
-    expect(changed).toEqual({ waitSeconds: 17, maxRetries: 10 })
+    expect(changed).toEqual(cfg(17, 10))
     expect(changed).not.toBe(previous)
     expect(Object.isFrozen(changed)).toBe(true)
-    expect(previous).toEqual({ waitSeconds: 17, maxRetries: 9 })
+    expect(previous).toEqual(cfg(17, 9))
     expect(prefs.autoContinueEnabled()).toBe(true)
     expect(configListener).toHaveBeenCalledTimes(1)
     expect(enabledListener).toHaveBeenCalledTimes(1)

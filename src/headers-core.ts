@@ -56,6 +56,14 @@ export interface HeaderOverride {
    * own document, not in the profile, so it survives an official card save.
    */
   camouflage?: CamouflagePreset
+  /**
+   * Whether this route may recover a Responses topic whose upstream items were
+   * minted under a different backend resource (see `history-compat.ts`). Absent
+   * means off: a route only pays for the check once the user turned it on for
+   * that route. Stored in the plugin's own document, so it survives an official
+   * card save.
+   */
+  historyCompat?: boolean
 }
 
 /** Backwards-compatible name retained for callers that only knew the UA seam. */
@@ -278,10 +286,13 @@ function recordHeaderConflicts(index: HeaderIndex, existing: HeaderOverride, rou
  *   Optional: a deployment with no camouflage file builds exactly the index it
  *   built before, and a route named here that the settings no longer carry is
  *   simply never matched.
+ * @param historyCompat - route → whether that route recovers foreign Responses
+ *   history, from the plugin's own document. Optional for the same reason.
  */
 export function buildHeaderIndex(
   providers: Record<string, Record<string, unknown>>,
   camouflages?: Readonly<Record<string, CamouflagePreset | undefined>>,
+  historyCompat?: Readonly<Record<string, boolean>>,
 ): HeaderIndex {
   const index = emptyIndex()
   const claimedUserAgents = new Map<string, { routes: string[]; values: string[] }>()
@@ -301,6 +312,9 @@ export function buildHeaderIndex(
     const camouflage = camouflages !== undefined && Object.hasOwn(camouflages, route)
       ? camouflages[route]
       : undefined
+    const recoversHistory = historyCompat !== undefined && Object.hasOwn(historyCompat, route)
+      ? historyCompat[route] === true
+      : false
     const override: HeaderOverride = {
       origin,
       pathPrefix: pathPrefixOf(baseURL ?? origin),
@@ -310,6 +324,7 @@ export function buildHeaderIndex(
       hasHeaders,
       ...(userAgent === undefined ? {} : { userAgent }),
       ...(camouflage === undefined ? {} : { camouflage }),
+      ...(recoversHistory ? { historyCompat: true } : {}),
     }
     // Every route is registered, headers or not: a route that declares no
     // headers must still be able to claim its own requests so another route on

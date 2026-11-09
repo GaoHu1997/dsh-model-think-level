@@ -191,6 +191,34 @@ export const CAMOUFLAGE_PATH = '/dsh-model-think-level/camouflage'
 export const CAMOUFLAGE_FILE = 'camouflage.json'
 
 /**
+ * Same-origin host route owning the Responses history-compatibility document:
+ * `GET` answers which routes recover a topic whose upstream history was minted
+ * under another backend resource, `POST` saves one route's switch.
+ * Backing file: `<DSH_HOME>/dsh-model-think-level/topic-recovery.json` (see
+ * {@link HISTORY_COMPAT_FILE}).
+ *
+ * Plugin-owned for the same reason the camouflage document is: the official
+ * add-provider card writes the WHOLE profile at `providers.<route>`, so a field
+ * its schema does not know is dropped by the first save.
+ */
+export const HISTORY_COMPAT_PATH = '/dsh-model-think-level/history-compat'
+
+/**
+ * File name of the history-compatibility document inside the plugin home dir.
+ *
+ * Deliberately not `history-compat.json`: the sync layer treats any segment
+ * matching `history` as session history and refuses to carry it, so the name
+ * itself would keep these switches from ever leaving this computer.
+ */
+export const HISTORY_COMPAT_FILE = 'topic-recovery.json'
+
+/**
+ * The name this document shipped under before it was syncable. Still read (and
+ * migrated on first read) so a switch saved by an earlier build is not lost.
+ */
+export const HISTORY_COMPAT_LEGACY_FILE = 'history-compat.json'
+
+/**
  * Same-origin host route owning the image-generation config surface: `GET`
  * answers the derived image-model list merged with the stored overrides,
  * `POST` saves default model / default params / output dir / per-model rows.

@@ -88,6 +88,11 @@ import { warmStoredKeyLists } from './key-list-warm.js'
 import { teardownFingerprintRunners } from './fingerprint-runner.js'
 import { createSessionDirectoryTracker } from './injection/session-directory.js'
 import { createAutoContinue } from './injection/auto-continue-run.js'
+import { createErrorDetail } from './injection/error-detail.js'
+import {
+  ERROR_DETAIL_PREF_KEY, errorDetailEnabled, subscribeErrorDetailEnabled, syncErrorDetailEnabled,
+} from './error-detail-pref.js'
+import { mountAutoContinueController } from './AutoContinueController.tsx'
 import {
   AUTO_CONTINUE_PREF_KEY, AUTO_CONTINUE_CONFIG_KEY,
   syncAutoContinueEnabled, syncAutoContinueConfig, parseAutoContinueConfig,
@@ -364,9 +369,11 @@ export function apply(ctx: ClientContext): void {
       else if (event.key === MODEL_ORDER_KEY) syncModelOrders(parseModelOrders(event.newValue))
       else if (event.key === AUTO_CONTINUE_PREF_KEY) syncAutoContinueEnabled(event.newValue === 'true')
       else if (event.key === AUTO_CONTINUE_CONFIG_KEY) syncAutoContinueConfig(parseAutoContinueConfig(event.newValue))
+      else if (event.key === ERROR_DETAIL_PREF_KEY) syncErrorDetailEnabled(event.newValue !== 'false')
       else if (event.key === null) {
         syncAutoContinueEnabled(false)
         syncAutoContinueConfig(parseAutoContinueConfig(null))
+        syncErrorDetailEnabled(true)
       }
       }
     window.addEventListener('storage', onStorage)
@@ -413,11 +420,44 @@ export function apply(ctx: ClientContext): void {
   // The auto-continue watcher: replies 「继续」 to the current session's
   // cut-off turns while the pane's switch is on (default OFF). The poll is
   // memory-only while idle; the switch is consulted per turn end, so enabling
-  // it mid-session takes effect from the next ending.
+  // it mid-session takes effect from the next ending. The controller chip on
+  // the composer stat line rides the same runner, so its stop/reset/resume act
+  // on exactly the chain the watcher is driving.
   ctx.effect(() => {
     const runner = createAutoContinue({ ctx, t })
-    return () => runner.dispose()
+    const unmountController = mountAutoContinueController({
+      runner,
+      t,
+      onSettings: () => { mountConfigPane({ api: settingsApi, t }) },
+    })
+    return () => {
+      unmountController()
+      runner.dispose()
+    }
   }, 'dsh-model-think-level: auto-continue watcher')
+
+  // The failure-detail seat: a quiet 「查看详情」 run at the end of each official
+  // failure row, opening what the provider actually answered. The pane's
+  // 失败详情 switch mounts/unmounts it live — the buttons and the popover are
+  // ours, so turning the switch off leaves no trace without a reload.
+  ctx.effect(() => {
+    let seat: ReturnType<typeof createErrorDetail> | undefined
+    const sync = (): void => {
+      if (!errorDetailEnabled()) {
+        seat?.dispose()
+        seat = undefined
+        return
+      }
+      seat ??= createErrorDetail({ ctx, t })
+    }
+    const off = subscribeErrorDetailEnabled(sync)
+    sync()
+    return () => {
+      off()
+      seat?.dispose()
+      seat = undefined
+    }
+  }, 'dsh-model-think-level: failure detail seat')
 }
 
 export type { BreKey }
