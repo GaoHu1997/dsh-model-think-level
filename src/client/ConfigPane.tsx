@@ -83,21 +83,32 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
   // frame; the effect below refreshes it behind the paint instead of gating it.
   const [view, setView] = useState<ImageConfigView | undefined>(() => cachedImageConfigView())
   const [loadError, setLoadError] = useState<string | undefined>(undefined)
-  const [busyId, setBusyId] = useState<string | undefined>(undefined)
+  const [busyIds, setBusyIds] = useState<readonly string[]>([])
+  const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<string | undefined>(undefined)
   // Folded by default: this card is one entry in a list of settings, not the
   // whole pane. The switch sits on the head line, outside the folded body.
   const [open, setOpen] = useState(false)
 
-  useEffect(() => {
-    let alive = true
+  const alive = useRef(false)
+  const viewRequest = useRef(0)
+  const writeTail = useRef(Promise.resolve())
+  const pendingWrites = useRef(0)
+  const writeErrors = useRef<string[]>([])
+  const reload = useCallback((): void => {
+    const request = ++viewRequest.current
     void readImageConfigView().then(answer => {
-      if (!alive) return
-      if (answer.ok) setView(answer.data)
-      else setLoadError(answer.error)
+      if (!alive.current || request !== viewRequest.current) return
+      setView(answer.data)
+      setLoadError(answer.ok ? undefined : answer.error)
     })
-    return () => { alive = false }
   }, [])
+
+  useEffect(() => {
+    alive.current = true
+    reload()
+    return () => { alive.current = false; viewRequest.current += 1 }
+  }, [reload])
 
   // route → the provider's display name (`providers.<route>.displayName`),
   // read from the live settings document. The host already stamps it on each
@@ -120,35 +131,49 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     return () => { alive = false }
   }, [api])
 
-  /** Refresh after any write; a failed re-read keeps the last view visible. */
-  const reload = useCallback((): void => {
-    void readImageConfigView().then(answer => {
-      if (answer.ok) setView(answer.data)
-    })
-  }, [])
+  /** 每个已接受的补丁依次提交；整批完成后再读取，关闭面板不丢弃已排队操作。 */
+  const save = useCallback((patch: Parameters<typeof saveImageConfig>[0], busy?: string): void => {
+    viewRequest.current += 1
+    if (pendingWrites.current === 0) {
+      writeErrors.current = []
+      setNotice(undefined)
+    }
+    pendingWrites.current += 1
+    setSaving(true)
+    if (busy !== undefined) setBusyIds(current => [...current, busy])
+    const apply = async (): Promise<void> => {
+      const answer = await saveImageConfig(patch).catch((error: unknown) => ({
+        ok: false as const, error: error instanceof Error ? error.message : String(error),
+      }))
+      pendingWrites.current -= 1
+      if (!answer.ok) writeErrors.current.push(answer.error)
+      if (!alive.current) return
+      if (busy !== undefined) setBusyIds(current => {
+        const index = current.indexOf(busy)
+        return index < 0 ? current : [...current.slice(0, index), ...current.slice(index + 1)]
+      })
+      setSaving(pendingWrites.current > 0)
+      // 后续成功不掩盖同一批里较早发生的失败。
+      setNotice(writeErrors.current.length === 0 ? undefined : writeErrors.current.join('\n'))
+      if (pendingWrites.current === 0) reload()
+    }
+    writeTail.current = writeTail.current.then(apply, apply)
+  }, [reload])
 
   /** The default-model select: one save, then the options render from the answer. */
   const setDefault = useCallback((id: string): void => {
     if (id.length === 0) return
-    setBusyId('default')
-    void saveImageConfig({ defaultModel: id }).then(answer => {
-      setBusyId(undefined)
-      if (answer.ok) { setNotice(undefined); reload() } else setNotice(answer.error)
-    })
-  }, [reload])
+    save({ defaultModel: id }, 'default')
+  }, [save])
 
   /**
    * The service switch. Off unregisters the tool and refuses every generation
-   * entry on the host, while the models and params stay stored — the pane only
-   * flips the single field and re-reads the truth afterwards.
+   * entry on the host. The stored preferences stay editable, and the model
+   * options come from the current settings when the pane reads again.
    */
   const setEnabled = useCallback((enabled: boolean): void => {
-    setBusyId('enabled')
-    void saveImageConfig({ enabled }).then(answer => {
-      setBusyId(undefined)
-      if (answer.ok) { setNotice(undefined); reload() } else setNotice(answer.error)
-    })
-  }, [reload])
+    save({ enabled }, 'enabled')
+  }, [save])
 
   /**
    * The per-request timeout. Stored in milliseconds; edited as one of five
@@ -159,16 +184,13 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     if (view === undefined) return
     const ms = Number(raw)
     if (!Number.isFinite(ms) || ms < 60_000 || ms > 3_600_000) return
-    if (ms === view.defaults.timeoutMs) return
-    void saveImageConfig({ defaults: { timeoutMs: ms } }).then(answer => {
-      if (answer.ok) { setNotice(undefined); reload() } else setNotice(answer.error)
-    })
-  }, [view, reload])
+    save({ defaults: { timeoutMs: ms } })
+  }, [view, save])
 
   if (view === undefined) {
     // A skeleton, not a blank box: the pane structure is on screen from the
     // first frame, so a slow host read never looks like a dead button.
-    return createElement('div', { className: 'bre-config-loading', 'aria-busy': true },
+    return createElement('div', { className: 'bre-config-loading', 'aria-busy': loadError === undefined },
       createElement('div', { className: 'bre-config-loading-text' },
         loadError === undefined ? t('imagegenLoading') : `${t('imagegenLoadFailed')}: ${loadError}`),
       createElement('div', { className: 'bre-config-skeleton' },
@@ -196,7 +218,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     const provider = routeNames[model.route] ?? model.providerLabel ?? model.route
     return `${model.label} · ${provider}`
   }
-  return createElement('div', { className: 'bre-config-card' },
+  return createElement('div', { className: 'bre-config-card', 'aria-busy': saving },
     // The head line: name and description on the left (they are the expand
     // button), the state word, the switch and the chevron on the right. The
     // switch and the chevron are siblings of the button, so flipping the
@@ -224,7 +246,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
           role: 'switch',
           'aria-label': t('imagegenEnable'),
           checked: view.enabled,
-          disabled: busyId === 'enabled',
+          disabled: busyIds.includes('enabled'),
           onChange: (event: ChangeEvent<HTMLInputElement>) => setEnabled((event.target as HTMLInputElement).checked),
         }),
         createElement('span', { className: 'bre-config-switch-track', 'aria-hidden': true }),
@@ -238,6 +260,8 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
     ),
     // A save failure must stay visible while the card is folded: the switch is
     // on the head line, so its error cannot live in the body.
+    loadError !== undefined && createElement('div', { className: 'bre-config-notice', role: 'alert' },
+      `${t('imagegenLoadFailed')}: ${loadError}`),
     notice !== undefined && createElement('div', { className: 'bre-config-notice' }, notice),
     open && createElement('div', { className: 'bre-config-card-body', id: bodyId },
       toolError !== undefined && createElement('div', { className: 'bre-config-notice bre-config-notice-warn' },
@@ -250,7 +274,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
           value: canonicalSize(view.defaults.size),
           'aria-label': t('imagegenSizeLabel'),
           onChange: (event: ChangeEvent<HTMLSelectElement>) => {
-            void saveImageConfig({ defaults: { size: (event.target as HTMLSelectElement).value } }).then(reload)
+            save({ defaults: { size: (event.target as HTMLSelectElement).value } })
           },
         }, IMAGE_SIZE_TIERS.map(tier => createElement('option', { key: tier.label, value: tier.value }, tier.label))),
         createElement('select', {
@@ -258,7 +282,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
           value: view.defaults.quality,
           'aria-label': t('imagegenQualityLabel'),
           onChange: (event: ChangeEvent<HTMLSelectElement>) => {
-            void saveImageConfig({ defaults: { quality: (event.target as HTMLSelectElement).value } }).then(reload)
+            save({ defaults: { quality: (event.target as HTMLSelectElement).value } })
           },
         }, ['low', 'medium', 'high', 'auto'].map(quality => createElement('option', { key: quality, value: quality }, quality))),
         createElement('select', {
@@ -266,7 +290,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
           value: String(view.defaults.n),
           'aria-label': t('imagegenCountLabel'),
           onChange: (event: ChangeEvent<HTMLSelectElement>) => {
-            void saveImageConfig({ defaults: { n: Number((event.target as HTMLSelectElement).value) } }).then(reload)
+            save({ defaults: { n: Number((event.target as HTMLSelectElement).value) } })
           },
         }, [1, 2, 3, 4].map(count => createElement('option', { key: count, value: String(count) }, `n=${count}`))),
         // The timeout the failure copy already pointed at: the value lives in
@@ -295,7 +319,7 @@ export function ImageGenCard(props: { api: RemoteApi; t: (key: string, params?: 
           className: 'bre-config-select bre-config-default-select',
           value: view.defaultModel ?? '',
           'aria-label': t('imagegenDefaultModelLabel'),
-          disabled: busyId === 'default',
+          disabled: busyIds.includes('default'),
           onChange: (event: ChangeEvent<HTMLSelectElement>) => setDefault((event.target as HTMLSelectElement).value),
         },
         view.defaultModel === null && createElement('option', { value: '', disabled: true }, t('imagegenDefaultModelNone')),

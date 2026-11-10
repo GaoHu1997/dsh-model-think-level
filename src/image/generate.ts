@@ -27,7 +27,6 @@ import { harnessHome } from '../key-index.js'
 import { createImageDeadline, type ImageDeadline } from './deadline.js'
 import {
   effectiveParams,
-  readImageConfig,
   resolveImageModel,
   type ImageConfig,
   type ImageModel,
@@ -112,8 +111,8 @@ export class GenerateError extends Error {
 
 /** The faces this core needs from its host. All injectable for tests. */
 export interface GenerateDeps {
-  /** The live config; read fresh per call (the MCP path re-reads the file). */
-  readonly config?: () => ImageConfig
+  /** One operation's live snapshot, supplied by the host; never read a disk catalogue. */
+  readonly config: () => ImageConfig
   /** Resolve one credential reference to its value. */
   readonly resolveKey: (ref: string, signal?: AbortSignal) => Promise<string | undefined>
   /** The fetch beneath any wrapper — the images call must not be re-intercepted. */
@@ -121,7 +120,7 @@ export interface GenerateDeps {
   /** Base dir for relative `outputDir`s (defaults to the harness home). */
   readonly home?: () => string
   /** Persist `lastGoodParams` after a successful fallback (host: config file). */
-  readonly persistLastGood?: (modelId: string, params: ImageModel['lastGoodParams']) => void
+  readonly persistLastGood?: (modelId: string, params: ImageModel['lastGoodParams'], model: ImageModel) => void
   /** Now, for file stamps (defaults to Date.now). */
   readonly now?: () => number
   /** Per-call timeout override (ms). */
@@ -405,7 +404,7 @@ export function createGenerateDeadline(timeoutMs: number, signal?: AbortSignal):
  * the param fallback chain), decodes and writes the file.
  */
 export async function generateImage(deps: GenerateDeps, request: GenerateRequest, sharedDeadline?: ImageDeadline): Promise<GenerateResult> {
-  const config = deps.config?.() ?? readImageConfig()
+  const config = deps.config()
   const deadline = sharedDeadline ?? createGenerateDeadline(deps.timeoutMs ?? config.defaults.timeoutMs, request.signal)
   try {
     deadline.check()
@@ -543,14 +542,14 @@ async function generateWithinDeadline(deps: GenerateDeps, request: GenerateReque
         images.push({ filePath, data })
       }
       deadline.check()
-      if (revisions.length > 0 && deps.persistLastGood !== undefined) {
+      if (deps.persistLastGood !== undefined) {
         deps.persistLastGood(model.id, {
           ...model.params,
           responseFormat: format,
           sizes: model.params.sizes,
           qualities: model.params.qualities,
           maxN: model.params.maxN,
-        })
+        }, model)
       }
       deadline.check()
       return {
@@ -578,7 +577,7 @@ async function generateWithinDeadline(deps: GenerateDeps, request: GenerateReque
     lastFailure = classifyFailure(response.status, combined)
     // Endpoint facts are worth persisting even on a terminal failure: a 404
     // means "no images endpoint here", and the badge should say so.
-    if (lastFailure.kind === 'endpoint') deps.persistLastGood?.(model.id, null)
+    if (lastFailure.kind === 'endpoint') deps.persistLastGood?.(model.id, null, model)
     const revision = fallbackRevisionFor(response.status, bodyText)
     if (revision !== undefined && revisions.length < 4) {
       // Apply the FIRST matching downgrade the error names; the loop retries

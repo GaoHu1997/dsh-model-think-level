@@ -103,17 +103,9 @@ import { buildHeaderIndex, emptyIndex, type UserAgentIndex } from './headers-cor
 import { headerOverlayBypass, headerOverlayInstalled, installHeaderOverlay, type OverlaySource } from './headers-fetch.js'
 import { describePiAiHeaderState, installPiAiHeaderTransforms } from './headers-pi-ai.js'
 import { detectHeaderConflicts, type HeaderConflictReport } from './headers-conflict.js'
-// Image generation (生图): one config file, one generation core behind two
-// entries — the `generate_image` native tool (主通道) and the /生图 host
-// command — plus the boot-time removal of the retired MCP patch entry.
-import {
-  deriveImageSeeds,
-  emptyImageConfig,
-  readImageConfig,
-  syncImageConfig,
-  updateImageConfig,
-  type ImageConfig,
-} from './image/config.js'
+// Image models are projected from live settings; only preferences and
+// connection-scoped observations are persisted by ImageConfiguration.
+import { ImageConfiguration, type ImagePreferences } from './image/state.js'
 import { generateImage, type GenerateDeps } from './image/generate.js'
 import { registerImagegenCommand, type CommandsServiceLike } from './image/command.js'
 import { imageToolHint, registerGenerateImageTool } from './image/tool.js'
@@ -1030,15 +1022,25 @@ export function apply(ctx: Context, config: Config = {}): void {
   // describe per document generation.
   let piDescriptorCache: ReturnType<typeof settings.describe>[number] | undefined
   let piDescriptorCached = false
-  const piDescriptor = (required = false): ReturnType<typeof settings.describe>[number] | undefined => {
-    if (piDescriptorCached) return piDescriptorCache
+  let piDescriptorReading = false
+  const piDescriptor = (required = false, fresh = false): ReturnType<typeof settings.describe>[number] | undefined => {
+    // describe() may emit document-updated synchronously. Advisory listeners
+    // must not recursively describe the same generation while it is being read.
+    if (piDescriptorReading) {
+      if (required) throw new HostReadError('the llm-pi-ai settings are being read')
+      return undefined
+    }
+    if (piDescriptorCached && !fresh) return piDescriptorCache
     let descriptor: ReturnType<typeof settings.describe>[number] | undefined
     try {
+      piDescriptorReading = true
       descriptor = settings.describe().find(entry => entry.ns === PI_NS)
     } catch {
       if (required) throw new HostReadError('the llm-pi-ai settings could not be read')
       // Dispatch guards remain advisory while interactive routes report errors.
       return undefined
+    } finally {
+      piDescriptorReading = false
     }
     // A missing namespace is expected during boot and must be retried -- so a
     // not-ready read is never cached: the retry must reach the wire again.
@@ -1680,25 +1682,36 @@ export function apply(ctx: Context, config: Config = {}): void {
   refreshHeaders()
   refreshKeyScopes()
   ctx.effect(() => () => stopHeaderRetries(), 'dsh-model-think-level: header retries')
-  ctx.on('settings/document-updated', (ns) => {
-    if (ns === PI_NS) {
-      refreshHeaders()
-      refreshKeyScopes()
-      // Refresh routing, but retain metadata and secrets for absent providers.
-      // A settings snapshot is not an explicit key-removal request.
-      // The image side rides the same events: the config file's derived
-      // models[] re-derives from this document (config page, MCP, command).
-      syncImageConfigNow()
-      const source = catalogueSource()
-      if (source !== catalogueSourceStamp) {
-        catalogueSourceStamp = source
-        invalidateListings()
-      }
-      // A save that moved a provider's wire, key reference or model list makes
-      // the scopes it left behind a guess: sweep the affected routes once the
-      // cluster of saves settles.
-      scheduleKeyProbes()
+  const refreshModelConsumers = (): void => {
+    refreshHeaders()
+    refreshKeyScopes()
+    // Refresh routing, but retain metadata and secrets for absent providers.
+    // A settings snapshot is not an explicit key-removal request.
+    const source = catalogueSource()
+    if (source !== catalogueSourceStamp) {
+      catalogueSourceStamp = source
+      invalidateListings()
     }
+    scheduleKeyProbes()
+  }
+  let modelConsumerRefreshQueued = false
+  let modelConsumersDisposed = false
+  ctx.effect(() => () => { modelConsumersDisposed = true })
+  ctx.on('settings/document-updated', (ns) => {
+    if (ns !== PI_NS) return
+    if (!piDescriptorReading) {
+      refreshModelConsumers()
+      return
+    }
+    // A synchronous invalidation during describe() must not clear header/key
+    // indexes with a temporary reentrant undefined. Refresh after the current
+    // descriptor is installed, coalescing notifications from the same read.
+    if (modelConsumerRefreshQueued) return
+    modelConsumerRefreshQueued = true
+    queueMicrotask(() => {
+      modelConsumerRefreshQueued = false
+      if (!modelConsumersDisposed) refreshModelConsumers()
+    })
   })
   /**
    * Resolve the ordered keys that may sign one matched request. The preference
@@ -1888,39 +1901,23 @@ export function apply(ctx: Context, config: Config = {}): void {
     console.warn(`[dsh-model-think-level] 旧版生图 MCP 补丁条目自动移除失败（可手动删除标记块）：${error instanceof Error ? error.message : String(error)}`)
   }
   //
-  // There is NO wire interception any more: a chat model asks for a picture by
-  // CALLING the MCP tool (`mcp__dsh-image__generate_image`), so image models
-  // stay out of the composer's switcher and nothing rewrites an outbound
-  // chat/completions request.
+  // The conversation model calls the native image tool. Image models stay out
+  // of the composer's chat switcher; image generation never rewrites a chat
+  // request or depends on the retired MCP process.
 
-  /**
-   * Re-derive the config file's `models[]` from the settings document, keeping
-   * every stored override. Runs on boot and on every pi-ai document update, so
-   * the config page, the MCP server and the command all read one snapshot.
-   * Skipped while llm-pi-ai has not registered (an empty providers
-   * map at boot must not wipe a config the previous run wrote).
-   */
-  const syncImageConfigNow = (): void => {
-    try {
-      if (piSection() === undefined) return
-      const providers = providersOf()
-      // An EMPTY providers map is not the user deleting their models: it is what
-      // the document looks like before it is readable (boot, HMR, a reload that
-      // re-registers the section before its value lands). Syncing it would write
-      // models: [] and stamp defaultModel to null, and no later pass recovers the
-      // pick. Only a populated document may prune rows.
-      if (Object.keys(providers).length === 0) return
-      updateImageConfig(document => syncImageConfig(document, providers))
-    } catch {
-      // The config file is best-effort state: a failed sync leaves the last
-      // snapshot on disk, which the next successful sync replaces wholesale.
-    }
-  }
-  syncImageConfigNow()
+  // Image consumers share the host's live resolved configuration. Reading this
+  // projection never repairs or synchronizes a file; there is no catalogue on
+  // disk to go stale, and no settings event or page visit required for readiness.
+  const imageConfiguration = new ImageConfiguration({
+    describe: () => {
+      const descriptor = piDescriptor(true, true)
+      return descriptor === undefined ? [] : [descriptor]
+    },
+  })
 
   /** The generation deps the host serves the core with (credentials via the store). */
   const imageGenerateDeps: GenerateDeps = {
-    config: () => readImageConfig(),
+    config: () => imageConfiguration.forGeneration(),
     resolveKey: async ref => {
       try {
         return await resolveCredential(ctx.get('credentials') as CredentialsService | undefined, ref)
@@ -1928,23 +1925,14 @@ export function apply(ctx: Context, config: Config = {}): void {
         return undefined
       }
     },
-    // Beneath the wrapper: the images call composes its own auth from the
-    // model row's reference, exactly like the listing probe above.
     send: headerOverlayBypass(),
-    persistLastGood: (modelId, params) => {
+    persistLastGood: (_modelId, params, model) => {
       try {
-        updateImageConfig(document => ({
-          ...document,
-          models: document.models.map(model => {
-            if (model.id !== modelId) return model
-            if (params === null) {
-              return { ...model, endpoint: { ...model.endpoint, status: 'unsupported' as const } }
-            }
-            return { ...model, lastGoodParams: params }
-          }),
-        }))
-      } catch {
-        // A diagnostics write must never fail the generation that earned it.
+        // Record against the connection captured by the operation, even when a
+        // settings edit lands while the upstream request is in flight.
+        imageConfiguration.record(model, params)
+      } catch (error) {
+        console.warn(`[dsh-model-think-level] 生图调用诊断保存失败：${error instanceof Error ? error.message : String(error)}`)
       }
     },
   }
@@ -1961,7 +1949,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   registerImagegenCommand(
     commandsService,
     {
-      modelIds: () => readImageConfig().models.map(model => model.id),
+      modelIds: () => imageConfiguration.forGeneration().models.map(model => model.id),
       generate: generateImage,
       generateDeps: imageGenerateDeps,
     },
@@ -2000,7 +1988,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         registered = registerGenerateImageTool(toolCtx, {
           generateDeps: imageGenerateDeps,
           attachments: (toolCtx as unknown as { attachments: unknown }).attachments as Parameters<typeof registerGenerateImageTool>[1]['attachments'],
-          readConfig: () => readImageConfig(),
+          readConfig: () => imageConfiguration.forGeneration(),
         })
         imageToolState.name = registered.name
         imageToolState.error = undefined
@@ -2011,8 +1999,13 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
     }
     const reconcile = (): void => {
-      if (readImageConfig().enabled) acquire()
-      else release()
+      try {
+        if (imageConfiguration.preferences().enabled) acquire()
+        else release()
+      } catch (error) {
+        release()
+        imageToolState.error = error instanceof Error ? error.message : String(error)
+      }
     }
     reconcileImageTool = reconcile
     toolCtx.effect(
@@ -2034,7 +2027,18 @@ export function apply(ctx: Context, config: Config = {}): void {
         () => (promptCtx as unknown as { systemPrompt: { context(contribution: { name: string; order: number; text: () => string }): () => void } }).systemPrompt.context({
           name: 'dsh-model-think-level:image-tool',
           order: 61,
-          text: () => imageToolHint(readImageConfig()),
+          text: () => {
+            reconcileImageTool?.()
+            try {
+              const config = imageConfiguration.forGeneration()
+              if (config.enabled && imageToolState.name === undefined) {
+                return `生图工具暂不可用：${imageToolState.error ?? '宿主工具或附件服务尚未就绪'}。请明确报告该原因。`
+              }
+              return imageToolHint(config, imageToolState.name)
+            } catch (error) {
+              return `生图配置暂不可用：${error instanceof Error ? error.message : String(error)}。请明确报告该状态，不要把读取失败解释为未配置模型。`
+            }
+          },
         }),
         'dsh-model-think-level: image tool hint',
       )
@@ -3734,9 +3738,8 @@ export function apply(ctx: Context, config: Config = {}): void {
       'dsh-model-think-level: fingerprint route',
     )
 
-    // Image-generation config: GET answers the derived list merged with the
-    // stored overrides (re-syncing first, so the snapshot is never stale), POST
-    // saves the defaults and the default model.
+    // The config route is a read-only projection of live settings plus saved
+    // preferences. Visiting this page has no effect on tool readiness.
     ctx.effect(
       () =>
         webServerCtx.webServer.register({
@@ -3753,12 +3756,36 @@ export function apply(ctx: Context, config: Config = {}): void {
               return
             }
             if (req.method === 'GET') {
-              // A GET re-syncs first (an expired snapshot must not be served as
-              // fresh); a failed sync leaves the stored document, still useful.
-              syncImageConfigNow()
-              const config = readImageConfig()
+              reconcileImageTool?.()
+              let config: ReturnType<ImageConfiguration['read']>
+              try {
+                config = imageConfiguration.read()
+              } catch (error) {
+                let preferences: ImagePreferences | undefined
+                try { preferences = imageConfiguration.preferences() } catch { /* The original read failure is authoritative. */ }
+                sendJson(res, 503, {
+                  ok: false,
+                  error: error instanceof Error ? error.message : String(error),
+                  source: 'live-settings',
+                  storageVersion: 3,
+                  ...(preferences === undefined ? {} : {
+                    enabled: preferences.enabled,
+                    defaultModel: preferences.defaultModel,
+                    defaults: preferences.defaults,
+                    outputDir: preferences.outputDir,
+                  }),
+                  tool: {
+                    registered: imageToolState.name !== undefined,
+                    name: imageToolState.name ?? null,
+                    ...(imageToolState.error === undefined ? {} : { error: imageToolState.error }),
+                  },
+                })
+                return
+              }
               sendJson(res, 200, {
                 ok: true,
+                source: 'live-settings',
+                storageVersion: 3,
                 enabled: config.enabled,
                 models: config.models,
                 defaultModel: config.defaultModel,
@@ -3780,10 +3807,10 @@ export function apply(ctx: Context, config: Config = {}): void {
               sendJson(res, 400, { ok: false, error: 'a JSON body is required' })
               return
             }
-            // Save: defaults, output dir, default model, per-model row overrides.
+            // Save only preferences; current host settings own model connections.
             try {
-              updateImageConfig(document => {
-                let next: ImageConfig = document
+              imageConfiguration.update(document => {
+                let next: ImagePreferences = document
                 // The service switch: off unregisters the tool and refuses
                 // every generation entry, while the models and params stay put.
                 if (typeof body['enabled'] === 'boolean') next = { ...next, enabled: body['enabled'] }
@@ -3814,7 +3841,6 @@ export function apply(ctx: Context, config: Config = {}): void {
                 // now the only place size/quality/n are picked.
                 return next
               })
-              syncImageConfigNow()
               // Make the registry follow the saved switch before answering, so
               // the pane's next read reports the truth the session already has.
               try {

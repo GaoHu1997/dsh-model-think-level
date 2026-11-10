@@ -260,7 +260,7 @@ export function registerGenerateImageTool(ctx: Context, deps: ImageToolDeps): { 
       if (typeof parsed === 'string') throw new Error(parsed)
       // Snapshot once so references, generation and saves share the SAME budget
       // and config, rather than starting another full timeout inside the core.
-      const config = deps.generateDeps.config?.() ?? deps.readConfig()
+      const config = deps.generateDeps.config()
       // A stale tool definition (or an in-flight call after the switch went
       // off) fails on the switch before touching the credentials or the wire.
       if (!config.enabled) throw new Error('生图服务已关闭——可在「高级设置 → 生图」里重新开启')
@@ -366,16 +366,16 @@ export function registerGenerateImageTool(ctx: Context, deps: ImageToolDeps): { 
  * several candidates the resolver refuses, and the hint then has to say so —
  * naming a model there is a promise the call cannot keep.
  */
-export function imageToolHint(config: ImageConfig): string {
+export function imageToolHint(config: ImageConfig, toolName: string = IMAGE_TOOL_NAME): string {
   // Switched off: the tool is unregistered too, so the prompt must say nothing
   // about a callable it no longer has.
   if (!config.enabled) return ''
-  if (config.models.length === 0) return ''
+  if (config.models.length === 0) return '生图配置当前没有标记为「生图」的模型；请到「模型配置 → 输入模态」勾选生图后重试。请明确报告这个配置状态，不要把它解释为工具未加载。'
   const defaults = `size ${config.defaults.size}，quality ${config.defaults.quality}，n ${config.defaults.n}`
   const resolved = resolveImageModel(config)
   const opening = resolved === undefined
-    ? `生图请调用 generate_image 工具。当前没有唯一的默认生图模型（共 ${config.models.length} 个候选），调用时必须显式填 model，可选值：${config.models.map((model) => model.id).join('、')}；size/quality/n 可缺省（默认 ${defaults}）。`
-    : `生图请调用 generate_image 工具（缺省参数即可：默认模型 ${resolved.id}，${defaults}）。`
+    ? `生图请调用 ${toolName} 工具。当前没有唯一的默认生图模型（共 ${config.models.length} 个候选），调用时必须显式填 model，可选值：${config.models.map((model) => model.id).join('、')}；size/quality/n 可缺省（默认 ${defaults}）。`
+    : `生图请调用 ${toolName} 工具（缺省参数即可：默认模型 ${resolved.id}，${defaults}）。`
   const lines = [
     opening,
     resolved === undefined

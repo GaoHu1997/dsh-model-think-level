@@ -1,19 +1,14 @@
 /**
- * The image-generation config: `<DSH_HOME>/dsh-model-think-level/image.json`.
+ * Image configuration types, pure model derivation and legacy v2 parsing.
  *
- * The file holds no secrets — credential references only — which is what makes
- * it safe to keep in plain text and to hand to the MCP subprocess through one
- * `DSH_IMAGE_CONFIG` env var. Its `models[]` is a DERIVED SNAPSHOT: the source
- * of truth is the `llm-pi-ai` settings document's `inputImageGen` rows (the
- * same marker the Models page and the auto-fill write), and this file layers
- * the user's per-model overrides (endpoint verdict, param abilities, picked
- * size/quality/n) on top. Syncing keeps every override keyed by model id, so a
- * model that leaves the settings document drops out and one that comes back
- * keeps its overrides.
+ * Live model membership and connections are supplied by ImageConfiguration in
+ * state.ts from the host's resolved llm-pi-ai settings. Runtime consumers must
+ * use that adapter; the v2 file helpers below are retained for compatibility
+ * tests and legacy preference/diagnostic migration only.
  *
- * Parsing follows `key-index.ts`: read-never-throw for absent files, defensive
- * field-by-field drops for malformed content, and an atomic temp-then-rename
- * write so a crash mid-write cannot leave a half-parsed config behind.
+ * image.json now stores v3 preferences and connection-scoped observations. A
+ * stored v2 models[] snapshot never authorizes a model or supplies a connection
+ * to a live image operation.
  *
  * @module dsh-model-think-level/image/config
  */
@@ -53,7 +48,7 @@ export interface ImageModelSeed {
   readonly keyRef?: string
 }
 
-/** One image model as the config stores it: derived facts + user overrides. */
+/** One current derived image model, combined with connection-scoped diagnostics. */
 export interface ImageModel {
   readonly id: string
   readonly route: string
@@ -76,7 +71,7 @@ export interface ImageDefaults {
   readonly timeoutMs: number
 }
 
-/** The whole config document, exactly as it sits on disk. */
+/** One live runtime projection; version 2 is the legacy structural contract. */
 export interface ImageConfig {
   readonly version: 2
   /**
@@ -140,7 +135,7 @@ function stringList(value: unknown, limit = 32): string[] | undefined {
   return out.length > 0 ? out : undefined
 }
 
-function parseParams(raw: unknown): ImageParams | undefined {
+export function parseImageParams(raw: unknown): ImageParams | undefined {
   if (!isRecord(raw)) return undefined
   const sizes = stringList(raw['sizes'])?.filter(isSize)
   const qualities = stringList(raw['qualities'])
@@ -218,7 +213,7 @@ function parseImageModel(raw: Record<string, unknown>): ImageModel | undefined {
   const status: EndpointStatus = endpointRaw['status'] === 'ok' || endpointRaw['status'] === 'unsupported'
     ? endpointRaw['status']
     : 'unverified'
-  const params = parseParams(raw['params']) ?? { ...IMAGE_FALLBACK_PARAMS }
+  const params = parseImageParams(raw['params']) ?? { ...IMAGE_FALLBACK_PARAMS }
   return {
     id,
     route,
@@ -234,7 +229,7 @@ function parseImageModel(raw: Record<string, unknown>): ImageModel | undefined {
       checkedAt: typeof endpointRaw['checkedAt'] === 'string' ? endpointRaw['checkedAt'] : null,
     },
     params,
-    lastGoodParams: parseParams(raw['lastGoodParams']) ?? null,
+    lastGoodParams: parseImageParams(raw['lastGoodParams']) ?? null,
   }
 }
 

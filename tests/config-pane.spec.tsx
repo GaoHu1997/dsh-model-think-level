@@ -11,7 +11,7 @@ import { createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import { ConfigPane } from '../src/client/ConfigPane.js'
-import { clearImageConfigCache } from '../src/client/image-config-client.js'
+import { clearImageConfigCache, readImageConfigView } from '../src/client/image-config-client.js'
 import { STYLES } from '../src/client/styles.js'
 import { zh } from '../src/client/locales.js'
 import { IMAGE_CONFIG_PATH } from '../src/constants.js'
@@ -152,7 +152,227 @@ async function editNumber(input: HTMLInputElement, value: string, enter = false)
   })
 }
 
+function deferredImageWrites(): {
+  writes: { body: { enabled?: boolean; defaults?: Partial<typeof CONFIG_VIEW.defaults> }; finish: (error?: string) => void }[]
+  reads: () => number
+  stored: () => { enabled: boolean; defaults: typeof CONFIG_VIEW.defaults }
+} {
+  let enabled = CONFIG_VIEW.enabled
+  let defaults = { ...CONFIG_VIEW.defaults }
+  let reads = 0
+  const writes: { body: { enabled?: boolean; defaults?: Partial<typeof CONFIG_VIEW.defaults> }; finish: (error?: string) => void }[] = []
+  handleFetch = (_url, init) => {
+    if (init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as typeof writes[number]['body']
+      return new Promise<Response>(resolve => {
+        writes.push({ body, finish(error) {
+          if (error !== undefined) {
+            resolve(new Response(JSON.stringify({ ok: false, error }), { status: 500 }))
+            return
+          }
+          enabled = body.enabled ?? enabled
+          defaults = { ...defaults, ...body.defaults }
+          resolve(new Response(JSON.stringify({ ok: true })))
+        } })
+      })
+    }
+    reads += 1
+    return new Response(JSON.stringify({ ...CONFIG_VIEW, enabled, defaults }))
+  }
+  return { writes, reads: () => reads, stored: () => ({ enabled, defaults }) }
+}
+
+async function selectImageValue(label: string, value: string): Promise<void> {
+  await act(async () => {
+    const select = document.querySelector<HTMLSelectElement>(`.bre-config-defaults select[aria-label="${label}"]`)!
+    select.value = value
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  await flush()
+}
+
 describe('ConfigPane', () => {
+  it('serializes an enabled write and a size write, then refreshes all committed fields', async () => {
+    const pending = deferredImageWrites()
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    await expand()
+    const toggle = (): HTMLInputElement => document.querySelector<HTMLInputElement>('.bre-config-switch-input')!
+    await act(async () => { toggle().click() })
+    await selectImageValue('imagegenSizeLabel', '4096x4096')
+    expect(pending.writes).toHaveLength(1)
+    expect(pending.writes[0]!.body).toMatchObject({ enabled: false })
+    expect(toggle().disabled).toBe(true)
+    expect(document.querySelector('.bre-config-card')!.getAttribute('aria-busy')).toBe('true')
+    await act(async () => { pending.writes[0]!.finish() })
+    await flush()
+    expect(pending.writes).toHaveLength(2)
+    expect(pending.writes[1]!.body).toMatchObject({ defaults: { size: '4096x4096' } })
+    expect(pending.reads()).toBe(1)
+    await act(async () => { pending.writes[1]!.finish() })
+    await flush()
+    expect(pending.stored()).toMatchObject({ enabled: false, defaults: { size: '4096x4096' } })
+    expect(toggle().checked).toBe(false)
+    expect(toggle().disabled).toBe(false)
+    expect(document.querySelector<HTMLSelectElement>('[aria-label="imagegenSizeLabel"]')!.value).toBe('4096x4096')
+    expect(document.querySelector('.bre-config-card')!.getAttribute('aria-busy')).toBe('false')
+    expect(pending.reads()).toBe(2)
+  })
+
+  it('preserves successive timeout picks including a return to the original value', async () => {
+    const pending = deferredImageWrites()
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    await expand()
+    await selectImageValue('imagegenTimeoutLabel', '600000')
+    await selectImageValue('imagegenTimeoutLabel', '900000')
+    await selectImageValue('imagegenTimeoutLabel', '300000')
+    expect(pending.writes).toHaveLength(1)
+    for (const [index, timeoutMs] of [600000, 900000, 300000].entries()) {
+      expect(pending.writes).toHaveLength(index + 1)
+      expect(pending.writes[index]!.body).toMatchObject({ defaults: { timeoutMs } })
+      await act(async () => { pending.writes[index]!.finish() })
+      await flush()
+    }
+    expect(pending.stored().defaults.timeoutMs).toBe(300000)
+    expect(document.querySelector<HTMLSelectElement>('[aria-label="imagegenTimeoutLabel"]')!.value).toBe('300000')
+    expect(pending.reads()).toBe(2)
+  })
+
+  it('keeps a failed queued write visible while later accepted writes still complete', async () => {
+    const pending = deferredImageWrites()
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    await expand()
+    await act(async () => { document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.click() })
+    await selectImageValue('imagegenCountLabel', '2')
+    expect(pending.writes).toHaveLength(1)
+    await act(async () => { pending.writes[0]!.finish('switch update rejected') })
+    await flush()
+    expect(pending.writes).toHaveLength(2)
+    expect(document.querySelector('.bre-config-notice')!.textContent).toContain('switch update rejected')
+    expect(document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.disabled).toBe(false)
+    expect(document.querySelector('.bre-config-card')!.getAttribute('aria-busy')).toBe('true')
+    await act(async () => { pending.writes[1]!.finish() })
+    await flush()
+    expect(document.querySelector('.bre-config-notice')!.textContent).toContain('switch update rejected')
+    expect(document.querySelector<HTMLSelectElement>('[aria-label="imagegenCountLabel"]')!.value).toBe('2')
+    expect(document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.checked).toBe(true)
+    expect(document.querySelector('.bre-config-card')!.getAttribute('aria-busy')).toBe('false')
+    await selectImageValue('imagegenQualityLabel', 'medium')
+    await act(async () => { pending.writes[2]!.finish() })
+    await flush()
+    expect(document.querySelector('.bre-config-notice')).toBeNull()
+  })
+
+  it('finishes every accepted queued write after unmount without refreshing the closed pane', async () => {
+    const pending = deferredImageWrites()
+    const { api } = fakeApi({})
+    const { root } = mountPane(api, () => {})
+    await flush()
+    await expand()
+    await selectImageValue('imagegenCountLabel', '2')
+    await selectImageValue('imagegenQualityLabel', 'medium')
+    expect(pending.writes).toHaveLength(1)
+    await act(async () => { root.unmount() })
+    mountedRoots.delete(root)
+    await act(async () => { pending.writes[0]!.finish() })
+    await flush()
+    expect(pending.writes).toHaveLength(2)
+    await act(async () => { pending.writes[1]!.finish() })
+    await flush()
+    expect(pending.stored().defaults).toMatchObject({ n: 2, quality: 'medium' })
+    expect(pending.reads()).toBe(1)
+    expect(document.querySelector('.bre-config-card')).toBeNull()
+  })
+  it('discards warmed models and shows the reason when the initial refresh fails', async () => {
+    await readImageConfigView()
+    handleFetch = () => { throw new Error('connection unavailable') }
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    expect(document.querySelector('.bre-config-default-select')).toBeNull()
+    expect(document.querySelector('.bre-config-loading-text')!.textContent).toContain('connection unavailable')
+    expect(document.body.textContent).not.toContain('GPT-Image-1')
+  })
+
+  it('a 503 keeps current preferences editable, clears model options, and clears the error after recovery', async () => {
+    await readImageConfigView()
+    let available = false
+    let enabled = true
+    handleFetch = (_url, init) => {
+      if (init?.method === 'POST') {
+        enabled = (JSON.parse(String(init.body)) as { enabled: boolean }).enabled
+        available = true
+        return new Response(JSON.stringify({ ok: true }))
+      }
+      return new Response(JSON.stringify({
+        ...CONFIG_VIEW, enabled, ok: available,
+        ...(available ? {} : { error: '生图配置暂时不可读' }),
+      }), { status: available ? 200 : 503 })
+    }
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    await expand()
+    expect(document.querySelector('.bre-config-default-select')).toBeNull()
+    expect(document.querySelector('[role="alert"]')!.textContent).toContain('生图配置暂时不可读')
+    const toggle = document.querySelector<HTMLInputElement>('.bre-config-switch-input')!
+    expect(toggle.disabled).toBe(false)
+    await act(async () => { toggle.click() })
+    await flush()
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+    expect(document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.checked).toBe(false)
+    expect(document.querySelector('.bre-config-default-select')).not.toBeNull()
+  })
+
+  it('a failed post-save refresh removes the previous model menu and exposes the load error', async () => {
+    let reads = 0
+    handleFetch = (_url, init) => {
+      if (init?.method === 'POST') return new Response(JSON.stringify({ ok: true }))
+      return ++reads === 1
+        ? new Response(JSON.stringify(CONFIG_VIEW))
+        : new Response(JSON.stringify({ ok: false, error: 'reload unavailable' }), { status: 503 })
+    }
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    await expand()
+    expect(document.querySelector('.bre-config-default-select')).not.toBeNull()
+    await act(async () => { document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.click() })
+    await flush()
+    expect(document.querySelector('.bre-config-default-select')).toBeNull()
+    expect(document.querySelector('.bre-config-loading-text')!.textContent).toContain('reload unavailable')
+  })
+
+  it('a slow initial GET cannot undo a saved switch and its newer refresh', async () => {
+    await readImageConfigView()
+    let settle!: (value: Response) => void
+    const old = new Promise<Response>(resolve => { settle = resolve })
+    let reads = 0
+    let enabled = true
+    handleFetch = (_url, init) => {
+      if (init?.method === 'POST') {
+        enabled = (JSON.parse(String(init.body)) as { enabled: boolean }).enabled
+        return new Response(JSON.stringify({ ok: true }))
+      }
+      return ++reads === 1 ? old : new Response(JSON.stringify({ ...CONFIG_VIEW, enabled }))
+    }
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    await act(async () => { document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.click() })
+    await flush()
+    expect(document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.checked).toBe(false)
+    await act(async () => { settle(new Response(JSON.stringify(CONFIG_VIEW))) })
+    await flush()
+    expect(document.querySelector<HTMLInputElement>('.bre-config-switch-input')!.checked).toBe(false)
+    expect(document.querySelector('.bre-config-card-state')!.textContent).toBe('cardStateOff')
+  })
+
   it('the card head is the 「生图」 title and its state — no auto-fetch sub, no model count', async () => {
     const { api } = fakeApi({})
     mountPane(api, () => {})

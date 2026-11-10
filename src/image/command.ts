@@ -182,14 +182,18 @@ export function registerImagegenCommand(
       description: '用生图模型生成图片',
       input: { hint: IMAGEGEN_HINT, attachments: true },
       handler: async invocation => {
-        const known = deps.modelIds()
         let parsed: ImagegenArgs
+        let generationDeps: GenerateDeps
         try {
-          parsed = parseImagegenArgs(invocationTextOf(invocation), known)
+          // Parse and execute against one live snapshot, not two independently
+          // cached catalogues. A failed settings read is an ordinary answer.
+          const config = deps.generateDeps.config()
+          generationDeps = { ...deps.generateDeps, config: () => config }
+          parsed = parseImagegenArgs(invocationTextOf(invocation), config.models.map(model => model.id))
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : String(error) }
         }
-        const answer = await executeImagegen(deps, parsed)
+        const answer = await executeImagegen({ ...deps, generateDeps: generationDeps }, parsed)
         if (answer.ok) {
           // Best-effort in-session echo; the return value stays authoritative.
           try {

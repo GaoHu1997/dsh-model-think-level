@@ -456,8 +456,8 @@ describe('imageToolHint', () => {
     expect(hint).toContain('![图片说明](<filePath>)')
   })
 
-  it('is empty without models — no hint for a capability that does not exist', () => {
-    expect(imageToolHint(emptyImageConfig())).toBe('')
+  it('explains a ready empty model list without claiming the tool failed to load', () => {
+    expect(imageToolHint(emptyImageConfig())).toContain('生图配置当前没有')
   })
 
   it('is empty when the service is switched off (no hint for a tool that is gone)', () => {

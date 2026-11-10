@@ -15,6 +15,7 @@ import {
   registerImagegenCommand,
   type ImagegenDeps,
 } from '../src/image/command.js'
+import { emptyImageConfig, syncImageConfig } from '../src/image/config.js'
 import type { GenerateDeps, GenerateResult } from '../src/image/generate.js'
 import { GenerateError } from '../src/image/generate.js'
 
@@ -30,7 +31,14 @@ const generate = vi.fn(async (): Promise<GenerateResult> => ({
 const deps: ImagegenDeps = {
   modelIds: () => ['openai/gpt-image-1', 'zhipu/cogview-3-plus'],
   generate: generate as unknown as ImagegenDeps['generate'],
-  generateDeps: { resolveKey: async () => 'k', send: (async () => new Response('{}')) as typeof fetch },
+  generateDeps: {
+    config: () => syncImageConfig(emptyImageConfig(), {
+      openai: { models: [{ id: 'gpt-image-1', inputImageGen: true }] },
+      zhipu: { models: [{ id: 'cogview-3-plus', inputImageGen: true }] },
+    }),
+    resolveKey: async () => 'k',
+    send: (async () => new Response('{}')) as typeof fetch,
+  },
 }
 
 describe('registerImagegenCommand', () => {
@@ -115,7 +123,7 @@ describe('handler', () => {
     expect(answer.filePaths).toEqual(['/out/a-cat-1.png'])
     expect(answer.model).toBe('openai/gpt-image-1')
     expect(generate).toHaveBeenCalledWith(
-      deps.generateDeps,
+      expect.objectContaining({ config: expect.any(Function), resolveKey: deps.generateDeps.resolveKey, send: deps.generateDeps.send }),
       expect.objectContaining({ model: 'openai/gpt-image-1', prompt: 'a cat', size: '1024x1024' }),
     )
     expect(echo).toHaveBeenCalledWith(expect.objectContaining({ args: 'openai/gpt-image-1 --size 1024x1024 a cat' }), expect.stringContaining('/out/a-cat-1.png'), '/out/a-cat-1.png')

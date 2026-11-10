@@ -29,6 +29,7 @@ const MODELS = [
 
 beforeEach(() => {
   invalidateImagegenModels()
+  clearImageConfigCache()
 })
 
 afterEach(() => {
@@ -111,7 +112,7 @@ describe('registerImagegenCompletion', () => {
     expect(() => dispose()).not.toThrow()
   })
 
-  it('the completion cache invalidates (a settings change must not answer stale rows)', async () => {
+  it('reads changed completion rows immediately without an event or invalidation', async () => {
     let payload = { models: [{ id: 'a/x', label: 'A' }], defaultModel: null }
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       ok: true, ...payload, defaults: {}, outputDir: '',
@@ -121,9 +122,95 @@ describe('registerImagegenCompletion', () => {
     registerImagegenCompletion({ inputTriggers: { registerSource: (s: Record<string, unknown>) => { sources.push(s) } } } as never)
     const candidatesOf = sources[0]!['candidates'] as (projection: { text?: string }) => Promise<unknown[]>
     expect(await candidatesOf({ text: '/生图 ' })).toHaveLength(1)
-    invalidateImagegenModels()
     payload = { models: [{ id: 'a/x', label: 'A' }, { id: 'b/y', label: 'B' }], defaultModel: null }
     expect(await candidatesOf({ text: '/生图 ' })).toHaveLength(2)
+  })
+
+  it('shares only a simultaneously pending GET and reads again after it settles', async () => {
+    let settle!: (response: Response) => void
+    const pending = new Promise<Response>(resolve => { settle = resolve })
+    const fetcher = vi.fn().mockReturnValueOnce(pending).mockResolvedValueOnce(new Response(JSON.stringify({
+      ok: true, models: [{ id: 'b/new', label: 'New' }], defaultModel: null,
+      defaults: {}, outputDir: '', tool: { registered: false, name: null },
+    })))
+    vi.stubGlobal('fetch', fetcher)
+    let candidates!: (projection: { text: string }) => Promise<unknown[]>
+    const dispose = registerImagegenCompletion({ inputTriggers: { registerSource: (source: { candidates: typeof candidates }) => { candidates = source.candidates } } } as never)
+    const first = candidates({ text: '/生图 ' })
+    const concurrent = candidates({ text: '/生图 ' })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    settle(new Response(JSON.stringify({
+      ok: true, models: [{ id: 'a/old', label: 'Old' }], defaultModel: null,
+      defaults: {}, outputDir: '', tool: { registered: false, name: null },
+    })))
+    expect(await first).toEqual(await concurrent)
+    expect(await candidates({ text: '/生图 ' })).toMatchObject([{ insertText: 'b/new' }])
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    dispose()
+  })
+
+  it.each(['error', 'empty', 'disabled'] as const)('does not cache an %s answer that would hide recovery', async initial => {
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      ok: initial !== 'error', enabled: initial !== 'disabled', error: 'settings unavailable',
+      models: initial === 'disabled' ? [{ id: 'a/x', label: 'A' }] : [], defaultModel: null,
+      defaults: {}, outputDir: '', tool: { registered: false, name: null },
+    }), { status: initial === 'error' ? 503 : 200 })).mockResolvedValueOnce(new Response(JSON.stringify({
+      ok: true, enabled: true, models: [{ id: 'new/image', label: 'New' }], defaultModel: null,
+      defaults: {}, outputDir: '', tool: { registered: false, name: null },
+    })))
+    vi.stubGlobal('fetch', fetcher)
+    let candidates!: (projection: { text: string }) => Promise<unknown[]>
+    const dispose = registerImagegenCompletion({ inputTriggers: { registerSource: (source: { candidates: typeof candidates }) => { candidates = source.candidates } } } as never)
+    expect(await candidates({ text: '/生图 ' })).toEqual([])
+    expect(await candidates({ text: '/生图 ' })).toMatchObject([{ insertText: 'new/image' }])
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    dispose()
+  })
+
+  it('a disposed source ignores an outstanding GET and performs no further reads', async () => {
+    let settle!: (response: Response) => void
+    const fetcher = vi.fn(() => new Promise<Response>(resolve => { settle = resolve }))
+    vi.stubGlobal('fetch', fetcher)
+    let candidates!: (projection: { text: string }) => Promise<unknown[]>
+    const dispose = registerImagegenCompletion({ inputTriggers: { registerSource: (source: { candidates: typeof candidates }) => { candidates = source.candidates } } } as never)
+    const pending = candidates({ text: '/生图 ' })
+    dispose()
+    settle(new Response(JSON.stringify({
+      ok: true, models: [{ id: 'a/x', label: 'A' }], defaultModel: null,
+      defaults: {}, outputDir: '', tool: { registered: false, name: null },
+    })))
+    expect(await pending).toEqual([])
+    expect(await candidates({ text: '/生图 ' })).toEqual([])
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('a saved switch discards older pending candidates without breaking a newer shared GET', async () => {
+    let settleOld!: (response: Response) => void
+    let settleNew!: (response: Response) => void
+    const old = new Promise<Response>(resolve => { settleOld = resolve })
+    const fresh = new Promise<Response>(resolve => { settleNew = resolve })
+    const fetcher = vi.fn().mockReturnValueOnce(old)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }))).mockReturnValueOnce(fresh)
+    vi.stubGlobal('fetch', fetcher)
+    let candidates!: (projection: { text: string }) => Promise<unknown[]>
+    const dispose = registerImagegenCompletion({ inputTriggers: { registerSource: (source: { candidates: typeof candidates }) => { candidates = source.candidates } } } as never)
+    const stale = candidates({ text: '/生图 ' })
+    await saveImageConfig({ enabled: true })
+    const current = candidates({ text: '/生图 ' })
+    settleOld(new Response(JSON.stringify({
+      ok: true, models: [{ id: 'old/image', label: 'Old' }], defaultModel: null,
+      defaults: {}, outputDir: '', tool: { registered: false, name: null },
+    })))
+    expect(await stale).toEqual([])
+    const concurrent = candidates({ text: '/生图 ' })
+    expect(fetcher).toHaveBeenCalledTimes(3)
+    settleNew(new Response(JSON.stringify({
+      ok: true, models: [{ id: 'new/image', label: 'New' }], defaultModel: null,
+      defaults: {}, outputDir: '', tool: { registered: false, name: null },
+    })))
+    expect(await current).toMatchObject([{ insertText: 'new/image' }])
+    expect(await concurrent).toMatchObject([{ insertText: 'new/image' }])
+    dispose()
   })
 
   it('a switched-off service offers no model candidates', async () => {
