@@ -85,6 +85,23 @@ function anchorRow(): HTMLElement | undefined {
   return row
 }
 
+/**
+ * Whether the mounted chip still belongs where it is: exactly one dock on the
+ * page and the chip already a direct child of it.
+ *
+ * Checked before {@link anchorRow}, because that resolve ends in
+ * `getClientRects()` — which forces layout the moment the transcript is dirty,
+ * and typing or streaming keeps it dirty. Several docks take the slow path on
+ * purpose: there "the last visible one" decides the chip's home, and that is a
+ * question only the full resolve can answer.
+ * @param host - the element this module mounted, if any.
+ * @param docks - every composer dock currently in the document.
+ * @returns true when re-resolving the anchor could not move the chip.
+ */
+export function chipInPlace(host: HTMLElement | undefined, docks: ArrayLike<HTMLElement>): boolean {
+  return host !== undefined && host.isConnected && docks.length === 1 && host.parentElement === docks[0]
+}
+
 /** A 24-unit line icon; the chip shares no sprite with the host. */
 function Glyph(props: { className: string; children: ReactNode }): ReactNode {
   return (
@@ -304,6 +321,13 @@ export function mountAutoContinueController(deps: AutoContinueControllerDeps): (
   }
 
   const ensure = (): void => {
+    // Fast path: one dock on the page and the chip already sits in it. The full
+    // resolve below validates visibility with getClientRects(), and that forces
+    // layout whenever the transcript is dirty — streaming and typing keep it
+    // dirty, so this observer was buying a layout four times a second to learn
+    // nothing. Several docks still take the slow path: "the last visible one"
+    // is what decides where the chip belongs.
+    if (chipInPlace(host, document.querySelectorAll<HTMLElement>(DOCK))) return
     const line = anchorRow()
     if (line === undefined) { detach(); return }
     if (host !== undefined && host.parentElement === line && host.isConnected) return

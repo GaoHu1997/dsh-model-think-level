@@ -436,7 +436,32 @@ export function createErrorDetail(deps: ErrorDetailDeps): ErrorDetail {
   // Decoration
   // -------------------------------------------------------------------------
 
+  /**
+   * A row can only be dressed when there is a failure to pair it with: with an
+   * empty `failures` list the scan below cannot add, update or remove anything,
+   * so the whole pass is dead work. That matters because `scheduleDecorate` is
+   * fed by a `document.body` observer, which fires on every keystroke in the
+   * composer — the fast return keeps typing off the document walk entirely, and
+   * the sweep is O(1) on a transcript with no failures.
+   *
+   * The live-button check covers the one case where an empty `failures` list
+   * still has DOM to look at: a switch of session leaves our buttons behind in
+   * a transcript the client has not repainted yet. It reads this module's own
+   * set rather than `querySelector('[data-bre-error-detail]')`, because that
+   * attribute selector still walks every element (0.3–0.7 ms on a long chat).
+   */
+  const buttons = new Set<HTMLButtonElement>()
+
+  /** Whether a button this module inserted is still in the document. */
+  const hasLiveButton = (): boolean => {
+    for (const button of buttons) if (button.isConnected) return true
+    // Every one was detached by an official repaint: forget them for good.
+    buttons.clear()
+    return false
+  }
+
   const decorate = (): void => {
+    if (failures.length === 0 && !hasLiveButton()) return
     const rows = document.querySelectorAll<HTMLElement>(ROW_SELECTOR)
     if (rows.length === 0) return
     const used = new Set<string>()
@@ -454,6 +479,7 @@ export function createErrorDetail(deps: ErrorDetailDeps): ErrorDetail {
         button.className = 'bre-ed-view'
         button.setAttribute(BUTTON_ATTR, '1')
         host.append(button)
+        buttons.add(button)
       }
       if (button.textContent !== label) button.textContent = label
       button.onclick = (event) => {
@@ -558,6 +584,7 @@ export function createErrorDetail(deps: ErrorDetailDeps): ErrorDetail {
       failures = []
       closePopover()
       for (const button of document.querySelectorAll<HTMLElement>(`[${BUTTON_ATTR}]`)) button.remove()
+      buttons.clear()
       document.getElementById(POPOVER_ID)?.remove()
     },
   }
