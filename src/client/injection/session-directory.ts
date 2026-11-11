@@ -29,7 +29,8 @@ export interface SessionsLike {
   list?: {
     getSnapshot(): {
       current?: string
-      byId?: Record<string, { id?: string; retainedBy?: Record<string, number> } | undefined>
+      ids?: readonly string[]
+      byId?: Record<string, { id?: string; running?: boolean; origin?: string; parentId?: string; retainedBy?: Record<string, number> } | undefined>
     }
   }
 }

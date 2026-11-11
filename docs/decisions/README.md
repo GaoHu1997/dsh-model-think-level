@@ -11,3 +11,5 @@
 - [0005 — 旧话题恢复同时覆盖拆开的 `fc_`/`rs_` 项对](0005-history-recovery-covers-split-item-pairs.md) — 已接受；把 `provided without its required … reasoning` 并入识别集合，与资源拒绝共用一条降级阶梯
 - [0006 — 自动继续的状态行改版与后台链条](0006-auto-continue-chip-and-background-chain.md) — 已接受；chip 改为「动词 + 倒计时环 + 弱化次数」；链条改为按会话持有，切走会话/最小化不再取消已决定的那一发，后台失败也会继续接管，空闲链按会话回收
 - [0007 — 会话页两条轮询的「无事可做」快路径](0007-dom-poll-cost-guards.md) — 已接受；失败列表为空时 `decorate()` 不扫文档，单 dock 且 chip 已就位时 `ensure()` 不重新解析锚点，消除打字路径上的全文档扫描与强制布局
+- [0008 — 自动继续显式持有会话引用，后台巡检不依赖当前页面](0008-auto-continue-owns-session-references.md) — 已接受；正式 retain 保活、运行会话发现、全链巡检、代际守卫与全局取消
+

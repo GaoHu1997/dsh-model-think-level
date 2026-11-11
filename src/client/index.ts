@@ -417,8 +417,8 @@ export function apply(ctx: ClientContext): void {
   // names the tool), so there is no wrapping effect here.
   registerImageCard(ctx, t)
 
-  // The auto-continue watcher: replies 「继续」 to the current session's
-  // cut-off turns while the pane's switch is on (default OFF). The poll is
+  // The auto-continue watcher: retains live sessions and replies 「继续」 to
+  // cut-off turns, even off-screen, while the switch is on (default OFF). The poll is
   // memory-only while idle; the switch is consulted per turn end, so enabling
   // it mid-session takes effect from the next ending. The controller chip on
   // the composer stat line rides the same runner, so its stop/reset/resume act

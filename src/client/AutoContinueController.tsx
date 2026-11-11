@@ -6,8 +6,6 @@
  * right of the context pill. It exists ONLY while a continue chain is running:
  *
  *   waiting   → `◔ 自动继续 3s 1/5`, countdown ring, click opens the popover
- *   paused    → `⏸ 自动继续 回到本会话后继续` (the view left this session, so
- *               the countdown is frozen; it resumes from the remaining seconds)
  *   sent      → `✓ 已继续 2/5`
  *   exhausted → `⏱ 已停手 5/5` + an inline 重置
  *   idle      → nothing at all (the chip unmounts, the slot stays empty)

@@ -1,23 +1,20 @@
 /**
- * The auto-continue watcher: replies 「继续」 to the current session's turn
+ * The auto-continue watcher: replies 「继续」 to interrupted live sessions
  * when it ended in a way worth continuing, and stays silent otherwise.
  *
  * The decision is {@link judgeTurnTail} (auto-continue-rules.ts); this module
  * owns the OBSERVATION and the GUARDS around it:
  *
- *   - Only the CURRENT session is watched. The one exception is an ending
- *     nobody answered: when the watcher first sees a session whose newest
- *     turn/end is a continuable failure with no user message or new run after
- *     it, that ending is judged once (within a day). A failure the user already
- *     moved past, or one older than the window, stays history — replaying old
- *     failures is exactly the mindless behaviour the switch must not have.
- *   - A page that loads into a session whose last turn failed yesterday does
- *     nothing — auto-continuing stale failures is exactly the mindless
- *     behaviour the switch must not have.
+ *   - The selected session and running root sessions from the catalog are
+ *     watched. On reference-owning kernels each live chain retains its exact
+ *     session generation: a borrowed binding alone cannot keep history alive.
+ *     Idle unopened history is never scanned en masse. On first attachment,
+ *     only a recent unanswered failure is recoverable (within a day); any
+ *     newer user intent/run or stale ending makes it history.
  *   - The durable `turn/end` is what is judged, not the running edge, so the
  *     evaluation waits briefly for the settlement to reach the event window.
  *   - Guards at send time: the switch still on, the turn still ended, nothing
- *     the user submitted pending, the session still the one on screen.
+ *     the user submitted pending, the retained session generation still live.
  *   - A streak cap bounds every chain of automatic replies (a dead provider
  *     or a model looping on the ceiling must not be fed forever); anything
  *     the user sends by hand, and every turn that ends completed / aborted /
@@ -46,7 +43,7 @@ import {
 } from '../auto-continue-rules.js'
 import { currentSessionId, type SessionsLike, type UiSessionLike } from './session-directory.js'
 
-/** How often the current-session binding is re-resolved. */
+/** How often bindings, running catalog roots and background chains are inspected. */
 const TICK_MS = 1_000
 
 /** First evaluation after the running edge: let the settlement land. */
@@ -115,9 +112,20 @@ interface SessionBindingLike {
   readonly eventSource: EventSourceLike
 }
 
-/** The `sessions` service face the watcher needs, beyond {@link SessionsLike}. */
+/** Owning reference: borrowing a binding does NOT keep its history stream alive. */
+interface SessionReferenceLike {
+  readonly binding: SessionBindingLike
+  readonly ready: Promise<SessionBindingLike>
+  release(): void
+}
+
+/** Dedicated consumer label, never a main-view/navigation reference. */
+const REFERENCE_SOURCE = 'dshModelThinkLevelAutoContinue'
+
+/** The sessions service; older kernels only expose the borrowed binding. */
 interface SessionsServiceLike extends SessionsLike {
   binding?(id: string): SessionBindingLike | undefined
+  retain?(id: string, options: { source: typeof REFERENCE_SOURCE }): SessionReferenceLike
 }
 
 /** The context seats the watcher probes, lazily (services mount after boot). */
@@ -173,6 +181,8 @@ export interface AutoContinueStatus {
 
 /** One attached session's live state. */
 interface Attached {
+  /** Independent ownership of this exact client generation, while enabled. */
+  reference: SessionReferenceLike | undefined
   readonly sessionId: string
   readonly session: SessionFaceLike
   readonly eventSource: EventSourceLike
@@ -431,15 +441,6 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     if (state.phase === 'waiting') settleChain(state)
   }
 
-  /** Whether the page is on screen; the countdown only runs while it is. */
-  const viewHidden = (): boolean => {
-    try {
-      return document.visibilityState === 'hidden'
-    } catch {
-      return false
-    }
-  }
-
   /** Arm the reply `remaining` ms out and publish the waiting phase. */
   const armSend = (state: Attached, remaining: number): void => {
     const timer = setTimeout(() => {
@@ -488,6 +489,15 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     }
   }
 
+  /** A disposed generation can retain an apparently open snapshot and frozen window. */
+  const snapshotOfState = (state: Attached): ReturnType<typeof snapshotOf> => {
+    try {
+      const binding = state.reference?.binding
+      if (binding !== undefined && (binding.session !== state.session || binding.eventSource !== state.eventSource)) return undefined
+    } catch { return undefined }
+    return snapshotOf(state.session)
+  }
+
   const armEvaluation = (state: Attached): void => {
     if (state.evalTimer !== undefined) {
       // A loop is already waiting (a burst of edges): just extend its window.
@@ -501,6 +511,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   const scheduleEvaluate = (state: Attached, delay: number): void => {
     if (disposed || chains.get(state.sessionId) !== state) return
     state.evalTimer = setTimeout(() => {
+      if (state.evalTimer !== undefined) timers.delete(state.evalTimer)
       state.evalTimer = undefined
       evaluate(state)
     }, delay)
@@ -515,7 +526,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
    */
   const ensureHistoryReady = (state: Attached): void => {
     if (state.historyReady) return
-    const snap = snapshotOf(state.session)
+    const snap = snapshotOfState(state)
     if (snap === undefined || !snap.open) return
     state.historyReady = true
     const recoveredBaseline = recoverableBaselineOf(state.eventSource)
@@ -561,7 +572,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
         settleVerdict(state, verdict)
         return
       }
-      const snap = snapshotOf(state.session)
+      const snap = snapshotOfState(state)
       if (snap !== undefined && !snap.running) armEvaluation(state)
       return
     }
@@ -575,7 +586,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     if (!autoContinueEnabled()) return
     // Stopped for THIS session: the user said no; wait for a hand-typed message.
     if (muted.has(state.sessionId)) return
-    const snap = snapshotOf(state.session)
+    const snap = snapshotOfState(state)
     if (!state.historyReady) return
     if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) return
     const events = durableEventsOf(state)
@@ -634,7 +645,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     }
     if (armedSeq === undefined || armedSeq !== state.lastHandledTurnEndSeq) { abandonWait(); return }
     if (!autoContinueEnabled() || muted.has(state.sessionId) || state.consecutive >= autoContinueConfig().maxRetries) { abandonWait(); return }
-    const snap = snapshotOf(state.session)
+    const snap = snapshotOfState(state)
     // The reply belongs to THIS session, not to the pane the user is looking
     // at: leaving the session must not swallow a wait that was already armed.
     if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) { abandonWait(); return }
@@ -683,7 +694,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   // ---- Attachment ----
 
   const onSnapshot = (state: Attached): void => {
-    const snap = snapshotOf(state.session)
+    const snap = snapshotOfState(state)
     if (snap === undefined) return
     ensureHistoryReady(state)
     if (!snap.open || snap.subagent || snap.running || snap.pending > 0) cancelPendingSend(state)
@@ -753,7 +764,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     if (state.evalTimer !== undefined) return
     if (!autoContinueEnabled() || muted.has(state.sessionId)) return
     if (!state.historyReady) return
-    const snap = snapshotOf(state.session)
+    const snap = snapshotOfState(state)
     if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) return
     const events = durableEventsOf(state)
     for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -784,7 +795,11 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       timers.delete(state.sendTimer)
       state.sendTimer = undefined
     }
+    // Remove ownership before releasing: host teardown can publish synchronously.
     chains.delete(state.sessionId)
+    const reference = state.reference
+    state.reference = undefined
+    try { reference?.release() } catch { /* Already disposed host generation. */ }
     if (current === state) current = undefined
     notifyStatus()
   }
@@ -796,22 +811,64 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     notifyStatus()
   }
 
-  /** The chain of one session, created on first sight and reused afterwards. */
-  const ensureChain = (binding: SessionBindingLike): Attached | undefined => {
-    const existing = chains.get(binding.sessionId)
+  /** Attach readiness to the exact reference, fencing late released generations. */
+  const watchReady = (state: Attached, reference: SessionReferenceLike): void => {
+    void reference.ready.then(() => {
+      if (disposed || chains.get(state.sessionId) !== state || state.reference !== reference) return
+      ensureHistoryReady(state)
+      sweep(state)
+    }, () => {
+      if (chains.get(state.sessionId) === state && state.reference === reference) dropChain(state)
+    })
+  }
+
+  /** Borrow on old kernels; on new kernels retain BEFORE the pane releases its use. */
+  const ensureChain = (sessions: SessionsServiceLike, id: string): Attached | undefined => {
+    const existing = chains.get(id)
+    let binding: SessionBindingLike | undefined
+    let reference: SessionReferenceLike | undefined
+    try {
+      binding = sessions.binding?.(id)
+      if (existing !== undefined && binding?.session === existing.session && binding.eventSource === existing.eventSource
+        && (!autoContinueEnabled() || existing.reference !== undefined || typeof sessions.retain !== 'function')) return existing
+      if (binding !== undefined && snapshotOf(binding.session)?.subagent) {
+        if (existing !== undefined) dropChain(existing)
+        return undefined
+      }
+      if (autoContinueEnabled() && typeof sessions.retain === 'function') {
+        reference = sessions.retain(id, { source: REFERENCE_SOURCE })
+        // Handle ready rejection even when reading a released binding throws.
+        void reference.ready.catch(() => {})
+        binding = reference.binding
+      }
+    } catch {
+      try { reference?.release() } catch { /* Dead generation. */ }
+      if (existing !== undefined) dropChain(existing)
+      return undefined
+    }
+    if (binding === undefined) {
+      if (existing !== undefined) dropChain(existing)
+      return undefined
+    }
     if (existing !== undefined) {
-      // A reconnect swaps the session object under the same id: the old
-      // listeners point at a dead generation, so the chain starts over.
-      if (existing.session === binding.session) return existing
+      if (existing.session === binding.session && existing.eventSource === binding.eventSource) {
+        existing.reference = reference
+        if (reference !== undefined) watchReady(existing, reference)
+        return existing
+      }
       dropChain(existing)
     }
-    // A subagent view is watched by nobody: skip before any listener exists.
+    // A subagent view is watched by nobody: release before any listener exists.
     const first = snapshotOf(binding.session)
-    if (first === undefined || first.subagent) return undefined
+    if (first === undefined || first.subagent) {
+      try { reference?.release() } catch { /* Dead generation. */ }
+      return undefined
+    }
     // An unanswered failure keeps its ending above the baseline; every other
     // pre-existing ending stays history.
     const recoveredBaseline = first.open ? recoverableBaselineOf(binding.eventSource) : undefined
     const state: Attached = {
+      reference,
       sessionId: binding.sessionId,
       session: binding.session,
       eventSource: binding.eventSource,
@@ -861,6 +918,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       console.warn('[dsh-model-think-level] auto-continue: event source unusable:', error)
       return undefined
     }
+    if (reference !== undefined) watchReady(state, reference)
     return state
   }
 
@@ -888,47 +946,36 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     return newest
   }
 
-  /**
-   * One poll: point `current` at the chain of the session on screen, and let
-   * every other chain live on. A reply armed before the user switched panes
-   * keeps its timer and fires against its own conversation — the wait belongs
-   * to the session that failed, not to the pane that happens to be visible.
-   * Idle chains the user walked away from are dropped; a chain that is still
-   * judging its ending or waiting out its backoff survives the switch.
-   */
+  /** Inspect every live chain, not just the selected pane. Never open idle history en masse. */
   const track = (): void => {
     if (disposed) return
     const sessions = ctx.get?.('sessions') as SessionsServiceLike | undefined
     const uiSession = ctx.get?.('uiSession') as UiSessionLike | undefined
     const id = currentSessionId(sessions, uiSession)
-    if (id === undefined || sessions === undefined || typeof sessions.binding !== 'function') {
-      current = undefined
-      notifyStatus()
-      return
+    if (sessions === undefined) { dropAllChains(); return }
+    current = id === undefined ? undefined : ensureChain(sessions, id)
+    const catalog = sessions.list?.getSnapshot()
+    const runningIds = new Set<string>()
+    if (autoContinueEnabled()) {
+      for (const key of catalog?.ids ?? Object.keys(catalog?.byId ?? {})) {
+        const row = catalog?.byId?.[key]
+        if (row?.running !== true || row.origin === 'subagent') continue
+        const runningId = row.id ?? key
+        runningIds.add(runningId)
+        if (runningId !== id) ensureChain(sessions, runningId)
+      }
     }
-    let binding: SessionBindingLike | undefined
-    try {
-      binding = sessions.binding(id)
-    } catch {
-      binding = undefined
-    }
-    if (binding === undefined || binding.session === undefined) {
-      current = undefined
-      notifyStatus()
-      return
-    }
-    if (current !== undefined && current.sessionId === id && current.session === binding.session) {
-      sweep(current)
-      notifyStatus()
-      return
-    }
-    const chain = ensureChain(binding)
-    current = chain
-    if (chain !== undefined) sweep(chain)
-    for (const state of [...chains.values()]) {
+    for (const previous of [...chains.values()]) {
+      const state = previous === current ? previous : ensureChain(sessions, previous.sessionId)
+      if (state === undefined) continue
+      // Poll snapshot AND window: an event publication or running edge may be coalesced.
+      onSnapshot(state)
+      scanUserEvents(state)
+      sweep(state)
       if (state === current) continue
-      if (state.phase !== 'idle') continue
-      if (state.evalTimer !== undefined || state.evalDeadline > 0) continue
+      const snap = snapshotOfState(state)
+      if (snap?.running || snap?.pending || runningIds.has(state.sessionId)) continue
+      if (state.phase !== 'idle' || state.evalTimer !== undefined || state.evalDeadline > Date.now()) continue
       dropChain(state)
     }
     notifyStatus()
@@ -947,22 +994,30 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   }
 
   const disposeEnabled = subscribeAutoContinueEnabled(() => {
-    const state = current
-    if (autoContinueEnabled() || state === undefined) return
-    cancelPendingSend(state)
-    settleChain(state)
-    if (state.evalTimer !== undefined) {
-      clearTimeout(state.evalTimer)
-      timers.delete(state.evalTimer)
-      state.evalTimer = undefined
+    if (autoContinueEnabled()) { track(); return }
+    // The switch is global: cancel and release ALL background work immediately.
+    for (const state of [...chains.values()]) {
+      cancelPendingSend(state)
+      settleChain(state)
+      if (state.evalTimer !== undefined) {
+        clearTimeout(state.evalTimer)
+        timers.delete(state.evalTimer)
+        state.evalTimer = undefined
+      }
+      state.evalDeadline = 0
+      if (state !== current) { dropChain(state); continue }
+      const reference = state.reference
+      state.reference = undefined
+      try { reference?.release() } catch { /* Already disposed host generation. */ }
     }
   })
   const disposeConfig = subscribeAutoContinueConfig(() => {
-    const state = current
+    for (const state of chains.values()) {
+      if (state.pendingSendTurnEndSeq === undefined) continue
+      if (!autoContinueEnabled() || state.consecutive >= autoContinueConfig().maxRetries) cancelPendingSend(state)
+      else scheduleSend(state)
+    }
     notifyStatus()
-    if (state?.pendingSendTurnEndSeq === undefined) return
-    if (!autoContinueEnabled() || state.consecutive >= autoContinueConfig().maxRetries) cancelPendingSend(state)
-    else scheduleSend(state)
   })
 
   /** Stand down for this session only: hide the chip and stop judging endings. */

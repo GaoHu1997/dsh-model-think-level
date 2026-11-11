@@ -380,6 +380,7 @@ describe('auto-continue watcher', () => {
     binding.setRunning(true)
     await vi.advanceTimersByTimeAsync(1_100)
     // The user switches away; the turn then fails with nobody watching.
+    harness.bindings.set('s2', makeBinding('s2'))
     harness.setCurrent('s2')
     await vi.advanceTimersByTimeAsync(1_100)
     binding.append('turn/end', 2, { turn: 1, reason: { kind: 'error', error: { message: '429 rate limited', code: 'RATE_LIMIT' } } })
@@ -588,6 +589,7 @@ describe('auto-continue watcher', () => {
     await vi.advanceTimersByTimeAsync(500)
     // The user navigates away before the send delay elapses. The chain belongs
     // to this session, so its timer keeps running and the reply still lands.
+    harness.bindings.set('s2', makeBinding('s2'))
     harness.setCurrent('s2')
     await vi.advanceTimersByTimeAsync(10_000)
     expect(binding.prompts).toHaveLength(1)
@@ -925,6 +927,7 @@ describe('auto-continue controller face', () => {
     await vi.advanceTimersByTimeAsync(500)
 
     // The user walks away with the wait armed; the reply still lands.
+    harness.bindings.set('s2', makeBinding('s2'))
     harness.setCurrent('s2')
     await vi.advanceTimersByTimeAsync(3_000)
     expect(binding.prompts).toHaveLength(1)
