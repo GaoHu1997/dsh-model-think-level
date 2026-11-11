@@ -14,6 +14,14 @@ Item 'fc_04e5…' of type 'function_call' was provided without its required 'rea
 
 DSH 侧的 pi-ai 重放同一个上下文时，工具调用的 item 句柄只在「同 provider、同 api、不同 model」时才会被清掉（`openai-responses-shared.js` 的 `isDifferentModel` 分支）；跨 provider、跨协议，或历史里的 `thinkingSignature` 已丢失时，`fc_` 句柄原样发出，而 reasoning 项不会被重放——于是必然撞上这条校验。实际表现是：在一条旧话题里切换模型后继续，服务端必拒；换密钥、重试都只是把同一个请求再发一遍。
 
+拒绝指向的不一定是工具调用。同一条规则也会点名一条 `message` 项：
+
+```
+Item 'msg_038f…' of type 'message' was provided without its required 'reasoning' item: 'rs_038f…'.
+```
+
+此时与缺失推理项配对的是文本块 `textSignature` 里的 `msg_` id，而降级阶梯的文本分支本来就会删掉整个签名（pi-ai 会把剩下的 JSON 当成 item id，所以不能只删 `id` 字段），因此不需要额外阶段。
+
 ## 决策
 
 - 把这条措辞并入 `src/history-compat.ts` 的识别集合（`ITEM_PAIRING_MISMATCH`），与资源拒绝共用 `isHistoryStateMismatch` 一个入口。fetch 层对 `400`/`5xx` 正文的重编码、请求层对流内 `response.failed` 的重放因此自动覆盖第二类。

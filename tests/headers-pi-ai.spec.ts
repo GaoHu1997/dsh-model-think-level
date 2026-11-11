@@ -569,6 +569,8 @@ describe('pi-ai history recovery', () => {
     + 'Use the same resource that created the item to access it.'
   const PAIRING = "Item 'fc_1' of type 'function_call' was provided without its required "
     + "'reasoning' item: 'rs_1'."
+  const PAIRING_MESSAGE = "Item 'msg_1' of type 'message' was provided without its required "
+    + "'reasoning' item: 'rs_1'."
 
   /** An adapter that also exposes the context each attempt was handed. */
   function historySetup(
@@ -672,6 +674,25 @@ describe('pi-ai history recovery', () => {
     expect(replayBlocks[2]?.['id']).toBe('call_1')
     expect(replayBlocks[2]?.['name']).toBe('run')
     expect(replayBlocks[2]?.['arguments']).toEqual({ x: 1 })
+    expect(events.map(event => event['type'])).toEqual(['start', 'start', 'text_delta', 'done'])
+    handle.dispose()
+  })
+
+  it('replays a message-item refusal by dropping its text signature', async () => {
+    const { adapter, seen } = historySetup((_key, _context, call) =>
+      call === 0
+        ? emit({ type: 'start' }, { type: 'error', reason: 'error', error: { message: `server_error: AgentRouter: ${PAIRING_MESSAGE}` } })
+        : emit({ type: 'start' }, { type: 'text_delta', delta: 'ok' }, { type: 'done' }))
+    const handle = installPiAiHeaderTransform(adapter, historySource(async () => [{ ref: 'A', value: 'sk-a' }]))
+    const events = await drain(callStream(adapter, MODEL, {}, historyContext()))
+
+    expect(seen).toHaveLength(2)
+    const replayMessages = (seen[1]?.context as Record<string, unknown>)['messages'] as Record<string, unknown>[]
+    const replayBlocks = replayMessages[0]?.['content'] as Record<string, unknown>[]
+    // The message item no longer carries the `msg_…` handle that was paired
+    // with the missing reasoning item; the visible text is untouched.
+    expect(Object.hasOwn(replayBlocks[1] ?? {}, 'textSignature')).toBe(false)
+    expect(replayBlocks[1]?.['text']).toBe('ok')
     expect(events.map(event => event['type'])).toEqual(['start', 'start', 'text_delta', 'done'])
     handle.dispose()
   })

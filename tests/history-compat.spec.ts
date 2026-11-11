@@ -34,6 +34,11 @@ const PAIRING = "Item 'fc_04e532402a06567e006af3ab76a0c08190952fb0ab72a95d91' of
   + "was provided without its required 'reasoning' item: "
   + "'rs_04e532402a06567e006af3ab71694c819080986fbb3ffc6438'."
 
+/** The same split, reported against a message item instead of a tool call. */
+const PAIRING_MESSAGE = "Item 'msg_038fc56dca758b82006af3effd97ac8190946eef40d098c4a0' of type 'message' "
+  + "was provided without its required 'reasoning' item: "
+  + "'rs_038fc56dca758b82006af3effccc088190beeb285fc97d927f'."
+
 /** One request body, used only by the fetch-level re-encoding tests. */
 function conversation(): string {
   return JSON.stringify({
@@ -100,6 +105,13 @@ describe('isHistoryStateMismatch', () => {
     expect(isHistoryStateMismatch(`openai_responses: ${PAIRING}`)).toBe(true)
   })
 
+  it('recognizes the same split reported against a message item', () => {
+    // Same sentence, different item type: the text block's signature id is what
+    // the server pairs with the missing reasoning item.
+    expect(isHistoryStateMismatch(PAIRING_MESSAGE)).toBe(true)
+    expect(isHistoryStateMismatch(`server_error: AgentRouter: ${PAIRING_MESSAGE}`)).toBe(true)
+  })
+
   it('keeps the pairing pattern narrow', () => {
     expect(isHistoryStateMismatch('the request was provided without its required header')).toBe(false)
     expect(isHistoryStateMismatch('reasoning effort is not supported by this model')).toBe(false)
@@ -152,6 +164,24 @@ describe('degradeForHistory', () => {
     const blocks = ((degraded?.['messages'] as Record<string, unknown>[])[0]?.['content']) as Record<string, unknown>[]
     expect(Object.hasOwn(blocks[0] ?? {}, 'textSignature')).toBe(false)
     expect(blocks[0]?.['text']).toBe('thinking aloud')
+  })
+
+  it('portable_ids unpairs a message item whose reasoning item is gone', () => {
+    // The refusal names a `message` item, not a tool call: the pairing is the
+    // text signature's id, so dropping the signature is the repair.
+    const degraded = degradeForHistory({
+      messages: [{
+        role: 'assistant',
+        content: [{
+          type: 'text',
+          text: 'ok',
+          textSignature: JSON.stringify({ v: 1, id: 'msg_038f', phase: 'final' }),
+        }],
+      }],
+    }, 'portable_ids')
+    const blocks = ((degraded?.['messages'] as Record<string, unknown>[])[0]?.['content']) as Record<string, unknown>[]
+    expect(Object.hasOwn(blocks[0] ?? {}, 'textSignature')).toBe(false)
+    expect(blocks[0]?.['text']).toBe('ok')
   })
 
   it('drop_reasoning stops replaying the reasoning item but keeps its local text', () => {
