@@ -151,7 +151,7 @@ describe('fingerprint runner scheduling', () => {
   it('backs off after a rate-limited failure and drops to one at a time', async () => {
     const { sender, deferreds } = manualSender()
     setFingerprintSender(route, sender)
-    const runner = fingerprintRunner(route, { backoffMs: 40 })
+    const runner = fingerprintRunner(route, { backoffMs: 500 })
 
     runner.checkAll(['m1', 'm2', 'm3'])
     await settle(0)
@@ -166,16 +166,22 @@ describe('fingerprint runner scheduling', () => {
     expect(state.queued).toEqual(['m3'])
 
     // m2 lands inside the window; still nothing launches while it lasts.
+    // The backoff window and these assertions share the real clock, so a
+    // fixed sleep races CI load in BOTH directions: a delayed setTimeout
+    // can leave m3 unlaunched after the "window passed" sleep, and a long
+    // stall can push past the window during the "nothing launches" one.
+    // A wide window makes the mid-window assertions safe under any stall
+    // a test run survives, and vi.waitFor absorbs the late-side latency.
     deferreds.get('m2')!.resolve({ ok: true, record: record('m2') })
-    await settle(10)
+    await settle(0)
     expect(runner.getState().queued).toEqual(['m3'])
     expect(runner.getState().running.size).toBe(0)
 
     // The window passes: m3 may go, but alone — the batch is throttled to 1.
-    await settle(60)
-    state = runner.getState()
-    expect([...state.running.keys()]).toEqual(['m3'])
-    expect(state.queued).toEqual([])
+    await vi.waitFor(() => {
+      expect([...runner.getState().running.keys()]).toEqual(['m3'])
+    })
+    expect(runner.getState().queued).toEqual([])
 
     deferreds.get('m3')!.resolve({ ok: true, record: record('m3') })
     await settle(10)
