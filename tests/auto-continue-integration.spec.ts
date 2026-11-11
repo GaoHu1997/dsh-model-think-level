@@ -345,13 +345,15 @@ describe('auto-continue against the real session stack', () => {
       })
       expect(harness.prompts).toHaveLength(turn)
       expect(harness.runner.status()).toMatchObject({ phase: 'sent', consecutive: turn })
-      expect(document.querySelector('.bre-ac-chip-sent')?.textContent).toContain(`第 ${turn}/2 次`)
+      expect(document.querySelector('.bre-ac-chip-sent')?.textContent).toContain('已继续')
+      expect(document.querySelector('.bre-ac-chip-sent')?.textContent).toContain(`${turn}/2`)
       expect(document.querySelector('[data-composer-dock] [data-bre-autocontinue]')).not.toBeNull()
     }
     await act(async () => { await failTurn(harness, 3, { kind: 'max-tokens' }) })
     expect(harness.prompts).toHaveLength(2)
     expect(harness.runner.status()).toMatchObject({ phase: 'exhausted', consecutive: 2 })
-    expect(document.querySelector('.bre-ac-chip-exhausted')?.textContent).toContain('连续 2 次后停手')
+    expect(document.querySelector('.bre-ac-chip-exhausted')?.textContent).toContain('已停手')
+    expect(document.querySelector('.bre-ac-chip-exhausted')?.textContent).toContain('2/2')
   })
 
   it.each(['model-selection', 'time-context'])('keeps a stopped session muted after %s context but respects real user intent', async (kind) => {
@@ -530,7 +532,7 @@ describe('auto-continue against the real session stack', () => {
     expect(harness.prompts).toHaveLength(0)
   })
 
-  it('stops following the session once the view moves elsewhere', async () => {
+  it('keeps answering a session the view moved away from', async () => {
     const harness = makeHarness('sess-1')
     disposer = harness.runner.dispose
     harness.setCurrent('sess-1')
@@ -543,7 +545,10 @@ describe('auto-continue against the real session stack', () => {
     await vi.advanceTimersByTimeAsync(500)
     harness.setCurrent('sess-2')
     await vi.advanceTimersByTimeAsync(10_000)
-    expect(harness.prompts).toHaveLength(0)
+    // The armed wait belongs to sess-1 and fires there; only the CHIP stops,
+    // because the chip renders whichever session is on screen.
+    expect(harness.prompts).toHaveLength(1)
+    expect(harness.runner.status().sessionId).toBeUndefined()
   })
 
   // The 0.2 composer gives every pill its own slot entry, so no element wraps

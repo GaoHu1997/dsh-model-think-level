@@ -4938,67 +4938,131 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
 
 /* ---- Auto-continue chip: the in-session chain indicator ----
    It rides the composer stat line, right of the context meter, so it borrows
-   that row's height (22px) and a 12px tabular face to keep one baseline. The
-   slot is ours and stays empty while no chain runs. */
+   that row's height (22px) without changing it. The order of information is
+   fixed: a verb says what is happening, the ring then the exact number say how
+   long is left, and the quiet fraction says how many tries remain — a ceiling
+   is not a reading. The slot is ours and stays empty while no chain runs. */
 .bre-ac-host { display: inline-flex; align-items: center; }
 .bre-ac { position: relative; display: inline-flex; align-items: center; }
+.bre-ac-group { display: inline-flex; align-items: center; gap: 4px; }
 .bre-ac-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 22px;
-  padding: 0 8px;
-  border: 1px solid var(--bre-line-3);
+  padding: 0 8px 0 7px;
+  border: 1px solid transparent;
   border-radius: var(--bre-r-pill);
   background: var(--bre-surface);
   color: var(--bre-ink-2);
   font: inherit;
-  font-size: 12px;
+  font-size: 11.5px;
   line-height: 1;
+  font-weight: 500;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition: background var(--bre-t) var(--bre-ease), border-color var(--bre-t) var(--bre-ease);
+  transition: background var(--bre-t) var(--bre-ease), border-color var(--bre-t) var(--bre-ease), color var(--bre-t) var(--bre-ease);
 }
 .bre-ac-chip:hover { background: var(--bre-hover); }
 .bre-ac-chip:focus-visible { outline: 2px solid var(--bre-accent-line); outline-offset: 1px; }
-.bre-ac-dot {
-  width: 6px;
-  height: 6px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--bre-ink-4);
-}
+.bre-ac-text { font-weight: 500; }
+.bre-ac-num { font-weight: 600; }
+.bre-ac-ratio { font-size: 10.5px; font-weight: 400; opacity: .72; }
+.bre-ac-hint { font-size: 10.5px; font-weight: 400; opacity: .8; }
+.bre-ac-caret { width: 11px; height: 11px; flex: none; margin-left: -1px; opacity: .5; }
+.bre-ac-tick { width: 12px; height: 12px; flex: none; opacity: .9; }
+
+/* The countdown ring: the arc is the time that is LEFT, shrinking clockwise.
+   A ring is the only honest way to draw a quantity that is running out —
+   the circumference is the whole wait, the gap is what already elapsed. */
+.bre-ac-ring { position: relative; display: inline-flex; width: 13px; height: 13px; flex: none; }
+.bre-ac-ring svg { width: 13px; height: 13px; transform: rotate(-90deg); }
+.bre-ac-ring-track, .bre-ac-ring-fill { fill: none; stroke-width: 2; }
+.bre-ac-ring-track { stroke: var(--bre-accent-line); }
+.bre-ac-ring-fill { stroke: var(--bre-accent); stroke-linecap: round; transition: stroke-dashoffset .5s linear; }
+
+/* waiting is the only state that asks for attention: the system is working
+   on the user's behalf, so it paints in the accent family, not in a warning. */
 .bre-ac-chip-waiting {
   border-color: var(--bre-accent-line);
   background: var(--bre-accent-weak);
   color: var(--bre-accent-ink);
 }
-.bre-ac-chip-waiting .bre-ac-dot { background: var(--bre-accent); animation: bre-ac-pulse 1.2s var(--bre-ease) infinite; }
-.bre-ac-chip-sent .bre-ac-dot { background: var(--bre-accent); opacity: 0.55; }
-.bre-ac-chip-exhausted {
-  border-color: var(--bre-warn);
-  background: var(--bre-warn-weak);
-  color: var(--bre-warn);
+.bre-ac-chip-waiting:hover { background: color-mix(in srgb, var(--bre-accent-weak) 84%, var(--bre-accent)); }
+.bre-ac-chip-waiting .bre-ac-ratio { color: var(--bre-accent-ink); opacity: .62; }
+
+/* Already sent: it needs no attention any more, so it drops back to neutral. */
+.bre-ac-chip-sent { background: transparent; border-color: var(--bre-line-2); color: var(--bre-ink-3); }
+.bre-ac-chip-sent .bre-ac-tick { color: var(--bre-ok); opacity: .85; }
+
+/* Stood down: a settled state, with the reset one click away rather than
+   three (the settings pane used to be the only way back). */
+.bre-ac-chip-exhausted { background: var(--bre-hover); color: var(--bre-ink-3); cursor: default; }
+.bre-ac-chip-exhausted .bre-ac-tick { color: var(--bre-ink-4); }
+.bre-ac-reset {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--bre-line-2);
+  border-radius: var(--bre-r-pill);
+  background: var(--bre-surface);
+  color: var(--bre-ink-2);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color var(--bre-t) var(--bre-ease), color var(--bre-t) var(--bre-ease);
 }
-.bre-ac-chip-exhausted .bre-ac-dot { background: var(--bre-warn); }
-@keyframes bre-ac-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.25; }
+.bre-ac-reset:hover { border-color: var(--bre-accent-line); color: var(--bre-accent-ink); }
+.bre-ac-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--bre-ink-3);
+  cursor: pointer;
 }
-.bre-ac-text { font-variant-numeric: tabular-nums; }
+.bre-ac-more:hover { background: var(--bre-hover); color: var(--bre-ink); }
+.bre-ac-more:focus-visible { outline: 2px solid var(--bre-accent-line); outline-offset: 1px; }
+.bre-ac-more-icon { width: 13px; height: 13px; }
+
+/* The popover carries the sentence that cannot fit in 22px: why the chain
+   exists, what it will do next, and how the user takes over. */
 .bre-ac-pop {
   position: absolute;
   right: 0;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 8px);
   z-index: 1200;
-  min-width: 128px;
-  padding: 4px;
+  width: 244px;
+  padding: 10px 10px 8px;
   border: 1px solid var(--bre-line-2);
   border-radius: var(--bre-r-md);
   background: var(--bre-surface);
   box-shadow: var(--bre-shadow-pop);
   display: flex;
   flex-direction: column;
+}
+.bre-ac-pop-head { display: flex; align-items: center; gap: 8px; padding: 1px 2px 7px; }
+.bre-ac-pop-title { font-size: 12px; font-weight: 600; color: var(--bre-ink); }
+.bre-ac-pop-badge {
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: var(--bre-r-pill);
+  background: var(--bre-accent-weak);
+  color: var(--bre-accent-ink);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.bre-ac-pop-desc { margin: 0 2px 9px; font-size: 11.5px; line-height: 17px; color: var(--bre-ink-2); }
+.bre-ac-pop-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+  border-top: 1px solid var(--bre-line-1);
 }
 .bre-ac-action {
   appearance: none;
@@ -5013,8 +5077,26 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   cursor: pointer;
 }
 .bre-ac-action:hover { background: var(--bre-hover); color: var(--bre-ink); }
+.bre-ac-pop-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 2px 1px;
+  border-top: 1px solid var(--bre-line-1);
+}
+.bre-ac-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  font-size: 11px;
+  color: var(--bre-ink-3);
+  cursor: pointer;
+}
+.bre-ac-link:hover { color: var(--bre-accent-ink); }
+.bre-ac-note { font-size: 10.5px; color: var(--bre-ink-4); }
 @media (prefers-reduced-motion: reduce) {
-  .bre-ac-chip-waiting .bre-ac-dot { animation: none; }
+  .bre-ac-ring-fill { transition: none; }
 }
 
 /* --- auto-continue: the trigger picker -------------------------------- */

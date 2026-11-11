@@ -5,10 +5,18 @@
  * carries 「5 轮 · 185 步 · 115 tok/s」 and the context meter — and is inserted
  * right of the context pill. It exists ONLY while a continue chain is running:
  *
- *   waiting   → `第 2/5 次 · 21s`, countdown, 停止 available
- *   sent      → `已发送「继续」 第 2/5 次`
- *   exhausted → `连续 5 次后停手`, 重置 available
+ *   waiting   → `◔ 自动继续 3s 1/5`, countdown ring, click opens the popover
+ *   paused    → `⏸ 自动继续 回到本会话后继续` (the view left this session, so
+ *               the countdown is frozen; it resumes from the remaining seconds)
+ *   sent      → `✓ 已继续 2/5`
+ *   exhausted → `⏱ 已停手 5/5` + an inline 重置
  *   idle      → nothing at all (the chip unmounts, the slot stays empty)
+ *
+ * The chip answers three questions in that order, at 22px high: who is doing
+ * what (a verb, not a counter), how long is left (a ring, then an exact
+ * number), and how many tries are left (quiet small type — it is a ceiling,
+ * not a reading). The popover carries the one sentence that does not fit:
+ * why the chain exists, what it will do, and how the user takes over.
  *
  * Every action is scoped to the CURRENT session: 「停止」 ends this chain and
  * mutes the session until the user posts again; the global switch and the
@@ -37,6 +45,9 @@ const STAT_LINE = '[data-composer-stats]'
 const STAT_PILL = '[data-composer-stat]'
 /** Marks the element this module owns. */
 const SLOT_ATTR = 'data-bre-autocontinue'
+
+/** Circumference of the 13px ring (r = 6 in a 16-unit viewBox). */
+const RING_LENGTH = 2 * Math.PI * 6
 
 /**
  * The row the chip belongs to.
@@ -74,6 +85,46 @@ function anchorRow(): HTMLElement | undefined {
   return row
 }
 
+/** A 24-unit line icon; the chip shares no sprite with the host. */
+function Glyph(props: { className: string; children: ReactNode }): ReactNode {
+  return (
+    <svg
+      className={props.className}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {props.children}
+    </svg>
+  )
+}
+
+/** The countdown ring: the arc is the time that is LEFT, shrinking clockwise. */
+function Ring(props: { ratio: number }): ReactNode {
+  // A positive offset of C·(1−p) leaves a p-long dash starting at 12 o'clock,
+  // so the arc is exactly the time LEFT and it shrinks clockwise.
+  const offset = RING_LENGTH * (1 - Math.max(0, Math.min(1, props.ratio)))
+  return (
+    <span className="bre-ac-ring" aria-hidden="true">
+      <svg viewBox="0 0 16 16">
+        <circle className="bre-ac-ring-track" cx="8" cy="8" r="6" />
+        <circle
+          className="bre-ac-ring-fill"
+          cx="8"
+          cy="8"
+          r="6"
+          strokeDasharray={RING_LENGTH}
+          strokeDashoffset={offset}
+        />
+      </svg>
+    </span>
+  )
+}
+
 /** The chip itself; renders nothing unless a chain is live. */
 function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () => void }): ReactNode {
   const { runner, t } = props
@@ -94,12 +145,14 @@ function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () 
 
   if (status.sessionId === undefined || status.phase === 'idle') return null
 
-  const seconds = Math.max(0, Math.ceil((status.nextSendAt - now) / 1000))
-  const label = status.phase === 'waiting'
-    ? t('autoContinueControllerWaiting', { n: status.consecutive + 1, max: status.maxRetries, seconds })
-    : status.phase === 'sent'
-      ? t('autoContinueControllerSent', { n: status.consecutive, max: status.maxRetries })
-      : t('autoContinueControllerExhausted', { max: status.maxRetries })
+  const max = status.maxRetries
+  const attempt = status.phase === 'waiting' ? status.consecutive + 1 : status.consecutive
+  const remaining = Math.max(0, status.nextSendAt - now)
+  const seconds = Math.ceil(remaining / 1_000)
+  // The ring's arc follows the configured wait; a provider's longer delay just
+  // makes the last stretch sit still at full, which is honest enough.
+  const waitMs = Math.max(1_000, status.waitMs)
+  const ratio = status.phase === 'waiting' ? Math.min(1, remaining / waitMs) : 0
   const detail = status.detail === ''
     ? undefined
     : t('autoContinueControllerDetail', { detail: status.detail })
@@ -114,11 +167,99 @@ function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () 
     >{text}</button>
   )
 
+  // Settings lives in the footer (one entry, always in the same place), so the
+  // action list only carries what applies to the current phase.
   const actions: ReactNode[] = []
-  if (status.phase === 'waiting') actions.push(action(t('autoContinueControllerResume'), () => runner.resumeNow()))
-  if (status.phase === 'waiting' || status.phase === 'sent') actions.push(action(t('autoContinueControllerStop'), () => runner.stop()))
-  if (status.phase === 'exhausted') actions.push(action(t('autoContinueControllerReset'), () => runner.reset()))
-  actions.push(action(t('autoContinueControllerSettings'), props.onSettings))
+  if (status.phase === 'waiting') {
+    actions.push(action(t('autoContinueControllerResume'), () => runner.resumeNow()))
+    actions.push(action(t('autoContinueControllerStop'), () => runner.stop()))
+  } else if (status.phase === 'sent') {
+    actions.push(action(t('autoContinueControllerStop'), () => runner.stop()))
+  }
+
+  const inner = status.phase === 'waiting'
+    ? (
+      <>
+        <Ring ratio={ratio} />
+        <span className="bre-ac-text">{t('autoContinueControllerWaiting')}</span>
+        <span className="bre-ac-num">{t('autoContinueControllerSeconds', { seconds })}</span>
+        <span className="bre-ac-ratio">{t('autoContinueControllerRatio', { n: attempt, max })}</span>
+        <Glyph className="bre-ac-caret"><path d="M6.5 9.5 12 15l5.5-5.5" /></Glyph>
+      </>
+    )
+    : status.phase === 'sent'
+        ? (
+          <>
+            <Glyph className="bre-ac-tick"><path d="M4.8 12.5 9.6 17.3 19.2 6.9" /></Glyph>
+            <span className="bre-ac-text">{t('autoContinueControllerSent')}</span>
+            <span className="bre-ac-ratio">{t('autoContinueControllerRatio', { n: attempt, max })}</span>
+          </>
+        )
+        : (
+          <>
+            <Glyph className="bre-ac-tick"><circle cx="12" cy="12" r="8.2" /><path d="M12 7.6V12l3 1.9" /></Glyph>
+            <span className="bre-ac-text">{t('autoContinueControllerExhausted')}</span>
+            <span className="bre-ac-ratio">{t('autoContinueControllerRatio', { n: max, max })}</span>
+          </>
+        )
+
+  const pop = open
+    ? (
+      <div className="bre-ac-pop" role="menu">
+        <div className="bre-ac-pop-head">
+          <span className="bre-ac-pop-title">{t('autoContinueControllerPopTitle')}</span>
+          <span className="bre-ac-pop-badge">{t('autoContinueControllerPopBadge', { n: attempt, max })}</span>
+        </div>
+        <p className="bre-ac-pop-desc">
+          {t('autoContinueControllerPopDesc', { seconds, max })}
+        </p>
+        {actions.length > 0
+          ? <div className="bre-ac-pop-actions">{actions}</div>
+          : undefined}
+        <div className="bre-ac-pop-foot">
+          <button
+            type="button"
+            className="bre-ac-link"
+            onClick={() => { setOpen(false); props.onSettings() }}
+          >{t('autoContinueControllerSettings')}</button>
+          <span className="bre-ac-note">{t('autoContinueControllerPopScope')}</span>
+        </div>
+      </div>
+    )
+    : undefined
+
+  if (status.phase === 'exhausted') {
+    // Standing down is a settled state: the chip stops being a toggle and the
+    // reset sits next to it, one click away instead of three.
+    return (
+      <span className="bre-ac">
+        <span className="bre-ac-group">
+          <span
+            className="bre-ac-chip bre-ac-chip-exhausted"
+            title={detail ?? t('autoContinueControllerAria')}
+          >{inner}</span>
+          <button
+            type="button"
+            className="bre-ac-reset"
+            onClick={() => runner.reset()}
+          >{t('autoContinueControllerReset')}</button>
+          <button
+            type="button"
+            className="bre-ac-more"
+            aria-label={t('autoContinueControllerSettings')}
+            onClick={() => setOpen(value => !value)}
+          >
+            <Glyph className="bre-ac-more-icon">
+              <circle cx="5.5" cy="12" r="1.4" fill="currentColor" stroke="none" />
+              <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+              <circle cx="18.5" cy="12" r="1.4" fill="currentColor" stroke="none" />
+            </Glyph>
+          </button>
+        </span>
+        {pop}
+      </span>
+    )
+  }
 
   return (
     <span className="bre-ac">
@@ -127,13 +268,12 @@ function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () 
         className={`bre-ac-chip bre-ac-chip-${status.phase}`}
         aria-label={t('autoContinueControllerAria')}
         aria-expanded={open}
-        title={detail ?? label}
+        title={detail ?? t('autoContinueControllerAria')}
         onClick={() => setOpen(value => !value)}
       >
-        <span className="bre-ac-dot" aria-hidden="true" />
-        <span className="bre-ac-text">{label}</span>
+        {inner}
       </button>
-      {open && <div className="bre-ac-pop" role="menu">{actions}</div>}
+      {pop}
     </span>
   )
 }

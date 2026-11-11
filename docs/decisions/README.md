@@ -9,3 +9,4 @@
 - [0003 — 生图模型只从宿主实时设置派生，文件只保存偏好与诊断](0003-live-image-configuration-source.md) — 已接受；所有入口使用实时 descriptor，version 3 文件不再保存可执行模型目录
 - [0004 — 发布正文从本地草稿改为随仓库提交](0004-release-notes-must-be-committed.md) — 已接受；移除 `.gitignore` 对 `.github/releases/` 的排除并提交既有正文，`release.yml` 发布前校验正文，去掉 `--generate-notes` 回退，补写历史走 `sync-release-notes.yml`
 - [0005 — 旧话题恢复同时覆盖拆开的 `fc_`/`rs_` 项对](0005-history-recovery-covers-split-item-pairs.md) — 已接受；把 `provided without its required … reasoning` 并入识别集合，与资源拒绝共用一条降级阶梯
+- [0006 — 自动继续的状态行改版与后台链条](0006-auto-continue-chip-and-background-chain.md) — 已接受；chip 改为「动词 + 倒计时环 + 弱化次数」；链条改为按会话持有，切走会话/最小化不再取消已决定的那一发，后台失败也会继续接管，空闲链按会话回收

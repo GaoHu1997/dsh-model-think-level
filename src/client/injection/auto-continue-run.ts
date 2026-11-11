@@ -163,6 +163,8 @@ export interface AutoContinueStatus {
   readonly maxRetries: number
   /** Epoch ms the pending reply fires at; 0 when no timer is armed. */
   readonly nextSendAt: number
+  /** Length of the armed wait in ms; the chip draws the ring against it. */
+  readonly waitMs: number
   /** The judged interruption, e.g. `RATE_LIMIT` or `max-tokens` (tooltip only). */
   readonly detail: string
   /** Whether the user stopped this session's chain. */
@@ -186,8 +188,10 @@ interface Attached {
   phase: 'idle' | 'waiting' | 'sent' | 'exhausted'
   /** Invalidates prompt acknowledgements after this chain is settled or superseded. */
   sendEpoch: number
-  /** Epoch ms the armed reply fires at; 0 when none. */
+  /** Epoch ms the armed reply fires at; 0 when none (and while frozen). */
   nextSendAt: number
+  /** Length of the current wait in ms; the ring's denominator. */
+  waitMs: number
   /** The interruption class that armed the chain (tooltip only). */
   detail: string
   /** Whether the initial history page has landed; everything before it is baseline. */
@@ -218,8 +222,14 @@ interface Attached {
  */
 export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   const { ctx, t } = deps
-  /** The one currently watched session, undefined while nothing is open. */
-  let attached: Attached | undefined
+  /** The chain of the session on screen; the chip renders THIS one. */
+  let current: Attached | undefined
+  /**
+   * Every session that still owns a chain. A chain outlives the pane: the user
+   * switching sessions must not cancel a reply that was already decided, so the
+   * timer keeps running and fires against its own session.
+   */
+  const chains = new Map<string, Attached>()
   let disposed = false
   const timers = new Set<ReturnType<typeof setTimeout>>()
   /** Sessions the user stopped: quiet until they post in this session again. */
@@ -234,7 +244,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   let statusCache: AutoContinueStatus | undefined
 
   const buildStatus = (): AutoContinueStatus => {
-    const state = attached
+    const state = current
     const config = autoContinueConfig()
     if (state === undefined) {
       return {
@@ -243,6 +253,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
         consecutive: 0,
         maxRetries: config.maxRetries,
         nextSendAt: 0,
+        waitMs: config.waitSeconds * 1_000,
         detail: '',
         muted: false,
       }
@@ -253,6 +264,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       consecutive: state.consecutive,
       maxRetries: config.maxRetries,
       nextSendAt: state.nextSendAt,
+      waitMs: state.waitMs,
       detail: state.detail,
       muted: muted.has(state.sessionId),
     }
@@ -264,6 +276,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     && a.consecutive === b.consecutive
     && a.maxRetries === b.maxRetries
     && a.nextSendAt === b.nextSendAt
+    && a.waitMs === b.waitMs
     && a.detail === b.detail
     && a.muted === b.muted
 
@@ -297,6 +310,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     state.sendEpoch += 1
     state.phase = 'idle'
     state.nextSendAt = 0
+    state.waitMs = 0
     state.detail = ''
     notifyStatus()
   }
@@ -417,15 +431,17 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     if (state.phase === 'waiting') settleChain(state)
   }
 
-  /** Recompute an already-armed wait from its original start, not from the edit. */
-  const scheduleSend = (state: Attached): void => {
-    // A newer wait owns the chain now; an older prompt reply must not overwrite it.
-    state.sendEpoch += 1
-    if (state.sendTimer !== undefined) {
-      clearTimeout(state.sendTimer)
-      timers.delete(state.sendTimer)
+  /** Whether the page is on screen; the countdown only runs while it is. */
+  const viewHidden = (): boolean => {
+    try {
+      return document.visibilityState === 'hidden'
+    } catch {
+      return false
     }
-    const remaining = Math.max(0, sendDelayOf(state.pendingRetryAfterMs) - (Date.now() - state.pendingSendScheduledAt))
+  }
+
+  /** Arm the reply `remaining` ms out and publish the waiting phase. */
+  const armSend = (state: Attached, remaining: number): void => {
     const timer = setTimeout(() => {
       timers.delete(timer)
       state.sendTimer = undefined
@@ -436,6 +452,20 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     state.phase = 'waiting'
     notifyStatus()
     timers.add(timer)
+  }
+
+  /** Recompute an already-armed wait from its original start, not from the edit. */
+  const scheduleSend = (state: Attached): void => {
+    // A newer wait owns the chain now; an older prompt reply must not overwrite it.
+    state.sendEpoch += 1
+    if (state.sendTimer !== undefined) {
+      clearTimeout(state.sendTimer)
+      timers.delete(state.sendTimer)
+    }
+    const delay = sendDelayOf(state.pendingRetryAfterMs)
+    state.waitMs = delay
+    const remaining = Math.max(0, delay - (Date.now() - state.pendingSendScheduledAt))
+    armSend(state, remaining)
   }
 
   /** Snapshot facts the guards read; undefined when the session is unreadable. */
@@ -458,13 +488,6 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     }
   }
 
-  /** Whether the current session on screen is still this one. */
-  const stillCurrent = (state: Attached): boolean => {
-    const sessions = ctx.get?.('sessions') as SessionsServiceLike | undefined
-    const uiSession = ctx.get?.('uiSession') as UiSessionLike | undefined
-    return currentSessionId(sessions, uiSession) === state.sessionId
-  }
-
   const armEvaluation = (state: Attached): void => {
     if (state.evalTimer !== undefined) {
       // A loop is already waiting (a burst of edges): just extend its window.
@@ -476,7 +499,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   }
 
   const scheduleEvaluate = (state: Attached, delay: number): void => {
-    if (disposed || attached !== state) return
+    if (disposed || chains.get(state.sessionId) !== state) return
     state.evalTimer = setTimeout(() => {
       state.evalTimer = undefined
       evaluate(state)
@@ -545,7 +568,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   }
 
   const evaluate = (state: Attached): void => {
-    if (disposed || attached !== state) return
+    if (disposed || chains.get(state.sessionId) !== state) return
     // No judgements before the history page lands: its endings are baseline.
     // The switch is consulted per evaluation: turning it off stops the loop
     // mid-wait, and turning it on only affects the NEXT ending.
@@ -600,7 +623,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   }
 
   const send = async (state: Attached, text: string): Promise<void> => {
-    if (disposed || attached !== state) return
+    if (disposed || chains.get(state.sessionId) !== state) return
     scanUserEvents(state)
     // A newer ending or user intent makes this wait obsolete. Even a refused
     // fire-time guard must remove the expired countdown, not leave it at zero.
@@ -612,7 +635,9 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     if (armedSeq === undefined || armedSeq !== state.lastHandledTurnEndSeq) { abandonWait(); return }
     if (!autoContinueEnabled() || muted.has(state.sessionId) || state.consecutive >= autoContinueConfig().maxRetries) { abandonWait(); return }
     const snap = snapshotOf(state.session)
-    if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0 || !stillCurrent(state)) { abandonWait(); return }
+    // The reply belongs to THIS session, not to the pane the user is looking
+    // at: leaving the session must not swallow a wait that was already armed.
+    if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) { abandonWait(); return }
     const events = durableEventsOf(state)
     if (events.some(event => event.seq > armedSeq && (isIntentMessage(event) || event.type === 'turn/start' || event.type === 'turn/end'))) { abandonWait(); return }
     clearPendingSend(state)
@@ -625,7 +650,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     state.phase = 'sent'
     state.nextSendAt = 0
     notifyStatus()
-    const ownsSend = (): boolean => !disposed && attached === state && state.sendEpoch === epoch
+    const ownsSend = (): boolean => !disposed && chains.get(state.sessionId) === state && state.sendEpoch === epoch
     if (!ownsSend()) return
     try {
       const answer = await state.session.prompt([{ type: 'text', text }], 'queue')
@@ -724,7 +749,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
    * below {@link Attached.lastHandledTurnEndSeq}.
    */
   const sweep = (state: Attached): void => {
-    if (disposed || attached !== state) return
+    if (disposed || chains.get(state.sessionId) !== state) return
     if (state.evalTimer !== undefined) return
     if (!autoContinueEnabled() || muted.has(state.sessionId)) return
     if (!state.historyReady) return
@@ -740,10 +765,8 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     }
   }
 
-  const detach = (): void => {
-    const state = attached
-    if (state === undefined) return
-    attached = undefined
+  /** Drop one session's chain: its timers, its subscriptions, its map slot. */
+  const dropChain = (state: Attached): void => {
     for (const unsub of state.unsubs) {
       try {
         unsub()
@@ -761,13 +784,30 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       timers.delete(state.sendTimer)
       state.sendTimer = undefined
     }
+    chains.delete(state.sessionId)
+    if (current === state) current = undefined
     notifyStatus()
   }
 
-  const attach = (binding: SessionBindingLike): void => {
+  /** A connection reset replaces every binding: all chains start over. */
+  const dropAllChains = (): void => {
+    for (const state of [...chains.values()]) dropChain(state)
+    current = undefined
+    notifyStatus()
+  }
+
+  /** The chain of one session, created on first sight and reused afterwards. */
+  const ensureChain = (binding: SessionBindingLike): Attached | undefined => {
+    const existing = chains.get(binding.sessionId)
+    if (existing !== undefined) {
+      // A reconnect swaps the session object under the same id: the old
+      // listeners point at a dead generation, so the chain starts over.
+      if (existing.session === binding.session) return existing
+      dropChain(existing)
+    }
     // A subagent view is watched by nobody: skip before any listener exists.
     const first = snapshotOf(binding.session)
-    if (first === undefined || first.subagent) return
+    if (first === undefined || first.subagent) return undefined
     // An unanswered failure keeps its ending above the baseline; every other
     // pre-existing ending stays history.
     const recoveredBaseline = first.open ? recoverableBaselineOf(binding.eventSource) : undefined
@@ -779,7 +819,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       // running when attached is never judged from that edge alone.
       wasRunning: readRunning(binding.session),
       lastUserSeq: newestSeqOf(binding.eventSource, 'user/message'),
-      // Pre-existing endings are invisible to this attachment, except an
+      // Pre-existing endings are invisible to this chain, except an
       // unanswered failure inside the recovery window. While the history page
       // has not landed yet the window holds nothing, so the baseline waits for
       // it (see ensureHistoryReady) instead of treating its endings as live.
@@ -791,6 +831,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       phase: 'idle',
       sendEpoch: 0,
       nextSendAt: 0,
+      waitMs: 0,
       detail: '',
       pendingSendTurnEndSeq: undefined,
       pendingSendScheduledAt: 0,
@@ -802,13 +843,12 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       evalTimer: undefined,
       sendTimer: undefined,
     }
-    attached = state
-    notifyStatus()
+    chains.set(state.sessionId, state)
     try {
       state.unsubs.push(binding.session.subscribe(() => onSnapshot(state)))
     } catch {
-      detach()
-      return
+      dropChain(state)
+      return undefined
     }
     try {
       state.unsubs.push(binding.eventSource.subscribe(() => {
@@ -817,10 +857,11 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
         armForNewTurnEnd(state)
       }))
     } catch (error) {
-      detach()
+      dropChain(state)
       console.warn('[dsh-model-think-level] auto-continue: event source unusable:', error)
-      return
+      return undefined
     }
+    return state
   }
 
   const readRunning = (session: SessionFaceLike): boolean => {
@@ -847,14 +888,22 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     return newest
   }
 
-  /** One poll: re-resolve the current session and swap the attachment when it moved. */
+  /**
+   * One poll: point `current` at the chain of the session on screen, and let
+   * every other chain live on. A reply armed before the user switched panes
+   * keeps its timer and fires against its own conversation — the wait belongs
+   * to the session that failed, not to the pane that happens to be visible.
+   * Idle chains the user walked away from are dropped; a chain that is still
+   * judging its ending or waiting out its backoff survives the switch.
+   */
   const track = (): void => {
     if (disposed) return
     const sessions = ctx.get?.('sessions') as SessionsServiceLike | undefined
     const uiSession = ctx.get?.('uiSession') as UiSessionLike | undefined
     const id = currentSessionId(sessions, uiSession)
     if (id === undefined || sessions === undefined || typeof sessions.binding !== 'function') {
-      detach()
+      current = undefined
+      notifyStatus()
       return
     }
     let binding: SessionBindingLike | undefined
@@ -864,16 +913,25 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       binding = undefined
     }
     if (binding === undefined || binding.session === undefined) {
-      detach()
+      current = undefined
+      notifyStatus()
       return
     }
-    if (attached !== undefined && attached.session === binding.session) {
-      sweep(attached)
+    if (current !== undefined && current.sessionId === id && current.session === binding.session) {
+      sweep(current)
+      notifyStatus()
       return
     }
-    detach()
-    attach(binding)
-    if (attached !== undefined) sweep(attached)
+    const chain = ensureChain(binding)
+    current = chain
+    if (chain !== undefined) sweep(chain)
+    for (const state of [...chains.values()]) {
+      if (state === current) continue
+      if (state.phase !== 'idle') continue
+      if (state.evalTimer !== undefined || state.evalDeadline > 0) continue
+      dropChain(state)
+    }
+    notifyStatus()
   }
 
   const interval = setInterval(track, TICK_MS)
@@ -883,13 +941,13 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   // are dead and its subscriptions must go before the next poll re-attaches.
   let disposeReset: (() => void) | undefined
   try {
-    disposeReset = ctx.on?.('connection/reset', () => { detach() })
+    disposeReset = ctx.on?.('connection/reset', () => { dropAllChains() })
   } catch {
     // The connection event is an optimization here; the poll heals regardless.
   }
 
   const disposeEnabled = subscribeAutoContinueEnabled(() => {
-    const state = attached
+    const state = current
     if (autoContinueEnabled() || state === undefined) return
     cancelPendingSend(state)
     settleChain(state)
@@ -900,7 +958,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     }
   })
   const disposeConfig = subscribeAutoContinueConfig(() => {
-    const state = attached
+    const state = current
     notifyStatus()
     if (state?.pendingSendTurnEndSeq === undefined) return
     if (!autoContinueEnabled() || state.consecutive >= autoContinueConfig().maxRetries) cancelPendingSend(state)
@@ -909,7 +967,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
 
   /** Stand down for this session only: hide the chip and stop judging endings. */
   const stop = (): void => {
-    const state = attached
+    const state = current
     if (state === undefined) return
     cancelPendingSend(state)
     if (state.evalTimer !== undefined) {
@@ -925,7 +983,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
 
   /** Clear a stood-down chain so the next ending starts again at one. */
   const reset = (): void => {
-    const state = attached
+    const state = current
     if (state === undefined) return
     state.consecutive = 0
     muted.delete(state.sessionId)
@@ -934,7 +992,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
 
   /** Skip the remaining wait and reply now. */
   const resumeNow = (): void => {
-    const state = attached
+    const state = current
     if (state === undefined) return
     if (state.pendingSendTurnEndSeq === undefined) return
     if (state.sendTimer !== undefined) {
@@ -960,7 +1018,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       disposeConfig()
       disposeReset?.()
       clearInterval(interval)
-      detach()
+      dropAllChains()
       statusListeners.clear()
       for (const timer of timers) clearTimeout(timer)
       timers.clear()

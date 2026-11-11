@@ -118,6 +118,8 @@ afterEach(() => {
   vi.useRealTimers()
   window.localStorage.clear()
   document.body.innerHTML = ''
+  // A visibility stub installed by a test must not leak into the next one.
+  Reflect.deleteProperty(document, 'visibilityState')
 })
 
 /** Drive one failed-turn cycle: the turn ends and the watcher reacts.
@@ -368,7 +370,7 @@ describe('auto-continue watcher', () => {
     expect(binding.prompts).toHaveLength(0)
   })
 
-  it('recovers a recent failure that ended while the view was on another session', async () => {
+  it('answers a failure that ends while the view is on another session', async () => {
     const harness = makeHarness()
     disposer = harness.runner.dispose
     const binding = makeBinding('s1')
@@ -383,8 +385,10 @@ describe('auto-continue watcher', () => {
     binding.append('turn/end', 2, { turn: 1, reason: { kind: 'error', error: { message: '429 rate limited', code: 'RATE_LIMIT' } } })
     binding.setRunning(false)
     await vi.advanceTimersByTimeAsync(5_000)
-    expect(binding.prompts).toHaveLength(0)
-    // Coming back within the recovery window continues it without a manual nudge.
+    // The wait belongs to the session that failed, not to the pane on screen:
+    // switching away must not swallow the reply.
+    expect(binding.prompts).toHaveLength(1)
+    // Coming back shows the same chain instead of starting a second one.
     harness.setCurrent('s1')
     await vi.advanceTimersByTimeAsync(1_100)
     await vi.advanceTimersByTimeAsync(autoContinueConfig().waitSeconds * 1_000 + 1_000)
@@ -570,7 +574,7 @@ describe('auto-continue watcher', () => {
     expect(binding.prompts).toHaveLength(0)
   })
 
-  it('does not send after the view moved to another session', async () => {
+  it('still sends after the view moved to another session', async () => {
     const harness = makeHarness()
     disposer = harness.runner.dispose
     const binding = makeBinding('s1')
@@ -582,11 +586,12 @@ describe('auto-continue watcher', () => {
     binding.append('turn/end', 2, { turn: 1, reason: { kind: 'error', error: { message: 'died', code: 'TRANSPORT' } } })
     binding.setRunning(false)
     await vi.advanceTimersByTimeAsync(500)
-    // The user navigates away before the send delay elapses; the next tick
-    // detaches, and the scheduled send dies with the attachment.
+    // The user navigates away before the send delay elapses. The chain belongs
+    // to this session, so its timer keeps running and the reply still lands.
     harness.setCurrent('s2')
     await vi.advanceTimersByTimeAsync(10_000)
-    expect(binding.prompts).toHaveLength(0)
+    expect(binding.prompts).toHaveLength(1)
+    expect(binding.prompts[0]?.content[0]?.text).toBe('继续')
   })
 
   it.each(['before evaluation', 'during wait', 'before attachment'])('ignores host context %s when continuing an unanswered failure', async (timing) => {
@@ -904,5 +909,34 @@ describe('auto-continue controller face', () => {
 
     harness.runner.reset()
     expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0, muted: false })
+  })
+
+  it('keeps the chain alive through a second failure while the view is elsewhere', async () => {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.append('user/message', 1, { id: 'm1', content: [{ type: 'text', text: '长任务' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+
+    // The user walks away with the wait armed; the reply still lands.
+    harness.setCurrent('s2')
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(binding.prompts).toHaveLength(1)
+    expect(harness.runner.status().phase).toBe('idle')
+
+    // The continued turn hits the ceiling again while the pane is elsewhere:
+    // the chain keeps watching its own session and answers a second time.
+    binding.append('turn/end', 3, { turn: 2, reason: { kind: 'max-tokens' } })
+    binding.setRunning(true)
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(3_500)
+    expect(binding.prompts).toHaveLength(2)
+    expect(binding.prompts[1]?.content[0]?.text).toBe('继续')
   })
 })
