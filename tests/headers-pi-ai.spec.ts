@@ -567,6 +567,8 @@ describe('pi-ai history recovery', () => {
   const MODEL = { id: 'alpha-model', baseUrl: 'https://relay.example.com/v1', api: 'openai-completions' }
   const MISMATCH = 'The requested item was created under a different Azure OpenAI resource. '
     + 'Use the same resource that created the item to access it.'
+  const PAIRING = "Item 'fc_1' of type 'function_call' was provided without its required "
+    + "'reasoning' item: 'rs_1'."
 
   /** An adapter that also exposes the context each attempt was handed. */
   function historySetup(
@@ -611,6 +613,7 @@ describe('pi-ai history recovery', () => {
               text: 'ok',
               textSignature: JSON.stringify({ id: 'msg_1', phase: 'final' }),
             },
+            { type: 'toolCall', id: 'call_1|fc_1', name: 'run', arguments: { x: 1 } },
           ],
         },
       ],
@@ -645,6 +648,30 @@ describe('pi-ai history recovery', () => {
     const replayBlocks = replayMessages[0]?.['content'] as Record<string, unknown>[]
     expect(Object.hasOwn(replayBlocks[1] ?? {}, 'textSignature')).toBe(false)
     expect(replayBlocks[1]?.['text']).toBe('ok')
+    expect(events.map(event => event['type'])).toEqual(['start', 'start', 'text_delta', 'done'])
+    handle.dispose()
+  })
+
+  it('replays a split fc/rs pair with the tool call handle removed', async () => {
+    const { adapter, seen } = historySetup((_key, _context, call) =>
+      call === 0
+        ? emit({ type: 'start' }, { type: 'error', reason: 'error', error: { message: `server_error: AgentRouter: ${PAIRING}` } })
+        : emit({ type: 'start' }, { type: 'text_delta', delta: 'ok' }, { type: 'done' }))
+    const handle = installPiAiHeaderTransform(adapter, historySource(async () => [{ ref: 'A', value: 'sk-a' }]))
+    const events = await drain(callStream(adapter, MODEL, {}, historyContext()))
+
+    // One replay on the same key — the pair was split by the relay, not by the
+    // credential, so rotating keys would only repeat the refusal.
+    expect(seen).toHaveLength(2)
+    expect(seen.map(entry => entry.apiKey)).toEqual(['sk-a', 'sk-a'])
+    const replayMessages = (seen[1]?.context as Record<string, unknown>)['messages'] as Record<string, unknown>[]
+    const replayBlocks = replayMessages[0]?.['content'] as Record<string, unknown>[]
+    // The function call loses its item half: with no `fc_` handle the server no
+    // longer looks for the reasoning item it was minted with. The call id,
+    // name and arguments survive, so the call/output pairing still holds.
+    expect(replayBlocks[2]?.['id']).toBe('call_1')
+    expect(replayBlocks[2]?.['name']).toBe('run')
+    expect(replayBlocks[2]?.['arguments']).toEqual({ x: 1 })
     expect(events.map(event => event['type'])).toEqual(['start', 'start', 'text_delta', 'done'])
     handle.dispose()
   })

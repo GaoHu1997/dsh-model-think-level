@@ -29,6 +29,11 @@ import { installHeaderOverlay, type OverlaySource } from '../src/headers-fetch.j
 const MISMATCH = 'OpenAI Responses bad request: The requested item was created under a different '
   + 'Azure OpenAI resource. Use the same resource that created the item to access it.'
 
+/** The other wording of the same condition: a split `fc_`/`rs_` pair. */
+const PAIRING = "Item 'fc_04e532402a06567e006af3ab76a0c08190952fb0ab72a95d91' of type 'function_call' "
+  + "was provided without its required 'reasoning' item: "
+  + "'rs_04e532402a06567e006af3ab71694c819080986fbb3ffc6438'."
+
 /** One request body, used only by the fetch-level re-encoding tests. */
 function conversation(): string {
   return JSON.stringify({
@@ -87,6 +92,18 @@ describe('isHistoryStateMismatch', () => {
 
   it('recognizes the wording without naming Azure', () => {
     expect(isHistoryStateMismatch('item was created under a different upstream resource')).toBe(true)
+  })
+
+  it('recognizes a tool call whose reasoning pair the relay dropped', () => {
+    expect(isHistoryStateMismatch(PAIRING)).toBe(true)
+    // The relay may prefix it with its own error envelope.
+    expect(isHistoryStateMismatch(`openai_responses: ${PAIRING}`)).toBe(true)
+  })
+
+  it('keeps the pairing pattern narrow', () => {
+    expect(isHistoryStateMismatch('the request was provided without its required header')).toBe(false)
+    expect(isHistoryStateMismatch('reasoning effort is not supported by this model')).toBe(false)
+    expect(isHistoryStateMismatch('Item was provided without its required field')).toBe(false)
   })
 
   it('ignores unrelated errors', () => {
@@ -190,6 +207,20 @@ describe('reencodeHistoryRefusal', () => {
     expect(replacement?.status).toBe(502)
     const body = await replacement?.json() as { error: { type: string } }
     expect(body.error.type).toBe('server_error')
+  })
+
+  it('re-encodes the split-pair refusal the same way', async () => {
+    // A relay that answers the pairing refusal as a JSON error body: the
+    // sentence has to survive into the stream error for the replay to start.
+    const original = new Response(JSON.stringify({ error: { message: PAIRING } }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    })
+    const replacement = await reencodeHistoryRefusal(original)
+    expect(replacement?.status).toBe(400)
+    const body = await replacement?.json() as { error: { type: string; message: string } }
+    expect(body.error.type).toBe('invalid_request_error')
+    expect(body.error.message).toContain('without its required')
   })
 
   it('passes every other response through untouched', async () => {

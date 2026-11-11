@@ -553,12 +553,14 @@ function modelsProxyOf(models: ObjectLike, source: PiAiHeaderSource): ObjectLike
                 if (recoversHistory && type === 'error' && !contentStarted) {
                   const text = errorTextOf(event as Record<string, unknown>)
                   if (isHistoryStateMismatch(text)) {
-                    // The relay refused history minted under another backend
-                    // resource. It says so either as a 400 (re-encoded by the
-                    // fetch seam so its sentence survives) or as a 200 stream's
-                    // `response.failed`. Both reach this seam as the same error
-                    // event, which is why the repair lives on the stream rather
-                    // than on an HTTP status.
+                    // The relay refused this history: either an item minted
+                    // under another backend resource, or a tool call replayed
+                    // without the reasoning item it was minted with — one
+                    // condition, two wordings. It says so either as a 400
+                    // (re-encoded by the fetch seam so its sentence survives)
+                    // or as a 200 stream's `response.failed`. Both reach this
+                    // seam as the same error event, which is why the repair
+                    // lives on the stream rather than on an HTTP status.
                     for (let next = historyStage + 1; next < HISTORY_STAGES.length; next += 1) {
                       const degraded = degradeForHistory(context, HISTORY_STAGES[next])
                       if (degraded === undefined) continue

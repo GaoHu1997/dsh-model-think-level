@@ -12,6 +12,13 @@
  * every key reaches the same relay, and the relay's own pool decides which
  * resource sees the request.
  *
+ * The same fan-out produces a second wording when the pool keeps a tool call's
+ * `fc_` handle but not the `rs_` reasoning item minted with it: the server
+ * answers `Item 'fc_…' of type 'function_call' was provided without its
+ * required 'reasoning' item: 'rs_…'`. That is the same condition — the replayed
+ * history and the backend serving it disagree about the items — so it shares
+ * one recognition point and one degradation ladder with the resource refusal.
+ *
  * Two facts make this module structural rather than a fetch-layer patch:
  *
  * 1. The refusal arrives in more than one shape. A relay may answer `400` with
@@ -36,6 +43,8 @@
  *    item as new instead of resolving a foreign handle. A text signature cannot
  *    keep its `phase` once the id is gone: pi-ai only reads `{v:1, id, phase?}`,
  *    and a signature without a string `id` is sent verbatim as the item id.
+ *    This is also the repair for a split `fc_`/`rs_` pair: with no item handle
+ *    on the function call, the server stops looking for its reasoning sibling.
  * 2. `drop_reasoning` — additionally stop replaying historical reasoning items
  *    altogether (the `thinkingSignature` is removed; the visible thinking text
  *    stays in the local history untouched). Reasoning is the other thing bound
@@ -60,25 +69,46 @@ export const HISTORY_INSPECT_TIMEOUT_MS = 2_000
 /**
  * The refusals this module answers to.
  *
- * Deliberately narrow. Azure words the sentence slightly differently across
- * deployments, so the patterns anchor on the two halves that carry the meaning —
- * "created under a different … resource" and "use the same resource that created
- * the item" — and nothing broader. A generic failure must fall through
- * untouched: silently degrading the history of a request that failed for an
- * unrelated reason would hide the real error and spend attempts on it.
+ * Both are the same failure seen from two sides: a replayed item is checked
+ * against the backend that minted its siblings, and the check fails.
+ *
+ * - `RESOURCE_MISMATCH` — the item id itself came from another resource
+ *   ("created under a different … resource"). Azure words the sentence slightly
+ *   differently across deployments, so the patterns anchor on the two halves
+ *   that carry the meaning and nothing broader.
+ * - `ITEM_PAIRING_MISMATCH` — the id is accepted, but the reasoning item it was
+ *   minted with is missing: `Item 'fc_…' of type 'function_call' was provided
+ *   without its required 'reasoning' item: 'rs_…'`. This is what a relay
+ *   produces when it keeps a tool call's `fc_` handle while dropping (or failing
+ *   to replay) the paired `rs_` reasoning item — the same foreign-history
+ *   problem with the handle kept instead of the resource swapped. Removing the
+ *   tool call's item half (`portable_ids`) makes the function call look new, so
+ *   the server no longer looks for a pair.
+ *
+ * A generic failure must fall through untouched: silently degrading the history
+ * of a request that failed for an unrelated reason would hide the real error and
+ * spend attempts on it.
  */
 const RESOURCE_MISMATCH: readonly RegExp[] = [
   /created under a different [a-z0-9 ._-]{0,48}?resource/i,
   /same resource that created the item/i,
 ]
 
+/** A tool-call/reasoning pair split by the relay. See {@link RESOURCE_MISMATCH}. */
+const ITEM_PAIRING_MISMATCH: readonly RegExp[] = [
+  /provided without its required [^\n]{0,40}?reasoning/i,
+]
+
 /**
- * Whether a provider message is the resource-mismatch refusal.
+ * Whether a provider message is one of the foreign-history refusals: an item
+ * minted under another backend resource, or a tool call whose paired reasoning
+ * item the relay no longer replays.
  * @param text - the error body or stream error message, decoded.
  * @returns whether the history (not the request shape) is what failed.
  */
 export function isHistoryStateMismatch(text: string): boolean {
   return RESOURCE_MISMATCH.some(pattern => pattern.test(text))
+    || ITEM_PAIRING_MISMATCH.some(pattern => pattern.test(text))
 }
 
 /** One recovery step. `drop_reasoning` also applies `portable_ids`. */
