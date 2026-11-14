@@ -87,6 +87,11 @@ import { teardownAutoEffortSeats } from './auto-effort-seat.js'
 import { reconcileSavedNotice, teardownSavedNotice } from './saved-notice.js'
 import { reconcileSettleGuard, teardownSettleGuard } from './settle-guard.js'
 import {
+  createOfficialRetryPolicyState,
+  reconcileOfficialRetryPolicy,
+  teardownOfficialRetryPolicy,
+} from './official-retry-policy.js'
+import {
   createModelOrderState,
   modelListMutation,
   modelListsOf,
@@ -281,6 +286,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
   const providerDisabledState = createProviderDisabledGroupState()
   const providerDisabledDeps: ProviderDisabledGroupDeps = { t, labels }
   const modelOrderState = createModelOrderState()
+  const officialRetryPolicyState = createOfficialRetryPolicyState()
   const modelOrderDeps: ModelOrderDeps = { t, labels }
   const editorTabsState = createEditorTabsState()
   const editorTabsDeps: EditorTabsDeps = { t }
@@ -439,6 +445,9 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
    */
   const reconcileDom = (): void => {
     const root = panelRoot()
+    // This pass is UI-only and also covers the add card when no saved rows
+    // exist. Run before the list guard, synchronously with the host commit.
+    reconcileOfficialRetryPolicy(root, officialRetryPolicyState)
     // One list answer for the whole pass: every decoration below shares it, so
     // the document-wide substring-class walk happens once per scan instead of
     // once per pass (seven passes paying it separately is what made one burst
@@ -655,6 +664,7 @@ export function createModelsPage(deps: ModelsPageDeps): ModelsPageInjection {
     if (scanState.disposed) return
     stopObserver()
     scanState.disposed = true
+    teardownOfficialRetryPolicy(officialRetryPolicyState)
     releaseModelListRepins()
     // Land what the session held back before the fiber goes away: a plugin
     // disable or HMR must not strand the user's intent in memory alone. The

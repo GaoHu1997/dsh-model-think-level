@@ -41,6 +41,8 @@ import {
   type DurableEventLike,
   type TurnEndClass,
 } from '../auto-continue-rules.js'
+import { loadAutoContinueLedger, saveAutoContinueLedger, clearAutoContinueLedger, type AutoContinueLedger } from './auto-continue-ledger.js'
+import { newChainBudget, observeRequest, budgetReason, retryDelay, providerRetryOf, type ChainBudget, type ExhaustedReason } from './auto-continue-runtime.js'
 import { currentSessionId, type SessionsLike, type UiSessionLike } from './session-directory.js'
 
 /** How often bindings, running catalog roots and background chains are inspected. */
@@ -59,9 +61,6 @@ const EVAL_RETRY_DELAY_MS = 600
  * from polling forever.
  */
 const EVAL_WINDOW_MS = 6_000
-
-/** Ceiling for a provider-requested `providerRetryAfterMs`. */
-const RETRY_AFTER_MAX_MS = 120_000
 
 /** How far a user event may sit from the auto-send and still be attributed to it. */
 const AUTO_SEND_ECHO_TOLERANCE_MS = 30_000
@@ -165,7 +164,7 @@ export interface AutoContinueRunner {
 export interface AutoContinueStatus {
   /** The watched session, undefined while nothing is open. */
   readonly sessionId: string | undefined
-  readonly phase: 'idle' | 'waiting' | 'sent' | 'exhausted'
+  readonly phase: 'idle' | 'waiting' | 'sent' | 'exhausted' | 'provider-retrying'
   /** Automatic replies already sent in THIS chain. */
   readonly consecutive: number
   readonly maxRetries: number
@@ -177,10 +176,21 @@ export interface AutoContinueStatus {
   readonly detail: string
   /** Whether the user stopped this session's chain. */
   readonly muted: boolean
+  readonly providerRetry?: number
+  readonly requestCount?: number
+  readonly exhaustedReason?: ExhaustedReason
 }
 
 /** One attached session's live state. */
 interface Attached {
+  budget: ChainBudget
+  runtimeReady: boolean
+  providerRetry: number | undefined
+  exhaustedReason: ExhaustedReason | undefined
+  pendingTransient: boolean
+  pendingSkipLocal: boolean
+  jitter: number
+
   /** Independent ownership of this exact client generation, while enabled. */
   reference: SessionReferenceLike | undefined
   readonly sessionId: string
@@ -195,7 +205,7 @@ interface Attached {
   /** Consecutive automatic replies since the last reset. */
   consecutive: number
   /** What the controller shows: the chain's phase on this attachment. */
-  phase: 'idle' | 'waiting' | 'sent' | 'exhausted'
+  phase: 'idle' | 'waiting' | 'sent' | 'exhausted' | 'provider-retrying'
   /** Invalidates prompt acknowledgements after this chain is settled or superseded. */
   sendEpoch: number
   /** Epoch ms the armed reply fires at; 0 when none (and while frozen). */
@@ -277,6 +287,9 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       waitMs: state.waitMs,
       detail: state.detail,
       muted: muted.has(state.sessionId),
+      requestCount: state.budget.requests,
+      ...(state.providerRetry === undefined ? {} : { providerRetry: state.providerRetry }),
+      ...(state.exhaustedReason === undefined ? {} : { exhaustedReason: state.exhaustedReason }),
     }
   }
 
@@ -289,6 +302,9 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     && a.waitMs === b.waitMs
     && a.detail === b.detail
     && a.muted === b.muted
+    && a.providerRetry === b.providerRetry
+    && a.requestCount === b.requestCount
+    && a.exhaustedReason === b.exhaustedReason
 
   const notifyStatus = (): void => {
     const next = buildStatus()
@@ -312,6 +328,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     state.pendingSendTurnEndSeq = undefined
     state.pendingSendScheduledAt = 0
     state.pendingRetryAfterMs = undefined
+    state.pendingSkipLocal = false
   }
 
   /** Back to invisible; neither a timer nor a late acknowledgement may revive it. */
@@ -322,6 +339,8 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     state.nextSendAt = 0
     state.waitMs = 0
     state.detail = ''
+    state.providerRetry = undefined
+    state.exhaustedReason = undefined
     notifyStatus()
   }
 
@@ -333,7 +352,74 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     timers.add(timer)
   }
 
-  // ---- Event-window reads ----
+  // Pending sends belong to this runner's existing claim. Keep them in memory
+  // only: a fresh document/tab must not replay another runner's claimed wait.
+  interface RetainedLedger extends AutoContinueLedger {
+    readonly pendingWait?: {
+      readonly turnEndSeq: number
+      readonly scheduledAt: number
+      readonly retryAfterMs: number | undefined
+      readonly transient: boolean
+      readonly skipLocal: boolean
+      readonly jitter: number
+      readonly detail: string
+    }
+  }
+  const retainedLedgers = new Map<string, RetainedLedger>()
+  const clearLedger = (state: Attached): void => {
+    retainedLedgers.delete(state.sessionId)
+    clearAutoContinueLedger(state.sessionId)
+  }
+
+  const persistLedger = (state: Attached): void => {
+    const b = state.budget
+    if (b.requests <= 0 && state.consecutive <= 0 && !muted.has(state.sessionId)) {
+      clearLedger(state)
+      return
+    }
+    const value = {
+      seq: b.seq,
+      lastUserSeq: state.lastUserSeq,
+      lastHandledTurnEndSeq: state.lastHandledTurnEndSeq,
+      consecutive: state.consecutive,
+      requests: b.requests,
+      ...(b.startedAt === undefined ? {} : { startedAt: b.startedAt }),
+      transientFailures: b.transientFailures,
+      reserved: b.reserved,
+      hasInitial: b.hasInitial,
+      hasStep: b.hasStep,
+      lastAutoSentAt: state.lastAutoSentAt,
+      ...(state.lastAutoSentText === undefined ? {} : { lastAutoSentText: state.lastAutoSentText }),
+      muted: muted.has(state.sessionId),
+    }
+    retainedLedgers.set(state.sessionId, {
+      ...value, version: 1, savedAt: Date.now(),
+      ...(state.pendingSendTurnEndSeq === undefined ? {} : { pendingWait: {
+        turnEndSeq: state.pendingSendTurnEndSeq,
+        scheduledAt: state.pendingSendScheduledAt,
+        retryAfterMs: state.pendingRetryAfterMs,
+        transient: state.pendingTransient,
+        skipLocal: state.pendingSkipLocal,
+        jitter: state.jitter,
+        detail: state.detail,
+      } }),
+    })
+    if (retainedLedgers.size > 128) retainedLedgers.delete(retainedLedgers.keys().next().value!)
+    saveAutoContinueLedger(state.sessionId, value)
+  }
+
+  const restoreBudget = (ledger: AutoContinueLedger | undefined): ChainBudget => ledger === undefined
+    ? newChainBudget()
+    : {
+      seq: ledger.seq,
+      requests: ledger.requests,
+      startedAt: ledger.startedAt,
+      transientFailures: ledger.transientFailures,
+      hasInitial: ledger.hasInitial,
+      hasStep: ledger.hasStep,
+      reserved: ledger.reserved,
+    }
+
 
   /** The durable events of one window, oldest first. */
   const durableEventsOfSource = (source: EventSourceLike): DurableEventLike[] => {
@@ -380,11 +466,13 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       if (!isIntentMessage(event)) continue
       const ownEcho = isOwnEcho(state, event)
       state.lastAutoSentText = undefined
-      if (ownEcho) continue
+      if (ownEcho) { persistLedger(state); continue }
       // A hand-typed message is intent: the streak resets and a session the
       // user stopped starts listening again (from the next ending, at one).
       muted.delete(state.sessionId)
       state.consecutive = 0
+      state.budget = newChainBudget(event.seq)
+      clearLedger(state)
       cancelPendingSend(state)
       settleChain(state)
     }
@@ -425,10 +513,74 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     return events.slice(previous + 1, turnEndIndex + 1)
   }
 
-  /** Every retry uses the configured wait; a provider may request a longer delay. */
-  const sendDelayOf = (waitMs: number | undefined): number => {
-    const configured = autoContinueConfig().waitSeconds * 1_000
-    return waitMs === undefined ? configured : Math.max(configured, Math.min(waitMs, RETRY_AFTER_MAX_MS))
+  const sendDelayOf = (state: Attached): number => {
+    if (state.pendingSkipLocal) return Number.isFinite(state.pendingRetryAfterMs) ? Math.max(0, state.pendingRetryAfterMs!) : 0
+    const config = runtimeConfig()
+    return retryDelay(config.waitSeconds * 1_000, state.pendingTransient ? state.budget.transientFailures : 0,
+      state.pendingTransient && config.backoff !== false, state.pendingRetryAfterMs, state.jitter)
+  }
+
+  // Optional fields permit a rolling integration with the preferences/UI layer.
+  const runtimeConfig = (): ReturnType<typeof autoContinueConfig> & { backoff?: boolean; maxRequests?: number; maxChainMinutes?: number } => autoContinueConfig()
+
+  const exhaust = (state: Attached, reason: ExhaustedReason): void => {
+    clearPendingSend(state)
+    state.sendEpoch += 1
+    state.exhaustedReason = reason
+    // Official retries are only observed: the plugin cannot cancel their RPC.
+    if (state.providerRetry === undefined) {
+      state.phase = 'exhausted'
+      state.nextSendAt = 0
+      state.waitMs = 0
+    }
+    notifyStatus()
+  }
+
+  /** Replay only visible durable facts; the seq watermark bounds memory and
+   * makes polling/repeated publication idempotent. Missing pages stay unknown. */
+  const observeRuntime = (state: Attached): void => {
+    if (!state.historyReady) return
+    const events = durableEventsOf(state)
+    for (let i = 0; i < events.length; i += 1) {
+      const event = events[i]!
+      if (event.seq <= state.budget.seq) continue
+      observeRequest(state.budget, event, Date.now())
+      if (isIntentMessage(event) && !state.runtimeReady) {
+        // Durable user messages do not identify this plugin as sender. On cold
+        // recovery even an identical manual continuation is new intent; never
+        // infer ownership from text. Live echoes use isOwnEcho instead.
+        state.budget = newChainBudget(event.seq)
+        state.consecutive = 0
+      }
+      if (event.type === 'turn/end') {
+        const verdict = judgeTurnTail({ turnEnd: event, turnEvents: tailOf(events, i) }, runtimeConfig().policy)
+        if (verdict.kind === 'settled') {
+          state.budget = newChainBudget(event.seq)
+          state.consecutive = 0
+        } else if (verdict.kind === 'continue') {
+          state.budget.startedAt ??= typeof event.time === 'number' && Number.isFinite(event.time) ? event.time : Date.now()
+          state.budget.transientFailures = verdict.reason === 'transient-error' ? state.budget.transientFailures + 1 : 0
+        }
+      }
+    }
+    state.runtimeReady = true
+    persistLedger(state)
+    const snap = snapshotOfState(state)
+    const retry = providerRetryOf(events, snap?.running === true)
+    state.providerRetry = retry?.retry
+    if (retry !== undefined && autoContinueEnabled() && !muted.has(state.sessionId) && !snap?.subagent && snap?.open) {
+      clearPendingSend(state)
+      state.phase = 'provider-retrying'
+      state.nextSendAt = retry.nextSendAt
+      state.waitMs = retry.waitMs
+    } else if (state.phase === 'provider-retrying') {
+      state.phase = state.exhaustedReason === undefined ? (state.consecutive > 0 ? 'sent' : 'idle') : 'exhausted'
+      state.nextSendAt = 0
+      state.waitMs = 0
+    }
+    const reason = budgetReason(state.budget, runtimeConfig(), state.consecutive, Date.now())
+    if (reason !== undefined && (reason !== 'attempts' || state.phase === 'waiting' || state.phase === 'exhausted') && state.budget.startedAt !== undefined && autoContinueEnabled() && !muted.has(state.sessionId)) exhaust(state, reason)
+    else notifyStatus()
   }
 
   const cancelPendingSend = (state: Attached): void => {
@@ -463,7 +615,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       clearTimeout(state.sendTimer)
       timers.delete(state.sendTimer)
     }
-    const delay = sendDelayOf(state.pendingRetryAfterMs)
+    const delay = sendDelayOf(state)
     state.waitMs = delay
     const remaining = Math.max(0, delay - (Date.now() - state.pendingSendScheduledAt))
     armSend(state, remaining)
@@ -499,6 +651,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   }
 
   const armEvaluation = (state: Attached): void => {
+    if (!autoContinueEnabled() || muted.has(state.sessionId)) return
     if (state.evalTimer !== undefined) {
       // A loop is already waiting (a burst of edges): just extend its window.
       state.evalDeadline = Date.now() + EVAL_WINDOW_MS
@@ -529,6 +682,8 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const snap = snapshotOfState(state)
     if (snap === undefined || !snap.open) return
     state.historyReady = true
+    if (state.runtimeReady) return
+    if (!state.runtimeReady) state.lastUserSeq = Math.max(state.lastUserSeq, newestSeqOf(state.eventSource, 'user/message'))
     const recoveredBaseline = recoverableBaselineOf(state.eventSource)
     state.lastHandledTurnEndSeq = Math.max(
       state.lastHandledTurnEndSeq,
@@ -540,6 +695,8 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   const settleVerdict = (state: Attached, verdict: Exclude<TurnEndClass, { kind: 'continue' }>): void => {
     if (verdict.kind === 'settled') {
       state.consecutive = 0
+      state.budget = newChainBudget(state.budget.seq)
+      clearLedger(state)
       settleChain(state)
     } else {
       cancelPendingSend(state)
@@ -614,21 +771,19 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       settleVerdict(state, verdict)
       return
     }
-    const maxRetries = autoContinueConfig().maxRetries
-    if (state.consecutive >= maxRetries) {
-      clearPendingSend(state)
-      state.sendEpoch += 1
-      console.info(`[dsh-model-think-level] auto-continue: streak cap (${maxRetries}) reached, standing down (${verdict.detail})`)
-      state.phase = 'exhausted'
-      state.nextSendAt = 0
+    observeRuntime(state)
+    const reason = budgetReason(state.budget, runtimeConfig(), state.consecutive, Date.now())
+    if (reason !== undefined) {
       state.detail = verdict.detail
-      notifyStatus()
+      exhaust(state, reason)
       return
     }
     if (!claimTurn(state.sessionId, turnEnd.seq)) return
     state.pendingSendTurnEndSeq = turnEnd.seq
     state.pendingSendScheduledAt = Date.now()
     state.pendingRetryAfterMs = verdict.waitMs
+    state.pendingTransient = verdict.reason === 'transient-error'
+    state.jitter = Math.random()
     state.detail = verdict.detail
     scheduleSend(state)
   }
@@ -636,6 +791,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   const send = async (state: Attached, text: string): Promise<void> => {
     if (disposed || chains.get(state.sessionId) !== state) return
     scanUserEvents(state)
+    observeRuntime(state)
     // A newer ending or user intent makes this wait obsolete. Even a refused
     // fire-time guard must remove the expired countdown, not leave it at zero.
     const armedSeq = state.pendingSendTurnEndSeq
@@ -651,7 +807,13 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) { abandonWait(); return }
     const events = durableEventsOf(state)
     if (events.some(event => event.seq > armedSeq && (isIntentMessage(event) || event.type === 'turn/start' || event.type === 'turn/end'))) { abandonWait(); return }
+    const reason = budgetReason(state.budget, runtimeConfig(), state.consecutive, Date.now())
+    if (reason !== undefined) { exhaust(state, reason); return }
     clearPendingSend(state)
+    state.budget.requests += 1
+    state.budget.reserved = true
+    state.budget.hasInitial = true
+    state.budget.hasStep = false
     const epoch = ++state.sendEpoch
     state.lastAutoSentAt = Date.now()
     state.lastAutoSentText = text
@@ -660,6 +822,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     state.consecutive += 1
     state.phase = 'sent'
     state.nextSendAt = 0
+    persistLedger(state)
     notifyStatus()
     const ownsSend = (): boolean => !disposed && chains.get(state.sessionId) === state && state.sendEpoch === epoch
     if (!ownsSend()) return
@@ -671,6 +834,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
         // its old chain and must not mutate a completed or newer one.
         state.lastAutoSentText = undefined
         state.phase = state.consecutive >= autoContinueConfig().maxRetries ? 'exhausted' : 'idle'
+        state.exhaustedReason = state.phase === 'exhausted' ? 'attempts' : undefined
         notifyStatus()
         console.warn(`[dsh-model-think-level] auto-continue: prompt refused ${describeError(answer)}`)
       }
@@ -678,6 +842,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       if (!ownsSend()) return
       state.lastAutoSentText = undefined
       state.phase = state.consecutive >= autoContinueConfig().maxRetries ? 'exhausted' : 'idle'
+      state.exhaustedReason = state.phase === 'exhausted' ? 'attempts' : undefined
       notifyStatus()
       console.warn('[dsh-model-think-level] auto-continue: prompt failed:', error)
     }
@@ -697,7 +862,8 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const snap = snapshotOfState(state)
     if (snap === undefined) return
     ensureHistoryReady(state)
-    if (!snap.open || snap.subagent || snap.running || snap.pending > 0) cancelPendingSend(state)
+    observeRuntime(state)
+    if ((!snap.open && state.historyReady) || snap.subagent || snap.running || snap.pending > 0) cancelPendingSend(state)
     if (snap.pending > 0) {
       // Admission is already user intent even before its durable message lands.
       state.lastHandledTurnEndSeq = Math.max(state.lastHandledTurnEndSeq, newestSeqOf(state.eventSource, 'turn/end'))
@@ -742,6 +908,18 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const ending = events[index]!
     const endedAt = typeof ending.time === 'number' ? ending.time : Date.now()
     if (Date.now() - endedAt > RECOVERY_WINDOW_MS) return undefined
+    // Without a durable ledger an old automatic continuation cannot be safely
+    // distinguished from a manual one. Never cold-recover an apparent continued
+    // chain; a fresh first failure remains recoverable.
+    const lastIntent = events.slice(0, index).filter(isIntentMessage).at(-1)
+    if (lastIntent !== undefined) {
+      const data = lastIntent.data as { content?: unknown; message?: { content?: unknown } } | undefined
+      const content = data?.content ?? data?.message?.content
+      if (Array.isArray(content)) {
+        const text = content.map(part => typeof part === 'object' && part !== null && part.type === 'text' ? part.text : '').join('')
+        if (text === t('autoContinueMessage') && events.some(event => event.type === 'turn/end' && event.seq < lastIntent.seq)) return undefined
+      }
+    }
     // Anything the user typed or any run that started after the ending means
     // the failure was already dealt with; it must never be replayed.
     if (events.some(event => event.seq > ending.seq && (isIntentMessage(event) || event.type === 'turn/start'))) {
@@ -767,6 +945,18 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const snap = snapshotOfState(state)
     if (snap === undefined || !snap.open || snap.subagent || snap.running || snap.pending > 0) return
     const events = durableEventsOf(state)
+    if (state.pendingSendTurnEndSeq !== undefined && state.sendTimer === undefined) {
+      const pendingSeq = state.pendingSendTurnEndSeq
+      if (events.some(event => event.seq > pendingSeq
+        && (isIntentMessage(event) || event.type === 'turn/start' || event.type === 'turn/end'))) {
+        cancelPendingSend(state)
+      } else if (events.some(event => event.type === 'turn/end' && event.seq === pendingSeq)) {
+        const reason = budgetReason(state.budget, runtimeConfig(), state.consecutive, Date.now())
+        if (reason !== undefined) exhaust(state, reason)
+        else scheduleSend(state)
+        return
+      }
+    }
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index]!
       if (event.type === 'turn/end' && event.seq > state.lastHandledTurnEndSeq) {
@@ -778,6 +968,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
 
   /** Drop one session's chain: its timers, its subscriptions, its map slot. */
   const dropChain = (state: Attached): void => {
+    persistLedger(state)
     for (const unsub of state.unsubs) {
       try {
         unsub()
@@ -867,7 +1058,20 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     // An unanswered failure keeps its ending above the baseline; every other
     // pre-existing ending stays history.
     const recoveredBaseline = first.open ? recoverableBaselineOf(binding.eventSource) : undefined
+    const retained = retainedLedgers.get(binding.sessionId)
+    const ledger = retained ?? loadAutoContinueLedger(binding.sessionId)
+    const pendingWait = autoContinueEnabled() && !ledger?.muted
+      && retained?.pendingWait?.turnEndSeq === ledger?.lastHandledTurnEndSeq
+      ? retained?.pendingWait : undefined
+    const restored = ledger !== undefined
     const state: Attached = {
+      budget: restoreBudget(ledger),
+      runtimeReady: restored,
+      providerRetry: undefined,
+      exhaustedReason: undefined,
+      pendingTransient: pendingWait?.transient ?? false,
+      pendingSkipLocal: pendingWait?.skipLocal ?? false,
+      jitter: pendingWait?.jitter ?? 0.5,
       reference,
       sessionId: binding.sessionId,
       session: binding.session,
@@ -875,32 +1079,33 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       // Recording the live value WITHOUT an edge: a session that was already
       // running when attached is never judged from that edge alone.
       wasRunning: readRunning(binding.session),
-      lastUserSeq: newestSeqOf(binding.eventSource, 'user/message'),
+      lastUserSeq: ledger?.lastUserSeq ?? newestSeqOf(binding.eventSource, 'user/message'),
       // Pre-existing endings are invisible to this chain, except an
       // unanswered failure inside the recovery window. While the history page
       // has not landed yet the window holds nothing, so the baseline waits for
       // it (see ensureHistoryReady) instead of treating its endings as live.
       historyReady: first.open,
-      lastHandledTurnEndSeq: first.open
+      lastHandledTurnEndSeq: ledger?.lastHandledTurnEndSeq ?? (first.open
         ? recoveredBaseline ?? newestSeqOf(binding.eventSource, 'turn/end')
-        : 0,
-      consecutive: 0,
-      phase: 'idle',
+        : 0),
+      consecutive: ledger?.consecutive ?? 0,
+      phase: pendingWait === undefined ? 'idle' : 'waiting',
       sendEpoch: 0,
       nextSendAt: 0,
       waitMs: 0,
-      detail: '',
-      pendingSendTurnEndSeq: undefined,
-      pendingSendScheduledAt: 0,
-      pendingRetryAfterMs: undefined,
-      lastAutoSentAt: 0,
-      lastAutoSentText: undefined,
+      detail: pendingWait?.detail ?? '',
+      pendingSendTurnEndSeq: pendingWait?.turnEndSeq,
+      pendingSendScheduledAt: pendingWait?.scheduledAt ?? 0,
+      pendingRetryAfterMs: pendingWait?.retryAfterMs,
+      lastAutoSentAt: ledger?.lastAutoSentAt ?? 0,
+      lastAutoSentText: ledger?.lastAutoSentText,
       unsubs: [],
       evalDeadline: 0,
       evalTimer: undefined,
       sendTimer: undefined,
     }
     chains.set(state.sessionId, state)
+    if (ledger?.muted) muted.add(state.sessionId)
     try {
       state.unsubs.push(binding.session.subscribe(() => onSnapshot(state)))
     } catch {
@@ -909,8 +1114,9 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     }
     try {
       state.unsubs.push(binding.eventSource.subscribe(() => {
-        scanUserEvents(state)
         ensureHistoryReady(state)
+        scanUserEvents(state)
+        observeRuntime(state)
         armForNewTurnEnd(state)
       }))
     } catch (error) {
@@ -996,6 +1202,9 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   const disposeEnabled = subscribeAutoContinueEnabled(() => {
     if (autoContinueEnabled()) { track(); return }
     // The switch is global: cancel and release ALL background work immediately.
+    for (const [id, ledger] of retainedLedgers) {
+      if (ledger.pendingWait !== undefined) retainedLedgers.set(id, { ...ledger, pendingWait: undefined })
+    }
     for (const state of [...chains.values()]) {
       cancelPendingSend(state)
       settleChain(state)
@@ -1013,6 +1222,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
   })
   const disposeConfig = subscribeAutoContinueConfig(() => {
     for (const state of chains.values()) {
+      observeRuntime(state)
       if (state.pendingSendTurnEndSeq === undefined) continue
       if (!autoContinueEnabled() || state.consecutive >= autoContinueConfig().maxRetries) cancelPendingSend(state)
       else scheduleSend(state)
@@ -1033,6 +1243,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     state.evalDeadline = 0
     state.consecutive = 0
     muted.add(state.sessionId)
+    persistLedger(state)
     settleChain(state)
   }
 
@@ -1041,11 +1252,15 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     const state = current
     if (state === undefined) return
     state.consecutive = 0
+    let seq = 0
+    for (const event of durableEventsOf(state)) seq = Math.max(seq, event.seq)
+    state.budget = newChainBudget(seq)
+    clearLedger(state)
     muted.delete(state.sessionId)
     settleChain(state)
   }
 
-  /** Skip the remaining wait and reply now. */
+  /** Skip local waiting, but never shorten the provider's Retry-After floor. */
   const resumeNow = (): void => {
     const state = current
     if (state === undefined) return
@@ -1055,7 +1270,11 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       timers.delete(state.sendTimer)
       state.sendTimer = undefined
     }
-    void send(state, t('autoContinueMessage'))
+    state.pendingSkipLocal = true
+    const floor = Number.isFinite(state.pendingRetryAfterMs) ? Math.max(0, state.pendingRetryAfterMs!) : 0
+    const remaining = Math.max(0, floor - (Date.now() - state.pendingSendScheduledAt))
+    if (remaining > 0) armSend(state, remaining)
+    else void send(state, t('autoContinueMessage'))
   }
 
   return {
@@ -1075,6 +1294,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       clearInterval(interval)
       dropAllChains()
       statusListeners.clear()
+      muted.clear()
       for (const timer of timers) clearTimeout(timer)
       timers.clear()
     },

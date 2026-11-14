@@ -23,7 +23,7 @@ import {
 import { DEFAULT_AUTO_CONTINUE_POLICY } from '../src/client/auto-continue-rules.js'
 
 const cfg = (waitSeconds: number, maxRetries: number): unknown => ({
-  waitSeconds, maxRetries, policy: DEFAULT_AUTO_CONTINUE_POLICY,
+  waitSeconds, maxRetries, backoff: true, maxChainMinutes: 30, maxRequests: 36, policy: DEFAULT_AUTO_CONTINUE_POLICY,
 })
 
 /** The config the host answers a GET with. */
@@ -727,19 +727,21 @@ describe('ConfigPane', () => {
     expect(card.querySelectorAll('input[type="number"]')).toHaveLength(0)
     await act(async () => { head.click() })
     const fields = [...card.querySelectorAll<HTMLInputElement>('input[type="number"]')]
-    expect(fields).toHaveLength(2)
-    expect(fields.map(input => input.value)).toEqual(['2', '5'])
+    expect(fields).toHaveLength(4)
+    expect(fields.map(input => input.value)).toEqual(['2', '5', '30', '36'])
     expect(fields.map(input => [input.min, input.max, input.step])).toEqual([
-      ['1', '3600', '1'], ['1', '100', '1'],
+      ['1', '3600', '1'], ['1', '100', '1'], ['1', '1440', '1'], ['1', '1000', '1'],
     ])
     expect(fields[0]!.closest('label')!.querySelector('.bre-config-auto-label')!.textContent).toBe('autoContinueWaitLabel')
     expect(fields[1]!.closest('label')!.querySelector('.bre-config-auto-label')!.textContent).toBe('autoContinueRetriesLabel')
-    expect([...card.querySelectorAll('.bre-config-auto-unit')].map(unit => unit.textContent)).toEqual(['autoContinueSecondsUnit', 'autoContinueRetriesUnit'])
+     expect(fields[2]!.closest('label')!.querySelector('.bre-config-auto-label')!.textContent).toBe('autoContinueChainMinutesLabel')
+     expect(fields[3]!.closest('label')!.querySelector('.bre-config-auto-label')!.textContent).toBe('autoContinueRequestsLabel')
+    expect([...card.querySelectorAll('.bre-config-auto-unit')].map(unit => unit.textContent)).toEqual(['autoContinueSecondsUnit', 'autoContinueRetriesUnit', 'autoContinueChainMinutesUnit', 'autoContinueRequestsUnit'])
     expect(fields.map(input => input.getAttribute('aria-label'))).toEqual([
-      'autoContinueWaitLabel (autoContinueSecondsUnit)', 'autoContinueRetriesLabel (autoContinueRetriesUnit)',
+      'autoContinueWaitLabel (autoContinueSecondsUnit)', 'autoContinueRetriesLabel (autoContinueRetriesUnit)', 'autoContinueChainMinutesLabel', 'autoContinueRequestsLabel',
     ])
-    expect(fields.map(input => input.title)).toEqual(['1–3600 autoContinueSecondsUnit', '1–100 autoContinueRetriesUnit'])
-    expect(card.querySelector('.bre-config-card-hint')).toBeNull()
+    expect(fields.map(input => input.title)).toEqual(['1–3600 autoContinueSecondsUnit', '1–100 autoContinueRetriesUnit', '1–1440 autoContinueChainMinutesUnit', '1–1000 autoContinueRequestsUnit'])
+    expect(card.querySelector('.bre-config-card-hint')).not.toBeNull()
     expect(card.textContent).not.toContain('autoContinueDescription')
     expect(card.textContent).not.toContain('autoContinueConfigHint')
   })
@@ -770,7 +772,7 @@ describe('ConfigPane', () => {
     card = autoCard()
     await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
     fields = [...card.querySelectorAll<HTMLInputElement>('input[type="number"]')]
-    expect(fields.map(input => input.value)).toEqual(['12', '3'])
+    expect(fields.map(input => input.value)).toEqual(['12', '3', '30', '36'])
   })
 
   it('normalizes out-of-range drafts and restores a cleared field instead of losing the setting', async () => {
@@ -782,11 +784,61 @@ describe('ConfigPane', () => {
     const fields = [...card.querySelectorAll<HTMLInputElement>('input[type="number"]')]
     await editNumber(fields[0]!, '0')
     await editNumber(fields[1]!, '999')
-    expect(fields.map(input => input.value)).toEqual(['1', '100'])
+    expect(fields.map(input => input.value)).toEqual(['1', '100', '30', '36'])
     await editNumber(fields[0]!, '5.8')
     await editNumber(fields[1]!, '')
     expect(autoContinueConfig()).toEqual(cfg(5, 100))
-    expect(fields.map(input => input.value)).toEqual(['5', '100'])
+    expect(fields.map(input => input.value)).toEqual(['5', '100', '30', '36'])
+  })
+
+  it('saves budget controls and the backoff opt-out', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const card = autoCard()
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
+    const fields = [...card.querySelectorAll<HTMLInputElement>('input[type="number"]')]
+    await editNumber(fields[2]!, '17')
+    await editNumber(fields[3]!, '24', true)
+    const backoff = card.querySelector<HTMLInputElement>('input[aria-label="autoContinueBackoffLabel"]')!
+    expect(backoff.checked).toBe(true)
+    await act(async () => { backoff.click() })
+    expect(autoContinueConfig()).toMatchObject({ backoff: false, maxChainMinutes: 17, maxRequests: 24 })
+    expect(JSON.parse(window.localStorage.getItem(AUTO_CONTINUE_CONFIG_KEY)!)).toMatchObject({ backoff: false, maxChainMinutes: 17, maxRequests: 24 })
+  })
+
+  it('registers custom codes disabled, enables explicitly, removes and restores them', async () => {
+    const { api } = fakeApi({})
+    mountPane(api, () => {})
+    await flush()
+    const card = autoCard()
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
+    await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-trigger-button')!.click() })
+    const input = card.querySelector<HTMLInputElement>('input[aria-label="autoContinueCustomCodes"]')!
+    const add = [...card.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'autoContinueCustomCodeAdd')!
+    const enter = async (value: string): Promise<void> => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await act(async () => { add.click() })
+    }
+    await enter('__proto__')
+    expect(card.querySelector('[role="alert"]')).not.toBeNull()
+    expect(autoContinueConfig().policy.customCodes).toEqual([])
+    await enter('VENDOR_BUSY')
+    expect(autoContinueConfig().policy.codes.VENDOR_BUSY).toBe(false)
+    const custom = [...card.querySelectorAll<HTMLElement>('.bre-config-code-row')].find(row => row.textContent?.includes('VENDOR_BUSY'))!
+    await act(async () => { custom.querySelector<HTMLInputElement>('input')!.click() })
+    expect(autoContinueConfig().policy.codes.VENDOR_BUSY).toBe(true)
+    const remove = [...card.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.startsWith('autoContinueCustomCodeRemove'))!
+    await act(async () => { remove.click() })
+    expect(autoContinueConfig().policy.customCodes).toEqual([])
+    expect(Object.hasOwn(autoContinueConfig().policy.codes, 'VENDOR_BUSY')).toBe(false)
+    await enter('VENDOR_BUSY')
+    const restore = [...card.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'autoContinueRestore')!
+    await act(async () => { restore.click() })
+    expect(autoContinueConfig().policy).toEqual(DEFAULT_AUTO_CONTINUE_POLICY)
   })
 
   it('reflects a synchronized preference update in both controls and the folded summary', async () => {
@@ -796,7 +848,7 @@ describe('ConfigPane', () => {
     const card = autoCard()
     await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
     await act(async () => { setAutoContinueConfig({ waitSeconds: 25, maxRetries: 8 }) })
-    expect([...card.querySelectorAll<HTMLInputElement>('input[type="number"]')].map(input => input.value)).toEqual(['25', '8'])
+    expect([...card.querySelectorAll<HTMLInputElement>('input[type="number"]')].map(input => input.value)).toEqual(['25', '8', '30', '36'])
     await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
     expect(card.querySelector('.bre-config-card-hint')!.textContent).toContain('25')
     expect(card.querySelector('.bre-config-card-hint')!.textContent).toContain('8')
@@ -852,10 +904,10 @@ describe('ConfigPane', () => {
     // Leave the module-level preference as tests found it: OFF.
     await act(async () => { sw.click() })
     expect(sw.checked).toBe(false)
-    // Expanded: just two compact controls, not a repeated summary or paragraphs.
+    // Expanded: four controls plus safety hints, without the folded summary.
     await act(async () => { card.querySelector<HTMLButtonElement>('.bre-config-expand')!.click() })
-    expect(card.querySelectorAll('input[type="number"]')).toHaveLength(2)
-    expect(card.querySelector('.bre-config-card-hint')).toBeNull()
+    expect(card.querySelectorAll('input[type="number"]')).toHaveLength(4)
+    expect(card.querySelector('.bre-config-auto-summary')).toBeNull()
     expect(card.textContent).not.toContain('autoContinueDescription')
     expect(card.textContent).not.toContain('autoContinueConfigHint')
   })

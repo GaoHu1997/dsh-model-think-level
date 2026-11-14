@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { judgeTurnTail, type DurableEventLike, type TurnTail } from '../src/client/auto-continue-rules.js'
+import { judgeTurnTail, normalizeAutoContinuePolicy, normalizeCustomErrorCode, AUTO_CONTINUE_CUSTOM_CODES_MAX, type DurableEventLike, type TurnTail } from '../src/client/auto-continue-rules.js'
 
 /** One durable event with the minimal shape the rules read. */
 function event(type: string, seq: number, data?: unknown): DurableEventLike {
@@ -43,6 +43,45 @@ function emptyTail(turnEnd: DurableEventLike): TurnTail {
     turnEvents: [event('turn/start', turnEnd.seq - 1, { turn: 1 }), turnEnd],
   }
 }
+
+describe('custom auto-continue error codes', () => {
+  it('keeps new built-in codes opt-in, including against an HTTP fallback', () => {
+    for (const code of ['MODEL_SWITCH_COMPACTION_FAILED', 'CLI_TIMEOUT', 'QUOTA']) {
+      const tail = activeTail(errorEnd(10, { code, status: 503 }))
+      expect(judgeTurnTail(tail).kind).toBe('refuse')
+      const policy = normalizeAutoContinuePolicy({ codes: { [code]: true } })
+      expect(judgeTurnTail(tail, policy).kind).toBe('continue')
+    }
+  })
+
+  it('requires registration and explicit enabling and remains case sensitive', () => {
+    const registered = normalizeAutoContinuePolicy({ customCodes: [' VENDOR_BUSY '] })
+    expect(registered.customCodes).toEqual(['VENDOR_BUSY'])
+    expect(registered.codes.VENDOR_BUSY).toBe(false)
+    const tail = activeTail(errorEnd(10, { code: 'VENDOR_BUSY', status: 503 }))
+    expect(judgeTurnTail(tail, registered).kind).toBe('refuse')
+    const enabled = normalizeAutoContinuePolicy({ customCodes: ['VENDOR_BUSY'], codes: { VENDOR_BUSY: true } })
+    expect(judgeTurnTail(tail, enabled).kind).toBe('continue')
+    expect(judgeTurnTail(activeTail(errorEnd(10, { code: 'vendor_busy' })), enabled).kind).toBe('refuse')
+    const removed = normalizeAutoContinuePolicy({ customCodes: [], codes: { VENDOR_BUSY: true } })
+    expect(Object.hasOwn(removed.codes, 'VENDOR_BUSY')).toBe(false)
+  })
+
+  it('bounds, deduplicates and freezes registrations without accepting prototype keys or accessors', () => {
+    for (const code of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'bad code', 'X'.repeat(65), 'TIMEOUT']) {
+      expect(normalizeCustomErrorCode(code), code).toBeUndefined()
+    }
+    const raw = Object.create({ INHERITED: true }) as Record<string, unknown>
+    Object.defineProperty(raw, 'ACCESSOR', { get() { throw new Error('must not invoke accessor') } })
+    const policy = normalizeAutoContinuePolicy({ customCodes: ['INHERITED', 'ACCESSOR', 'A', 'A', ...Array.from({ length: 30 }, (_, i) => `VENDOR_${i}`)], codes: raw })
+    expect(policy.customCodes).toHaveLength(AUTO_CONTINUE_CUSTOM_CODES_MAX)
+    expect(new Set(policy.customCodes).size).toBe(AUTO_CONTINUE_CUSTOM_CODES_MAX)
+    expect(policy.codes.INHERITED).toBe(false)
+    expect(policy.codes.ACCESSOR).toBe(false)
+    expect(Object.isFrozen(policy.customCodes)).toBe(true)
+    expect(Object.isFrozen(policy.codes)).toBe(true)
+  })
+})
 
 describe('auto-continue rules', () => {
   it('continues a max-tokens cut-off', () => {

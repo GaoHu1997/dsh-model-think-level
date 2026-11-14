@@ -88,9 +88,12 @@ export const OTHER_ERROR_CODES: readonly string[] = Object.freeze([
   'UNSUPPORTED_REASONING_EFFORT',
   'MALFORMED_RESPONSE',
   'UNKNOWN_MODEL',
+  'MODEL_SWITCH_COMPACTION_FAILED',
+  'CLI_TIMEOUT',
+  'QUOTA',
 ])
 
-/** Every code the policy can carry, in the settings card's order. */
+/** Built-in codes in settings-card order; custom codes are bounded separately. */
 export const KNOWN_ERROR_CODES: readonly string[] = Object.freeze([
   ...TRANSIENT_ERROR_CODES,
   ...OTHER_ERROR_CODES,
@@ -107,8 +110,10 @@ export interface AutoContinuePolicy {
   readonly maxTokens: boolean
   /** Continue an `error` whose structured HTTP status is 408/425/429/5xx. */
   readonly httpStatus: boolean
-  /** Per-code decision; only `KNOWN_ERROR_CODES` keys are honoured. */
+  /** Explicit per-code switch for built-in and validated, bounded custom codes. */
   readonly codes: Readonly<Record<string, boolean>>
+  /** Registered custom codes; adding one never enables it implicitly. */
+  readonly customCodes?: readonly string[]
 }
 
 function defaultCodes(): Record<string, boolean> {
@@ -118,10 +123,29 @@ function defaultCodes(): Record<string, boolean> {
   return codes
 }
 
+export const AUTO_CONTINUE_CUSTOM_CODES_MAX = 24
+export const AUTO_CONTINUE_CUSTOM_CODE_LENGTH_MAX = 64
+const CUSTOM_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/
+const BLOCKED_CUSTOM_CODE_KEYS = new Set([
+  ...Object.getOwnPropertyNames(Object.prototype),
+  '__proto__',
+])
+
+/** Canonical validation for user-supplied, exact-match provider error codes. */
+export function normalizeCustomErrorCode(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const code = value.trim()
+  if (code.length === 0 || code.length > AUTO_CONTINUE_CUSTOM_CODE_LENGTH_MAX) return undefined
+  if (!CUSTOM_CODE_PATTERN.test(code) || BLOCKED_CUSTOM_CODE_KEYS.has(code)) return undefined
+  if (KNOWN_ERROR_CODES.includes(code)) return undefined
+  return code
+}
+
 /** The behaviour in force when no policy was ever saved. */
 export const DEFAULT_AUTO_CONTINUE_POLICY: AutoContinuePolicy = Object.freeze({
   maxTokens: true,
   httpStatus: true,
+  customCodes: Object.freeze([]),
   codes: Object.freeze(defaultCodes()),
 })
 
@@ -129,14 +153,27 @@ export const DEFAULT_AUTO_CONTINUE_POLICY: AutoContinuePolicy = Object.freeze({
 export function normalizeAutoContinuePolicy(value: unknown): AutoContinuePolicy {
   const record = value !== null && typeof value === 'object' ? value as Record<string, unknown> : {}
   const raw = record.codes !== null && typeof record.codes === 'object' ? record.codes as Record<string, unknown> : {}
-  const codes = defaultCodes()
+  const customRaw = Array.isArray(record.customCodes) ? record.customCodes : []
+  const customCodes: string[] = []
+  for (const value of customRaw) {
+    const code = normalizeCustomErrorCode(value)
+    if (code !== undefined && !customCodes.includes(code) && customCodes.length < AUTO_CONTINUE_CUSTOM_CODES_MAX) {
+      customCodes.push(code)
+    }
+  }
+  const codes: Record<string, boolean> = Object.create(null) as Record<string, boolean>
   for (const code of KNOWN_ERROR_CODES) {
-    const flag = raw[code]
-    if (typeof flag === 'boolean') codes[code] = flag
+    const flag = Object.getOwnPropertyDescriptor(raw, code)?.value
+    codes[code] = typeof flag === 'boolean' ? flag : DEFAULT_AUTO_CONTINUE_POLICY.codes[code] === true
+  }
+  for (const code of customCodes) {
+    const flag = Object.getOwnPropertyDescriptor(raw, code)?.value
+    codes[code] = typeof flag === 'boolean' ? flag : false
   }
   return Object.freeze({
     maxTokens: typeof record.maxTokens === 'boolean' ? record.maxTokens : DEFAULT_AUTO_CONTINUE_POLICY.maxTokens,
     httpStatus: typeof record.httpStatus === 'boolean' ? record.httpStatus : DEFAULT_AUTO_CONTINUE_POLICY.httpStatus,
+    customCodes: Object.freeze(customCodes),
     codes: Object.freeze(codes),
   })
 }
@@ -148,9 +185,9 @@ export function normalizeAutoContinuePolicy(value: unknown): AutoContinuePolicy 
  * existed.
  */
 function policyCodeFlag(code: string, policy: AutoContinuePolicy): boolean | undefined {
-  const flag = policy.codes[code]
-  if (typeof flag === 'boolean') return flag
-  return TRANSIENT_ERROR_CODES.includes(code) ? true : undefined
+  if (!KNOWN_ERROR_CODES.includes(code) && !(policy.customCodes ?? []).includes(code)) return undefined
+  const flag = Object.getOwnPropertyDescriptor(policy.codes, code)?.value
+  return typeof flag === 'boolean' ? flag : undefined
 }
 
 /**

@@ -10,6 +10,7 @@ const CONFIG_KEY = 'dsh-model-think-level.auto-continue.config'
 const cfg = (waitSeconds: unknown, maxRetries: unknown): AutoContinueConfig => ({
   waitSeconds: waitSeconds as number,
   maxRetries: maxRetries as number,
+  backoff: true, maxChainMinutes: 30, maxRequests: 36,
   policy: DEFAULT_AUTO_CONTINUE_POLICY,
 })
 const DEFAULTS = cfg(2, 5)
@@ -341,6 +342,29 @@ describe('untrusted config normalization and parsing', () => {
   })
 })
 
+describe('retry budgets and custom code persistence', () => {
+  it('bounds budgets, preserves opt-out and fills invalid fields independently', async () => {
+    const prefs = await loadPreferences()
+    expect(prefs.normalizeAutoContinueConfig({ backoff: false, maxChainMinutes: -1, maxRequests: 5000 })).toMatchObject({ backoff: false, maxChainMinutes: 1, maxRequests: 1000 })
+    expect(prefs.normalizeAutoContinueConfig({ backoff: 'false', maxChainMinutes: Infinity, maxRequests: NaN })).toEqual(DEFAULTS)
+    expect(prefs.normalizeAutoContinueConfig({ maxChainMinutes: 14.9, maxRequests: 21.9 })).toMatchObject({ maxChainMinutes: 14, maxRequests: 21 })
+  })
+
+  it('round-trips budgets and registered custom switches across refresh and cross-tab sync', async () => {
+    const prefs = await loadPreferences()
+    prefs.setAutoContinueConfig({ backoff: false, maxChainMinutes: 17, maxRequests: 23, policy: { ...DEFAULT_AUTO_CONTINUE_POLICY, customCodes: ['VENDOR_BUSY'], codes: { ...DEFAULT_AUTO_CONTINUE_POLICY.codes, VENDOR_BUSY: true } } })
+    const expected = prefs.autoContinueConfig()
+    vi.resetModules()
+    const refreshed = await loadPreferences()
+    expect(refreshed.autoContinueConfig()).toEqual(expected)
+    expect(Object.isFrozen(refreshed.autoContinueConfig().policy.customCodes)).toBe(true)
+    const incoming = { ...expected, maxRequests: 24 }
+    refreshed.syncAutoContinueConfig(incoming)
+    expect(refreshed.autoContinueConfig()).toEqual(incoming)
+    expect(JSON.parse(window.localStorage.getItem(CONFIG_KEY)!)).toEqual(expected)
+  })
+})
+
 describe('cross-tab synchronization and unavailable storage', () => {
   it('adopts a separate immutable snapshot without writing back or notifying equal normalized values', async () => {
     const prefs = await loadPreferences()
@@ -354,7 +378,7 @@ describe('cross-tab synchronization and unavailable storage', () => {
 
     prefs.syncAutoContinueConfig(incoming)
     const adopted = prefs.autoContinueConfig()
-    expect(adopted).toEqual({ ...incoming, policy: DEFAULT_AUTO_CONTINUE_POLICY })
+    expect(adopted).toEqual(cfg(incoming.waitSeconds, incoming.maxRetries))
     expect(adopted).not.toBe(incoming)
     expect(adopted).not.toBe(original)
     expect(Object.isFrozen(adopted)).toBe(true)

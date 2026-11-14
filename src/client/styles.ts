@@ -5255,6 +5255,22 @@ li.bre-row-disabled [class*="rowName"] { opacity: .5; }
   padding: 7px 8px 3px;
   border-top: 1px solid var(--bre-line-1);
 }
+.bre-config-link {
+  flex: none;
+  margin: 0;
+  padding: 3px 0;
+  border: none;
+  background: transparent;
+  color: var(--bre-accent-ink);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.bre-config-link:hover { text-decoration: underline; }
+.bre-config-link:focus-visible { outline: 2px solid var(--bre-accent-line); outline-offset: 2px; border-radius: 3px; }
+.bre-config-link:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 .bre-config-link-quiet { margin-right: auto; color: var(--bre-ink-3); }
 .bre-config-link-quiet:hover { color: var(--bre-accent-ink); }
 

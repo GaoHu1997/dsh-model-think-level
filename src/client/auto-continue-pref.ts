@@ -26,6 +26,12 @@ export const AUTO_CONTINUE_CONFIG_KEY = 'dsh-model-think-level.auto-continue.con
 export interface AutoContinueConfig {
   readonly waitSeconds: number
   readonly maxRetries: number
+  /** Exponential backoff with jitter for error-driven continuations only. */
+  readonly backoff: boolean
+  /** Elapsed failure-chain budget, starting at the first failure or official retry. */
+  readonly maxChainMinutes: number
+  /** Observed request lower bound, including official retries. */
+  readonly maxRequests: number
   /** Which interruption classes are answered with 「继续」. */
   readonly policy: AutoContinuePolicy
 }
@@ -34,10 +40,17 @@ export const AUTO_CONTINUE_WAIT_MIN = 1
 export const AUTO_CONTINUE_WAIT_MAX = 3_600
 export const AUTO_CONTINUE_RETRIES_MIN = 1
 export const AUTO_CONTINUE_RETRIES_MAX = 100
+export const AUTO_CONTINUE_CHAIN_MINUTES_MIN = 1
+export const AUTO_CONTINUE_CHAIN_MINUTES_MAX = 1_440
+export const AUTO_CONTINUE_REQUESTS_MIN = 1
+export const AUTO_CONTINUE_REQUESTS_MAX = 1_000
 
 export const DEFAULT_AUTO_CONTINUE_CONFIG: AutoContinueConfig = Object.freeze({
   waitSeconds: 2,
   maxRetries: 5,
+  backoff: true,
+  maxChainMinutes: 30,
+  maxRequests: 36,
   policy: DEFAULT_AUTO_CONTINUE_POLICY,
 })
 
@@ -64,6 +77,9 @@ export function normalizeAutoContinueConfig(value: unknown): AutoContinueConfig 
   return Object.freeze({
     waitSeconds: boundedInteger(record.waitSeconds, DEFAULT_AUTO_CONTINUE_CONFIG.waitSeconds, AUTO_CONTINUE_WAIT_MIN, AUTO_CONTINUE_WAIT_MAX),
     maxRetries: boundedInteger(record.maxRetries, DEFAULT_AUTO_CONTINUE_CONFIG.maxRetries, AUTO_CONTINUE_RETRIES_MIN, AUTO_CONTINUE_RETRIES_MAX),
+    backoff: typeof record.backoff === 'boolean' ? record.backoff : DEFAULT_AUTO_CONTINUE_CONFIG.backoff,
+    maxChainMinutes: boundedInteger(record.maxChainMinutes, DEFAULT_AUTO_CONTINUE_CONFIG.maxChainMinutes, AUTO_CONTINUE_CHAIN_MINUTES_MIN, AUTO_CONTINUE_CHAIN_MINUTES_MAX),
+    maxRequests: boundedInteger(record.maxRequests, DEFAULT_AUTO_CONTINUE_CONFIG.maxRequests, AUTO_CONTINUE_REQUESTS_MIN, AUTO_CONTINUE_REQUESTS_MAX),
     policy: normalizeAutoContinuePolicy(record.policy),
   })
 }

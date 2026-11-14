@@ -29,13 +29,20 @@ import {
   AUTO_CONTINUE_WAIT_MAX,
   AUTO_CONTINUE_RETRIES_MIN,
   AUTO_CONTINUE_RETRIES_MAX,
+  AUTO_CONTINUE_CHAIN_MINUTES_MIN,
+  AUTO_CONTINUE_CHAIN_MINUTES_MAX,
+  AUTO_CONTINUE_REQUESTS_MIN,
+  AUTO_CONTINUE_REQUESTS_MAX,
   setAutoContinueEnabled,
   setAutoContinueConfig,
   subscribeAutoContinueEnabled,
   subscribeAutoContinueConfig,
 } from './auto-continue-pref.js'
 import {
+  AUTO_CONTINUE_CUSTOM_CODES_MAX,
+  AUTO_CONTINUE_CUSTOM_CODE_LENGTH_MAX,
   DEFAULT_AUTO_CONTINUE_POLICY,
+  normalizeCustomErrorCode,
   KNOWN_ERROR_CODES,
   OTHER_ERROR_CODES,
   TRANSIENT_ERROR_CODES,
@@ -343,6 +350,9 @@ const CODE_TAG: Record<string, 'continue' | 'useless' | 'depends'> = {
   PI_AI_ERROR: 'depends',
   MALFORMED_RESPONSE: 'depends',
   LEGACY_CLI_OUTCOME_UNKNOWN: 'depends',
+  MODEL_SWITCH_COMPACTION_FAILED: 'depends',
+  CLI_TIMEOUT: 'depends',
+  QUOTA: 'useless',
 }
 
 const TAG_KEY: Record<'continue' | 'useless' | 'depends', string> = {
@@ -358,6 +368,8 @@ interface TriggerSelectProps {
   onToggle: (code: string, on: boolean) => void
   onBulk: (on: boolean) => void
   onRestore: () => void
+  onAdd: (code: string) => void
+  onRemove: (code: string) => void
 }
 
 /**
@@ -369,6 +381,19 @@ interface TriggerSelectProps {
  */
 function TriggerSelect(props: TriggerSelectProps): ReactNode {
   const { t, policy } = props
+  const [customDraft, setCustomDraft] = useState('')
+  const [customError, setCustomError] = useState(false)
+  const customCodes = policy.customCodes ?? []
+  const addCustomCode = (): void => {
+    const code = normalizeCustomErrorCode(customDraft)
+    if (code === undefined || customCodes.includes(code) || customCodes.length >= AUTO_CONTINUE_CUSTOM_CODES_MAX) {
+      setCustomError(true)
+      return
+    }
+    props.onAdd(code)
+    setCustomDraft('')
+    setCustomError(false)
+  }
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
@@ -413,7 +438,7 @@ function TriggerSelect(props: TriggerSelectProps): ReactNode {
         : { left, width, top: Math.max(8, window.innerHeight - 8 - 460) })
     setOpen(true)
   }
-  const chosenCodes = KNOWN_ERROR_CODES.filter(code => policy.codes[code] === true)
+  const chosenCodes = [...KNOWN_ERROR_CODES, ...customCodes].filter(code => policy.codes[code] === true)
   const chips: ReactNode[] = []
   if (policy.maxTokens) chips.push(createElement('span', { className: 'bre-config-chip', key: 'max-tokens' }, t('autoContinueMaxTokens')))
   if (policy.httpStatus) chips.push(createElement('span', { className: 'bre-config-chip', key: 'http' }, t('autoContinueChipHttp')))
@@ -485,6 +510,22 @@ function TriggerSelect(props: TriggerSelectProps): ReactNode {
           createElement('code', { className: 'bre-config-code-name-inner' }, code),
           t(`autoContinueWhy${code}`), CODE_TAG[code] ?? 'depends',
           on => props.onToggle(code, on)))),
+      group('autoContinueCustomCodes', customCodes.map(code =>
+        createElement('div', { key: code },
+          row(code, policy.codes[code] === true, createElement('code', null, code), '', 'depends', on => props.onToggle(code, on)),
+          createElement('button', { type: 'button', className: 'bre-config-link', onClick: () => props.onRemove(code), 'aria-label': t('autoContinueCustomCodeRemove', { code }) }, t('autoContinueCustomCodeRemove', { code })),
+        ))),
+      createElement('div', { className: 'bre-config-auto-control' },
+        createElement('input', {
+          type: 'text', className: 'bre-config-auto-input', value: customDraft, maxLength: AUTO_CONTINUE_CUSTOM_CODE_LENGTH_MAX,
+          'aria-label': t('autoContinueCustomCodes'), placeholder: t('autoContinueCustomCodePlaceholder'),
+          onChange: (event: ChangeEvent<HTMLInputElement>) => { setCustomDraft(event.target.value); setCustomError(false) },
+          onKeyDown: (event) => { if (event.key === 'Enter') { event.preventDefault(); addCustomCode() } },
+        }),
+        createElement('button', { type: 'button', className: 'bre-config-link', disabled: customCodes.length >= AUTO_CONTINUE_CUSTOM_CODES_MAX, onClick: addCustomCode }, t('autoContinueCustomCodeAdd')),
+      ),
+      createElement('div', { className: 'bre-config-card-hint' }, t('autoContinueCustomCodeLimit', { count: AUTO_CONTINUE_CUSTOM_CODES_MAX })),
+      customError && createElement('div', { role: 'alert' }, t('autoContinueCustomCodeInvalid')),
       createElement('div', { className: 'bre-config-multiselect-foot' },
         createElement('button', { type: 'button', className: 'bre-config-link', onClick: () => props.onBulk(true) }, t('autoContinueCodesAll')),
         createElement('button', { type: 'button', className: 'bre-config-link', onClick: () => props.onBulk(false) }, t('autoContinueCodesNone')),
@@ -504,6 +545,10 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
   const config = useSyncExternalStore(subscribeAutoContinueConfig, autoContinueConfig)
   const [waitDraft, setWaitDraft] = useState(String(config.waitSeconds))
   const [retriesDraft, setRetriesDraft] = useState(String(config.maxRetries))
+  const [minutesDraft, setMinutesDraft] = useState(String(config.maxChainMinutes))
+  const [requestsDraft, setRequestsDraft] = useState(String(config.maxRequests))
+  useEffect(() => { setMinutesDraft(String(config.maxChainMinutes)) }, [config.maxChainMinutes])
+  useEffect(() => { setRequestsDraft(String(config.maxRequests)) }, [config.maxRequests])
   useEffect(() => { setWaitDraft(String(config.waitSeconds)) }, [config.waitSeconds])
   useEffect(() => { setRetriesDraft(String(config.maxRetries)) }, [config.maxRetries])
   const saveWait = (): void => {
@@ -528,6 +573,28 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
     for (const code of KNOWN_ERROR_CODES) codes[code] = on
     setAutoContinueConfig({ policy: { ...policy, codes } })
   }
+  const addCustomCode = (code: string): void => {
+    setAutoContinueConfig({ policy: { ...policy, customCodes: [...(policy.customCodes ?? []), code], codes: { ...policy.codes, [code]: false } } })
+  }
+  const removeCustomCode = (code: string): void => {
+    const codes = { ...policy.codes }
+    delete codes[code]
+    setAutoContinueConfig({ policy: { ...policy, customCodes: (policy.customCodes ?? []).filter(item => item !== code), codes } })
+  }
+  const budgetField = (field: 'maxChainMinutes' | 'maxRequests', label: string, unit: string, draft: string, setDraft: (value: string) => void, min: number, max: number): ReactNode =>
+    createElement('label', { className: 'bre-config-auto-field', key: field },
+      createElement('span', { className: 'bre-config-auto-label' }, t(label)),
+      createElement('span', { className: 'bre-config-auto-control' },
+        createElement('input', {
+          type: 'number', className: 'bre-config-auto-input', min, max, step: 1, value: draft,
+          'aria-label': t(label), title: String(min) + '–' + String(max) + ' ' + t(unit),
+          onChange: (event: ChangeEvent<HTMLInputElement>) => setDraft(event.target.value),
+          onBlur: () => { setAutoContinueConfig({ [field]: draft.trim() === '' ? config[field] : Number(draft) }); setDraft(String(autoContinueConfig()[field])) },
+          onKeyDown: (event) => { if (event.key === 'Enter') event.currentTarget.blur() },
+        }),
+        createElement('span', { className: 'bre-config-auto-unit', 'aria-hidden': true }, t(unit)),
+      ),
+    )
   const restorePolicy = (): void => {
     setAutoContinueConfig({ policy: DEFAULT_AUTO_CONTINUE_POLICY })
   }
@@ -542,8 +609,8 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
         onClick: () => setOpen(current => !current),
       },
         createElement('span', { className: 'bre-config-card-title' }, t('autoContinueSectionTitle')),
-        // The folded summary only: once the two controls are on screen they
-        // say the same thing, and repeating it would be a third copy.
+        // Keep the timing summary folded-only; expanded controls carry those
+        // values, while the budget and native-retry caveats remain visible.
         !open && createElement('span', { className: 'bre-config-card-hint bre-config-auto-summary' },
           t('autoContinueHint', { seconds: config.waitSeconds, count: config.maxRetries })),
       ),
@@ -609,6 +676,18 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
           ),
         ),
       ),
+      createElement('div', { className: 'bre-config-auto-fields' },
+        budgetField('maxChainMinutes', 'autoContinueChainMinutesLabel', 'autoContinueChainMinutesUnit', minutesDraft, setMinutesDraft, AUTO_CONTINUE_CHAIN_MINUTES_MIN, AUTO_CONTINUE_CHAIN_MINUTES_MAX),
+        budgetField('maxRequests', 'autoContinueRequestsLabel', 'autoContinueRequestsUnit', requestsDraft, setRequestsDraft, AUTO_CONTINUE_REQUESTS_MIN, AUTO_CONTINUE_REQUESTS_MAX),
+      ),
+      createElement('label', { className: 'bre-config-auto-field' },
+        createElement('input', { type: 'checkbox', checked: config.backoff, 'aria-label': t('autoContinueBackoffLabel'), onChange: (event: ChangeEvent<HTMLInputElement>) => setAutoContinueConfig({ backoff: event.target.checked }) }),
+        t('autoContinueBackoffLabel'),
+      ),
+      createElement('p', { className: 'bre-config-card-hint' }, t('autoContinueBackoffHint')),
+      createElement('p', { className: 'bre-config-card-hint' }, t('autoContinueRequestsHint')),
+      createElement('p', { className: 'bre-config-card-hint' }, t('autoContinueControllerProviderRetryDesc')),
+      createElement('p', { className: 'bre-config-card-hint' }, t('autoContinueControllerOfficialRetryHint')),
       createElement('div', { className: 'bre-config-trigger-field' },
         createElement('span', { className: 'bre-config-auto-label' }, t('autoContinueTriggers')),
         createElement(TriggerSelect, {
@@ -618,6 +697,8 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
           onToggle: toggleCode,
           onBulk: setAllCodes,
           onRestore: restorePolicy,
+          onAdd: addCustomCode,
+          onRemove: removeCustomCode,
         }),
       ),
     ),

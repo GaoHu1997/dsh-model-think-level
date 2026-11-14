@@ -28,7 +28,7 @@
  * @module dsh-model-think-level/client/AutoContinueController
  */
 
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import { mountReact, unmountReact, type ForeignMount } from './injection/mount.js'
 import type { AutoContinueRunner } from './injection/auto-continue-run.js'
@@ -141,14 +141,34 @@ function Ring(props: { ratio: number }): ReactNode {
 }
 
 /** The chip itself; renders nothing unless a chain is live. */
-function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () => void }): ReactNode {
+export function AutoContinueChip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () => void }): ReactNode {
   const { runner, t } = props
   const status = useSyncExternalStore(runner.subscribe, runner.status)
   const [open, setOpen] = useState(false)
   const [now, setNow] = useState(() => Date.now())
+  const toggleRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  const popId = useId()
+  useEffect(() => {
+    if (!open) return undefined
+    popRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    const close = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      setOpen(false)
+      toggleRef.current?.focus()
+    }
+    const outside = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !popRef.current?.contains(event.target) && !toggleRef.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('keydown', close)
+    document.addEventListener('pointerdown', outside)
+    return () => { document.removeEventListener('keydown', close); document.removeEventListener('pointerdown', outside) }
+  }, [open])
 
   useEffect(() => {
-    if (status.phase !== 'waiting') return undefined
+    if (status.phase !== 'waiting' && status.phase !== 'provider-retrying') return undefined
     setNow(Date.now())
     const timer = window.setInterval(() => setNow(Date.now()), 500)
     return () => window.clearInterval(timer)
@@ -161,22 +181,25 @@ function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () 
   if (status.sessionId === undefined || status.phase === 'idle') return null
 
   const max = status.maxRetries
+  const providerRetrying = status.phase === 'provider-retrying'
   const attempt = status.phase === 'waiting' ? status.consecutive + 1 : status.consecutive
   const remaining = Math.max(0, status.nextSendAt - now)
   const seconds = Math.ceil(remaining / 1_000)
-  // The ring's arc follows the configured wait; a provider's longer delay just
-  // makes the last stretch sit still at full, which is honest enough.
   const waitMs = Math.max(1_000, status.waitMs)
-  const ratio = status.phase === 'waiting' ? Math.min(1, remaining / waitMs) : 0
-  const detail = status.detail === ''
-    ? undefined
-    : t('autoContinueControllerDetail', { detail: status.detail })
+  const ratio = status.phase === 'waiting' || providerRetrying ? Math.min(1, remaining / waitMs) : 0
+  const exhaustion = status.exhaustedReason === 'requests'
+    ? t('autoContinueControllerExhaustedRequests')
+    : status.exhaustedReason === 'duration'
+      ? t('autoContinueControllerExhaustedDuration')
+      : undefined
+  const detail = providerRetrying
+    ? t('autoContinueControllerProviderRetryDesc')
+    : exhaustion ?? (status.detail === '' ? undefined : t('autoContinueControllerDetail', { detail: status.detail }))
 
   const action = (text: string, run: () => void): ReactNode => (
     <button
       key={text}
       type="button"
-      role="menuitem"
       className="bre-ac-action"
       onClick={() => { setOpen(false); run() }}
     >{text}</button>
@@ -192,7 +215,16 @@ function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () 
     actions.push(action(t('autoContinueControllerStop'), () => runner.stop()))
   }
 
-  const inner = status.phase === 'waiting'
+  const inner = providerRetrying
+    ? (
+      <>
+        {remaining > 0 ? <Ring ratio={ratio} /> : <Glyph className="bre-ac-tick"><path d="M4 12a8 8 0 1 0 2-5.3M4 4v5h5" /></Glyph>}
+        <span className="bre-ac-text">{t('autoContinueControllerProviderRetry')}</span>
+        {remaining > 0 && <span className="bre-ac-num">{t('autoContinueControllerSeconds', { seconds })}</span>}
+        <span className="bre-ac-ratio">{t('autoContinueControllerProviderAttempt', { n: status.providerRetry ?? 1 })}</span>
+      </>
+    )
+    : status.phase === 'waiting'
     ? (
       <>
         <Ring ratio={ratio} />
@@ -213,21 +245,35 @@ function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () 
         : (
           <>
             <Glyph className="bre-ac-tick"><circle cx="12" cy="12" r="8.2" /><path d="M12 7.6V12l3 1.9" /></Glyph>
-            <span className="bre-ac-text">{t('autoContinueControllerExhausted')}</span>
-            <span className="bre-ac-ratio">{t('autoContinueControllerRatio', { n: max, max })}</span>
+            <span className="bre-ac-text">{exhaustion ?? t('autoContinueControllerExhausted')}</span>
+            <span className="bre-ac-ratio">{t('autoContinueControllerRatio', { n: attempt, max })}</span>
           </>
         )
 
+  const description = providerRetrying ? t('autoContinueControllerProviderRetryDesc')
+    : exhaustion ?? (status.phase === 'sent' ? t('autoContinueControllerSentDesc')
+      : status.phase === 'exhausted' ? t('autoContinueControllerExhausted')
+        : t('autoContinueControllerPopDesc', { seconds, max }))
+  const accessibleStatus = [t('autoContinueControllerAria'),
+    providerRetrying ? t('autoContinueControllerProviderRetry') : status.phase === 'waiting' ? t('autoContinueControllerWaiting') : status.phase === 'sent' ? t('autoContinueControllerSent') : exhaustion ?? t('autoContinueControllerExhausted'),
+    (providerRetrying || status.phase === 'waiting') && remaining > 0 ? t('autoContinueControllerSeconds', { seconds }) : '',
+    providerRetrying ? t('autoContinueControllerProviderAttempt', { n: status.providerRetry ?? 1 }) : t('autoContinueControllerRatio', { n: attempt, max }),
+  ].filter(Boolean).join(' · ')
   const pop = open
     ? (
-      <div className="bre-ac-pop" role="menu">
+      <div className="bre-ac-pop" role="dialog" aria-modal="false" aria-label={t(providerRetrying ? 'autoContinueControllerProviderRetry' : 'autoContinueControllerPopTitle')} id={popId} ref={popRef}>
         <div className="bre-ac-pop-head">
-          <span className="bre-ac-pop-title">{t('autoContinueControllerPopTitle')}</span>
-          <span className="bre-ac-pop-badge">{t('autoContinueControllerPopBadge', { n: attempt, max })}</span>
+          <span className="bre-ac-pop-title">{t(providerRetrying ? 'autoContinueControllerProviderRetry' : 'autoContinueControllerPopTitle')}</span>
+          <span className="bre-ac-pop-badge">{providerRetrying
+            ? t('autoContinueControllerProviderAttempt', { n: status.providerRetry ?? 1 })
+            : t('autoContinueControllerPopBadge', { n: attempt, max })}</span>
         </div>
         <p className="bre-ac-pop-desc">
-          {t('autoContinueControllerPopDesc', { seconds, max })}
+          {description}
         </p>
+        {(status.requestCount ?? 0) > 0 && <p className="bre-ac-pop-desc">{t('autoContinueControllerRequestCount', { count: status.requestCount })}</p>}
+        {providerRetrying && exhaustion && <p className="bre-ac-pop-desc">{exhaustion}</p>}
+        {!providerRetrying && <p className="bre-ac-pop-desc">{t('autoContinueControllerOfficialRetryHint')}</p>}
         {actions.length > 0
           ? <div className="bre-ac-pop-actions">{actions}</div>
           : undefined}
@@ -262,6 +308,10 @@ function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () 
             type="button"
             className="bre-ac-more"
             aria-label={t('autoContinueControllerSettings')}
+            aria-expanded={open}
+            aria-controls={open ? popId : undefined}
+            aria-haspopup="dialog"
+            ref={toggleRef}
             onClick={() => setOpen(value => !value)}
           >
             <Glyph className="bre-ac-more-icon">
@@ -281,8 +331,11 @@ function Chip(props: { runner: AutoContinueRunner; t: Translate; onSettings: () 
       <button
         type="button"
         className={`bre-ac-chip bre-ac-chip-${status.phase}`}
-        aria-label={t('autoContinueControllerAria')}
+        aria-label={accessibleStatus}
         aria-expanded={open}
+        aria-controls={open ? popId : undefined}
+        aria-haspopup="dialog"
+        ref={toggleRef}
         title={detail ?? t('autoContinueControllerAria')}
         onClick={() => setOpen(value => !value)}
       >
@@ -334,7 +387,7 @@ export function mountAutoContinueController(deps: AutoContinueControllerDeps): (
     host.className = 'bre-ac-host'
     host.setAttribute(SLOT_ATTR, '')
     line.append(host)
-    mounted = mountReact(host, <Chip runner={deps.runner} t={deps.t} onSettings={deps.onSettings} />)
+    mounted = mountReact(host, <AutoContinueChip runner={deps.runner} t={deps.t} onSettings={deps.onSettings} />)
   }
 
   // Streaming mutates the dock constantly: coalesce to at most one check per

@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   setAutoContinueEnabled, setAutoContinueConfig, DEFAULT_AUTO_CONTINUE_CONFIG, autoContinueConfig,
 } from '../src/client/auto-continue-pref.js'
+import * as preferences from '../src/client/auto-continue-pref.js'
 import { createAutoContinue } from '../src/client/injection/auto-continue-run.js'
 import type { DurableEventLike } from '../src/client/auto-continue-rules.js'
 
@@ -99,14 +100,26 @@ function makeHarness() {
     list: { getSnapshot: () => ({ byId: {} }) },
   }
   const uiSession = { adapter: { current: { getSnapshot: () => ({ key: currentId }) } } }
+  let resetListener: (() => void) | undefined
   const ctx = {
     get: (name: string) => (name === 'sessions' ? sessions : name === 'uiSession' ? uiSession : undefined),
-    on: (_event: string, _listener: () => void) => () => {},
+    on: (name: string, listener: () => void) => {
+      if (name === 'connection/reset') resetListener = listener
+      return () => { if (resetListener === listener) resetListener = undefined }
+    },
   }
   const t = (key: string): string => (key === 'autoContinueMessage' ? '继续' : key)
   const runner = createAutoContinue({ ctx, t })
   const setCurrent = (id: string | undefined): void => { currentId = id }
-  return { bindings, runner, setCurrent }
+  return { bindings, runner, setCurrent, resetConnection: () => resetListener?.() }
+}
+
+function replacementBinding(previous: Binding): Binding {
+  const next = makeBinding(previous.sessionId)
+  for (const entry of previous.eventSource.getSnapshot().entries) {
+    if (entry.event !== undefined) next.append(entry.event.type, entry.event.seq, entry.event.data)
+  }
+  return next
 }
 
 /** The dispose every test needs, even the ones that never armed a session. */
@@ -115,6 +128,7 @@ let disposer: (() => void) | undefined
 afterEach(() => {
   disposer?.()
   disposer = undefined
+  vi.restoreAllMocks()
   vi.useRealTimers()
   window.localStorage.clear()
   document.body.innerHTML = ''
@@ -161,6 +175,250 @@ describe('auto-continue watcher', () => {
     vi.useFakeTimers()
     setAutoContinueEnabled(true)
     setAutoContinueConfig(DEFAULT_AUTO_CONTINUE_CONFIG)
+  })
+
+  async function armOwnedWait(reason: Record<string, unknown> = { kind: 'max-tokens' }) {
+    setAutoContinueConfig({ waitSeconds: 10 })
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.append('user/message', 1, { content: [{ type: 'text', text: 'task' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status().phase).toBe('waiting')
+    return { harness, binding, deadline: harness.runner.status().nextSendAt }
+  }
+
+  it.each(['binding replacement', 'connection reset'])('restores the original claimed countdown after %s exactly once', async mode => {
+    const { harness, binding, deadline } = await armOwnedWait({ kind: 'error', error: { code: 'TRANSPORT' } })
+    const requests = harness.runner.status().requestCount
+    await vi.advanceTimersByTimeAsync(3_000)
+    const replacement = mode === 'binding replacement' ? replacementBinding(binding) : binding
+    harness.bindings.set('s1', replacement)
+    if (mode === 'connection reset') harness.resetConnection()
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status()).toMatchObject({ phase: 'waiting', nextSendAt: deadline, consecutive: 0, requestCount: requests })
+    await vi.advanceTimersByTimeAsync(deadline - Date.now() - 1)
+    expect(replacement.prompts).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(replacement.prompts).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(replacement.prompts).toHaveLength(1)
+    expect(harness.runner.status().consecutive).toBe(1)
+  })
+
+  it('does not replay another runner’s claimed pending wait from persistent storage', async () => {
+    const { harness, binding } = await armOwnedWait()
+    harness.runner.dispose()
+    const fresh = makeHarness()
+    disposer = fresh.runner.dispose
+    fresh.bindings.set('s1', binding)
+    fresh.setCurrent('s1')
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(binding.prompts).toHaveLength(0)
+    expect(fresh.runner.status().phase).not.toBe('waiting')
+  })
+
+  it('keeps a restored wait while the replacement history is loading', async () => {
+    const { harness, binding, deadline } = await armOwnedWait()
+    const replacement = replacementBinding(binding)
+    replacement.setOpenState('opening')
+    harness.bindings.set('s1', replacement)
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(replacement.prompts).toHaveLength(0)
+    replacement.setOpenState('open')
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status()).toMatchObject({ phase: 'waiting', nextSendAt: deadline })
+    await vi.advanceTimersByTimeAsync(deadline - Date.now())
+    expect(replacement.prompts).toHaveLength(1)
+  })
+
+  it.each(['manual message', 'pending submission', 'global disable', 'session stop'])('does not revive a rebound countdown after %s', async guard => {
+    const { harness, binding } = await armOwnedWait()
+    const replacement = replacementBinding(binding)
+    if (guard === 'manual message') replacement.append('user/message', 3, { content: [{ type: 'text', text: '接管' }] })
+    if (guard === 'pending submission') replacement.setPending([{}])
+    if (guard === 'session stop') harness.runner.stop()
+    harness.bindings.set('s1', replacement)
+    harness.resetConnection()
+    if (guard === 'global disable') {
+      setAutoContinueEnabled(false)
+      setAutoContinueEnabled(true)
+    }
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(replacement.prompts).toHaveLength(0)
+    expect(binding.prompts).toHaveLength(0)
+    expect(harness.runner.status().phase).not.toBe('waiting')
+  })
+
+  it('prefers latest in-memory attempts, requests and muted state over stale valid storage after write failures', async () => {
+    const { harness, binding, deadline } = await armOwnedWait()
+    await vi.advanceTimersByTimeAsync(deadline - Date.now())
+    expect(binding.prompts).toHaveLength(1)
+    binding.append('user/message', 3, { content: [{ type: 'text', text: '继续' }] })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota exceeded') })
+    binding.append('turn/end', 4, { turn: 2, reason: { kind: 'max-tokens' } })
+    await vi.advanceTimersByTimeAsync(500)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(2)
+    const requests = harness.runner.status().requestCount
+    const replacement = replacementBinding(binding)
+    harness.bindings.set('s1', replacement)
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status()).toMatchObject({ consecutive: 2, requestCount: requests })
+    harness.runner.stop()
+    harness.bindings.set('s1', replacementBinding(replacement))
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status()).toMatchObject({ muted: true, consecutive: 0, requestCount: requests })
+  })
+
+  it('skips local waiting manually but retains the original provider Retry-After floor', async () => {
+    const { harness, binding } = await armOwnedWait({ kind: 'error', error: { code: 'RATE_LIMIT', providerRetryAfterMs: 5_000 } })
+    const status = harness.runner.status()
+    const providerDeadline = status.nextSendAt - status.waitMs + 5_000
+    harness.runner.resumeNow()
+    harness.runner.resumeNow()
+    expect(binding.prompts).toHaveLength(0)
+    expect(harness.runner.status().nextSendAt).toBe(providerDeadline)
+    harness.resetConnection()
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status().nextSendAt).toBe(providerDeadline)
+    await vi.advanceTimersByTimeAsync(providerDeadline - Date.now() - 1)
+    expect(binding.prompts).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(binding.prompts).toHaveLength(1)
+  })
+
+  it('backs off transient failures while max-tokens keeps its configured wait', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.append('user/message', 1, { content: [{ type: 'text', text: 'task' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    await failTurn(binding, 2, { kind: 'error', error: { code: 'TRANSPORT' } })
+    expect(binding.prompts).toHaveLength(1)
+    binding.append('turn/end', 3, { turn: 2, reason: { kind: 'error', error: { code: 'TRANSPORT' } } })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status().waitMs).toBe(4_000)
+    await vi.advanceTimersByTimeAsync(4_000)
+    binding.append('turn/end', 4, { turn: 3, reason: { kind: 'max-tokens' } })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(harness.runner.status().waitMs).toBe(2_000)
+  })
+
+  it('observes official retry countdown without sending and preserves running truth on budget exhaustion', async () => {
+    const config = { ...autoContinueConfig(), maxRequests: 2 }
+    vi.spyOn(preferences, 'autoContinueConfig').mockReturnValue(config)
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.append('turn/start', 1, { turn: 1 })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    const time = Date.now()
+    binding.append('llm/retry', 2, { retryId: 'r', turn: 1, step: 1, provider: 'a', retry: 1, delayMs: 5_000 })
+    expect(harness.runner.status()).toMatchObject({ phase: 'provider-retrying', providerRetry: 1, requestCount: 1, nextSendAt: time + 5_000, waitMs: 5_000 })
+    binding.append('llm/retry-started', 3, { retryId: 'r', turn: 1, step: 1, retry: 1 })
+    expect(harness.runner.status()).toMatchObject({ phase: 'provider-retrying', exhaustedReason: 'requests', requestCount: 2, waitMs: 0 })
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect(harness.runner.status().requestCount).toBe(2)
+    expect(binding.prompts).toHaveLength(0)
+    binding.append('turn/end', 4, { turn: 1, reason: { kind: 'error', error: { code: 'TRANSPORT' } } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(harness.runner.status()).toMatchObject({ phase: 'exhausted', exhaustedReason: 'requests' })
+    expect(binding.prompts).toHaveLength(0)
+    harness.runner.reset()
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', requestCount: 0 })
+  })
+
+  it('rechecks elapsed chain duration even when resumeNow skips its timer', async () => {
+    const config = { ...autoContinueConfig(), maxChainMinutes: 1 }
+    vi.spyOn(preferences, 'autoContinueConfig').mockReturnValue(config)
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.append('user/message', 1, { content: [{ type: 'text', text: 'task' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    binding.append('turn/end', 2, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.setRunning(false)
+    await vi.advanceTimersByTimeAsync(500)
+    vi.setSystemTime(Date.now() + 60_000)
+    harness.runner.resumeNow()
+    expect(binding.prompts).toHaveLength(0)
+    expect(harness.runner.status()).toMatchObject({ phase: 'exhausted', exhaustedReason: 'duration' })
+  })
+
+  it('recovers visible official retries and does not reset request budget when providers change', async () => {
+    const config = { ...autoContinueConfig(), maxRequests: 3 }
+    vi.spyOn(preferences, 'autoContinueConfig').mockReturnValue(config)
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.append('turn/start', 1, { turn: 1 })
+    binding.append('llm/retry', 2, { retryId: 'r1', turn: 1, provider: 'a', retry: 1, delayMs: 2_000 })
+    binding.append('llm/retry-started', 3, { retryId: 'r1', turn: 1, retry: 1 })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status()).toMatchObject({ phase: 'provider-retrying', requestCount: 2 })
+    binding.append('llm/retry', 4, { retryId: 'r2', turn: 1, provider: 'b', retry: 2, delayMs: 2_000 })
+    binding.append('llm/retry-started', 5, { retryId: 'r2', turn: 1, retry: 2 })
+    expect(harness.runner.status()).toMatchObject({ phase: 'provider-retrying', requestCount: 3, exhaustedReason: 'requests' })
+    harness.runner.stop()
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', muted: true })
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it('ignores historical official retry while a new turn is running', async () => {
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.append('turn/start', 1, { turn: 1 })
+    binding.append('llm/retry', 2, { retryId: 'old', turn: 1, retry: 1, delayMs: 5_000 })
+    binding.append('turn/end', 3, { turn: 1, reason: { kind: 'completed' } })
+    binding.append('turn/start', 4, { turn: 2 })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status().phase).toBe('idle')
+    expect(harness.runner.status().providerRetry).toBeUndefined()
+  })
+
+  it('treats an unowned historical continuation message as manual intent', async () => {
+    const config = { ...autoContinueConfig(), maxRequests: 2 }
+    vi.spyOn(preferences, 'autoContinueConfig').mockReturnValue(config)
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.append('turn/start', 1, { turn: 1 })
+    binding.append('llm/retry-started', 2, { retryId: 'old', turn: 1, retry: 1 })
+    binding.append('turn/end', 3, { turn: 1, reason: { kind: 'error', error: { code: 'TRANSPORT' } } })
+    binding.append('user/message', 4, { content: [{ type: 'text', text: '继续' }] })
+    binding.append('turn/start', 5, { turn: 2 })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status()).toMatchObject({ phase: 'idle', requestCount: 1, consecutive: 0 })
+    expect(harness.runner.status().exhaustedReason).toBeUndefined()
   })
 
   it('replies 继续 to a transport-disconnected turn it watched live', async () => {
@@ -246,7 +504,7 @@ describe('auto-continue watcher', () => {
   it.each([
     [2, 10_000, 10_000],
     [300, 200_000, 300_000],
-    [2, 200_000, 120_000],
+    [2, 200_000, 200_000],
   ])('respects wait=%i seconds and provider Retry-After=%i ms', async (waitSeconds, providerRetryAfterMs, delay) => {
     setAutoContinueConfig({ waitSeconds })
     const binding = await scheduledCutoff({ kind: 'error', error: { code: 'RATE_LIMIT', providerRetryAfterMs } })
@@ -911,6 +1169,86 @@ describe('auto-continue controller face', () => {
 
     harness.runner.reset()
     expect(harness.runner.status()).toMatchObject({ phase: 'idle', consecutive: 0, muted: false })
+  })
+
+  it('preserves attempts, requests and pending automatic echo across watcher reconstruction', async () => {
+    setAutoContinueConfig({ maxRetries: 1 })
+    const first = makeHarness()
+    const binding = makeBinding('s1')
+    first.bindings.set('s1', binding)
+    first.setCurrent('s1')
+    binding.append('user/message', 1, { content: [{ type: 'text', text: 'task' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    await failTurn(binding, 2, { kind: 'max-tokens' })
+    expect(binding.prompts).toHaveLength(1)
+    expect(first.runner.status().consecutive).toBe(1)
+    first.runner.dispose()
+
+    // The accepted prompt's durable echo arrives while no watcher is alive.
+    binding.append('user/message', 3, { content: [{ type: 'text', text: '继续' }] })
+    binding.append('turn/start', 4, { turn: 2 })
+    binding.setRunning(true)
+    const second = makeHarness()
+    disposer = second.runner.dispose
+    second.bindings.set('s1', binding)
+    second.setCurrent('s1')
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(second.runner.status()).toMatchObject({ consecutive: 1, requestCount: 2 })
+    await failTurn(binding, 5, { kind: 'max-tokens' })
+    expect(binding.prompts).toHaveLength(1)
+    expect(second.runner.status()).toMatchObject({ phase: 'exhausted', exhaustedReason: 'attempts' })
+
+    binding.append('user/message', 6, { content: [{ type: 'text', text: 'new task' }] })
+    expect(second.runner.status()).toMatchObject({ consecutive: 0, requestCount: 0 })
+  })
+
+  it('preserves request cap through same-document rebind and disable-enable', async () => {
+    setAutoContinueConfig({ maxRequests: 2 })
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    const binding = makeBinding('s1')
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    binding.append('user/message', 1, { content: [{ type: 'text', text: 'task' }] })
+    binding.setRunning(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    await failTurn(binding, 2, { kind: 'max-tokens' })
+    expect(binding.prompts).toHaveLength(1)
+    binding.append('user/message', 3, { content: [{ type: 'text', text: '继续' }] })
+    const replacement = makeBinding('s1')
+    for (const entry of binding.eventSource.getSnapshot().entries) {
+      if (entry.event) replacement.append(entry.event.type, entry.event.seq, entry.event.data)
+    }
+    replacement.setRunning(true)
+    harness.bindings.set('s1', replacement)
+    setAutoContinueEnabled(false)
+    setAutoContinueEnabled(true)
+    await vi.advanceTimersByTimeAsync(1_100)
+    expect(harness.runner.status()).toMatchObject({ consecutive: 1, requestCount: 2, exhaustedReason: 'requests' })
+    await failTurn(replacement, 4, { kind: 'max-tokens' })
+    expect(replacement.prompts).toHaveLength(0)
+  })
+
+  it('refuses cold recovery of an apparent automatic chain without a durable ledger', async () => {
+    const binding = makeBinding('s1')
+    binding.append('turn/end', 1, { turn: 1, reason: { kind: 'max-tokens' } })
+    binding.append('user/message', 2, { content: [{ type: 'text', text: '继续' }] })
+    binding.append('turn/end', 3, { turn: 2, reason: { kind: 'max-tokens' } })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('unavailable') })
+    const harness = makeHarness()
+    disposer = harness.runner.dispose
+    harness.bindings.set('s1', binding)
+    harness.setCurrent('s1')
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(binding.prompts).toHaveLength(0)
+  })
+
+  it('does not shorten RetryAfter to fit the remaining chain duration', async () => {
+    setAutoContinueConfig({ maxChainMinutes: 1 })
+    const binding = await scheduledCutoff({ kind: 'error', error: { code: 'RATE_LIMIT', providerRetryAfterMs: 200_000 } })
+    await vi.advanceTimersByTimeAsync(200_000)
+    expect(binding.prompts).toHaveLength(0)
   })
 
   it('keeps the chain alive through a second failure while the view is elsewhere', async () => {
