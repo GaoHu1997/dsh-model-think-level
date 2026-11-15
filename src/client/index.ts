@@ -82,6 +82,7 @@ import { createConfiguredInputs } from './configured-inputs.js'
 import { createConfiguredEfforts } from './injection/configured-efforts.js'
 import { createIdleAutofill } from './injection/autofill-run.js'
 import { createCompatGuard } from './injection/compat-guard.js'
+import { installCompatWriteSeam } from './injection/compat-write-seam.js'
 import { createModelsPage } from './injection/models-page.js'
 import { httpKeyManagerClient } from './key-manager-client.js'
 import { warmStoredKeyLists } from './key-list-warm.js'
@@ -182,6 +183,20 @@ export function apply(ctx: ClientContext): void {
       return undefined
     }
   })()
+  // Protocol-switch write seam: the kernel validates the whole document inside
+  // the write, so switching a route's protocol while its models still carry
+  // the OLD protocol's compat switches is refused outright ("sets compat
+  // "supportsReasoningEffort", but its api is "openai-responses", which does
+  // not take it"). The repair therefore rides the same mutate call — wrapped on
+  // `remote.settings` so the OFFICIAL card's Save is repaired too, not just
+  // this plugin's writes. Installed BEFORE this half reads its own api face, so
+  // every writer here goes through the wrap as well. See compat-write-seam.ts.
+  const compatSeam = installCompatWriteSeam(ctx.remote.settings)
+  if (compatSeam === undefined) {
+    console.error(`[bre] compat write seam unavailable: protocol switches will not auto-clean compat`)
+  } else {
+    ctx.effect(() => () => { compatSeam.dispose() }, 'dsh-model-think-level: compat write seam')
+  }
   const settingsApi: RemoteApi = settingsScope === undefined
     ? { settings: ctx.remote.settings }
     : { settings: ctx.remote.settings, scope: settingsScope }
@@ -240,6 +255,11 @@ export function apply(ctx: ClientContext): void {
   const modelsPage = createModelsPage({
     ctx, api: settingsApi, t,
     onIdle: (join?: SettingsJoin) => {
+      // The write seam is re-asserted HERE because this is the one pass that
+      // reliably follows a reconnect: the gateway re-installs its `mutate`
+      // accessor on a fresh connection, which retires the patch with no event of
+      // its own. One property read while nothing changed.
+      compatSeam?.ensure()
       compatGuard.run(join)
       autofill.run(join)
     },

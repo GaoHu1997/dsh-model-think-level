@@ -13,4 +13,5 @@
 - [0007 — 会话页两条轮询的「无事可做」快路径](0007-dom-poll-cost-guards.md) — 已接受；失败列表为空时 `decorate()` 不扫文档，单 dock 且 chip 已就位时 `ensure()` 不重新解析锚点，消除打字路径上的全文档扫描与强制布局
 - [0008 — 自动继续显式持有会话引用，后台巡检不依赖当前页面](0008-auto-continue-owns-session-references.md) — 已接受；正式 retain 保活、运行会话发现、全链巡检、代际守卫与全局取消
 - [0009 — 自动继续与供应商重试分层、限额与隐藏入口](0009-auto-continue-retry-boundaries.md) — 已接受；区分官方重试与轮后自动继续、指数退避与有限预算，仅隐藏官方入口而保留底层行为
+- [0010 — 切换 Wire 协议时协议专属 compat 随同一次写入自动清理](0010-protocol-switch-compat-cleanup-in-write.md) — 已接受；在 `ctx.remote.settings` 上加可拆卸写 seam，把 `stripForeignCompat` 并入卡片自己那次 mutate，避免内核 `resolveModelCompat` 在保存时拒绝整条路由
 
