@@ -149,43 +149,48 @@ describe('fingerprint runner scheduling', () => {
   })
 
   it('backs off after a rate-limited failure and drops to one at a time', async () => {
-    const { sender, deferreds } = manualSender()
-    setFingerprintSender(route, sender)
-    const runner = fingerprintRunner(route, { backoffMs: 500 })
+    // Fully fake clock, installed BEFORE the runner starts: every timer the
+    // drain loop schedules (including the backoff wait) is then driven by
+    // advanceTimersByTimeAsync instead of the real clock. A real-clock sleep
+    // raced CI load in both directions — a stalled runner left m3 unlaunched
+    // after the "window passed" sleep, and a long stall could push past the
+    // window during the "nothing launches" one (release run 43786718230).
+    vi.useFakeTimers()
+    try {
+      const { sender, deferreds } = manualSender()
+      setFingerprintSender(route, sender)
+      const runner = fingerprintRunner(route, { backoffMs: 500 })
 
-    runner.checkAll(['m1', 'm2', 'm3'])
-    await settle(0)
-    // Two went out together; m1 hits the provider's rate limiter.
-    deferreds.get('m1')!.resolve({ ok: false, error: 'fingerprint request failed (429)' })
-    await settle(10)
+      runner.checkAll(['m1', 'm2', 'm3'])
+      await vi.advanceTimersByTimeAsync(0)
+      // Two went out together; m1 hits the provider's rate limiter.
+      deferreds.get('m1')!.resolve({ ok: false, error: 'fingerprint request failed (429)' })
+      await vi.advanceTimersByTimeAsync(10)
 
-    // While the backoff window runs, nothing new is launched even though m2
-    // is still in flight and the queue is non-empty.
-    let state = runner.getState()
-    expect([...state.running.keys()].sort()).toEqual(['m2'])
-    expect(state.queued).toEqual(['m3'])
+      // While the backoff window runs, nothing new is launched even though m2
+      // is still in flight and the queue is non-empty.
+      let state = runner.getState()
+      expect([...state.running.keys()].sort()).toEqual(['m2'])
+      expect(state.queued).toEqual(['m3'])
 
-    // m2 lands inside the window; still nothing launches while it lasts.
-    // The backoff window and these assertions share the real clock, so a
-    // fixed sleep races CI load in BOTH directions: a delayed setTimeout
-    // can leave m3 unlaunched after the "window passed" sleep, and a long
-    // stall can push past the window during the "nothing launches" one.
-    // A wide window makes the mid-window assertions safe under any stall
-    // a test run survives, and vi.waitFor absorbs the late-side latency.
-    deferreds.get('m2')!.resolve({ ok: true, record: record('m2') })
-    await settle(0)
-    expect(runner.getState().queued).toEqual(['m3'])
-    expect(runner.getState().running.size).toBe(0)
+      // m2 lands inside the window; still nothing launches while it lasts.
+      deferreds.get('m2')!.resolve({ ok: true, record: record('m2') })
+      await vi.advanceTimersByTimeAsync(10)
+      expect(runner.getState().queued).toEqual(['m3'])
+      expect(runner.getState().running.size).toBe(0)
 
-    // The window passes: m3 may go, but alone — the batch is throttled to 1.
-    await vi.waitFor(() => {
-      expect([...runner.getState().running.keys()]).toEqual(['m3'])
-    })
-    expect(runner.getState().queued).toEqual([])
+      // The window passes: m3 may go, but alone — the batch is throttled to 1.
+      await vi.advanceTimersByTimeAsync(500)
+      state = runner.getState()
+      expect([...state.running.keys()]).toEqual(['m3'])
+      expect(state.queued).toEqual([])
 
-    deferreds.get('m3')!.resolve({ ok: true, record: record('m3') })
-    await settle(10)
-    expect(runner.idle()).toBe(true)
+      deferreds.get('m3')!.resolve({ ok: true, record: record('m3') })
+      await vi.advanceTimersByTimeAsync(10)
+      expect(runner.idle()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('resets the throttle and concurrency once the batch drains', async () => {
