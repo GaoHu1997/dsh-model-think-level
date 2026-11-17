@@ -42,7 +42,7 @@ import {
   type TurnEndClass,
 } from '../auto-continue-rules.js'
 import { loadAutoContinueLedger, saveAutoContinueLedger, clearAutoContinueLedger, type AutoContinueLedger } from './auto-continue-ledger.js'
-import { newChainBudget, observeRequest, budgetReason, retryDelay, providerRetryOf, type ChainBudget, type ExhaustedReason } from './auto-continue-runtime.js'
+import { newChainBudget, observeRequest, budgetReason, retryDelay, type ChainBudget, type ExhaustedReason } from './auto-continue-runtime.js'
 import { currentSessionId, type SessionsLike, type UiSessionLike } from './session-directory.js'
 
 /** How often bindings, running catalog roots and background chains are inspected. */
@@ -164,7 +164,7 @@ export interface AutoContinueRunner {
 export interface AutoContinueStatus {
   /** The watched session, undefined while nothing is open. */
   readonly sessionId: string | undefined
-  readonly phase: 'idle' | 'waiting' | 'sent' | 'exhausted' | 'provider-retrying'
+  readonly phase: 'idle' | 'waiting' | 'sent' | 'exhausted'
   /** Automatic replies already sent in THIS chain. */
   readonly consecutive: number
   readonly maxRetries: number
@@ -176,7 +176,6 @@ export interface AutoContinueStatus {
   readonly detail: string
   /** Whether the user stopped this session's chain. */
   readonly muted: boolean
-  readonly providerRetry?: number
   readonly requestCount?: number
   readonly exhaustedReason?: ExhaustedReason
 }
@@ -185,7 +184,6 @@ export interface AutoContinueStatus {
 interface Attached {
   budget: ChainBudget
   runtimeReady: boolean
-  providerRetry: number | undefined
   exhaustedReason: ExhaustedReason | undefined
   pendingTransient: boolean
   pendingSkipLocal: boolean
@@ -205,7 +203,7 @@ interface Attached {
   /** Consecutive automatic replies since the last reset. */
   consecutive: number
   /** What the controller shows: the chain's phase on this attachment. */
-  phase: 'idle' | 'waiting' | 'sent' | 'exhausted' | 'provider-retrying'
+  phase: 'idle' | 'waiting' | 'sent' | 'exhausted'
   /** Invalidates prompt acknowledgements after this chain is settled or superseded. */
   sendEpoch: number
   /** Epoch ms the armed reply fires at; 0 when none (and while frozen). */
@@ -288,7 +286,6 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       detail: state.detail,
       muted: muted.has(state.sessionId),
       requestCount: state.budget.requests,
-      ...(state.providerRetry === undefined ? {} : { providerRetry: state.providerRetry }),
       ...(state.exhaustedReason === undefined ? {} : { exhaustedReason: state.exhaustedReason }),
     }
   }
@@ -302,7 +299,6 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     && a.waitMs === b.waitMs
     && a.detail === b.detail
     && a.muted === b.muted
-    && a.providerRetry === b.providerRetry
     && a.requestCount === b.requestCount
     && a.exhaustedReason === b.exhaustedReason
 
@@ -339,7 +335,6 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     state.nextSendAt = 0
     state.waitMs = 0
     state.detail = ''
-    state.providerRetry = undefined
     state.exhaustedReason = undefined
     notifyStatus()
   }
@@ -527,12 +522,9 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     clearPendingSend(state)
     state.sendEpoch += 1
     state.exhaustedReason = reason
-    // Official retries are only observed: the plugin cannot cancel their RPC.
-    if (state.providerRetry === undefined) {
-      state.phase = 'exhausted'
-      state.nextSendAt = 0
-      state.waitMs = 0
-    }
+    state.phase = 'exhausted'
+    state.nextSendAt = 0
+    state.waitMs = 0
     notifyStatus()
   }
 
@@ -544,7 +536,7 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     for (let i = 0; i < events.length; i += 1) {
       const event = events[i]!
       if (event.seq <= state.budget.seq) continue
-      observeRequest(state.budget, event, Date.now())
+      observeRequest(state.budget, event)
       if (isIntentMessage(event) && !state.runtimeReady) {
         // Durable user messages do not identify this plugin as sender. On cold
         // recovery even an identical manual continuation is new intent; never
@@ -565,19 +557,6 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
     }
     state.runtimeReady = true
     persistLedger(state)
-    const snap = snapshotOfState(state)
-    const retry = providerRetryOf(events, snap?.running === true)
-    state.providerRetry = retry?.retry
-    if (retry !== undefined && autoContinueEnabled() && !muted.has(state.sessionId) && !snap?.subagent && snap?.open) {
-      clearPendingSend(state)
-      state.phase = 'provider-retrying'
-      state.nextSendAt = retry.nextSendAt
-      state.waitMs = retry.waitMs
-    } else if (state.phase === 'provider-retrying') {
-      state.phase = state.exhaustedReason === undefined ? (state.consecutive > 0 ? 'sent' : 'idle') : 'exhausted'
-      state.nextSendAt = 0
-      state.waitMs = 0
-    }
     const reason = budgetReason(state.budget, runtimeConfig(), state.consecutive, Date.now())
     if (reason !== undefined && (reason !== 'attempts' || state.phase === 'waiting' || state.phase === 'exhausted') && state.budget.startedAt !== undefined && autoContinueEnabled() && !muted.has(state.sessionId)) exhaust(state, reason)
     else notifyStatus()
@@ -1064,10 +1043,19 @@ export function createAutoContinue(deps: AutoContinueDeps): AutoContinueRunner {
       && retained?.pendingWait?.turnEndSeq === ledger?.lastHandledTurnEndSeq
       ? retained?.pendingWait : undefined
     const restored = ledger !== undefined
+    // The duration budget is wall-clock, but a ledger lives for 24 hours. A wait
+    // that was interrupted hours ago has no countdown to replay into a new
+    // document (pending waits never cross documents), so restoring its old
+    // `startedAt` would immediately judge "duration exhausted" and paint a chip
+    // for a wait that no longer exists. Drop a stale start here; the attempts
+    // and request budgets still restore within the TTL, so switching panes
+    // cannot bypass the retry ceiling.
+    const budget = restoreBudget(ledger)
+    const chainMinutes = runtimeConfig().maxChainMinutes ?? 30
+    if (budget.startedAt !== undefined && Date.now() - budget.startedAt >= chainMinutes * 60_000) budget.startedAt = undefined
     const state: Attached = {
-      budget: restoreBudget(ledger),
+      budget,
       runtimeReady: restored,
-      providerRetry: undefined,
       exhaustedReason: undefined,
       pendingTransient: pendingWait?.transient ?? false,
       pendingSkipLocal: pendingWait?.skipLocal ?? false,

@@ -168,7 +168,7 @@ export function AutoContinueChip(props: { runner: AutoContinueRunner; t: Transla
   }, [open])
 
   useEffect(() => {
-    if (status.phase !== 'waiting' && status.phase !== 'provider-retrying') return undefined
+    if (status.phase !== 'waiting') return undefined
     setNow(Date.now())
     const timer = window.setInterval(() => setNow(Date.now()), 500)
     return () => window.clearInterval(timer)
@@ -181,20 +181,17 @@ export function AutoContinueChip(props: { runner: AutoContinueRunner; t: Transla
   if (status.sessionId === undefined || status.phase === 'idle') return null
 
   const max = status.maxRetries
-  const providerRetrying = status.phase === 'provider-retrying'
   const attempt = status.phase === 'waiting' ? status.consecutive + 1 : status.consecutive
   const remaining = Math.max(0, status.nextSendAt - now)
   const seconds = Math.ceil(remaining / 1_000)
   const waitMs = Math.max(1_000, status.waitMs)
-  const ratio = status.phase === 'waiting' || providerRetrying ? Math.min(1, remaining / waitMs) : 0
+  const ratio = status.phase === 'waiting' ? Math.min(1, remaining / waitMs) : 0
   const exhaustion = status.exhaustedReason === 'requests'
     ? t('autoContinueControllerExhaustedRequests')
     : status.exhaustedReason === 'duration'
       ? t('autoContinueControllerExhaustedDuration')
       : undefined
-  const detail = providerRetrying
-    ? t('autoContinueControllerProviderRetryDesc')
-    : exhaustion ?? (status.detail === '' ? undefined : t('autoContinueControllerDetail', { detail: status.detail }))
+  const detail = exhaustion ?? (status.detail === '' ? undefined : t('autoContinueControllerDetail', { detail: status.detail }))
 
   const action = (text: string, run: () => void): ReactNode => (
     <button
@@ -215,16 +212,7 @@ export function AutoContinueChip(props: { runner: AutoContinueRunner; t: Transla
     actions.push(action(t('autoContinueControllerStop'), () => runner.stop()))
   }
 
-  const inner = providerRetrying
-    ? (
-      <>
-        {remaining > 0 ? <Ring ratio={ratio} /> : <Glyph className="bre-ac-tick"><path d="M4 12a8 8 0 1 0 2-5.3M4 4v5h5" /></Glyph>}
-        <span className="bre-ac-text">{t('autoContinueControllerProviderRetry')}</span>
-        {remaining > 0 && <span className="bre-ac-num">{t('autoContinueControllerSeconds', { seconds })}</span>}
-        <span className="bre-ac-ratio">{t('autoContinueControllerProviderAttempt', { n: status.providerRetry ?? 1 })}</span>
-      </>
-    )
-    : status.phase === 'waiting'
+  const inner = status.phase === 'waiting'
     ? (
       <>
         <Ring ratio={ratio} />
@@ -235,45 +223,40 @@ export function AutoContinueChip(props: { runner: AutoContinueRunner; t: Transla
       </>
     )
     : status.phase === 'sent'
-        ? (
-          <>
-            <Glyph className="bre-ac-tick"><path d="M4.8 12.5 9.6 17.3 19.2 6.9" /></Glyph>
-            <span className="bre-ac-text">{t('autoContinueControllerSent')}</span>
-            <span className="bre-ac-ratio">{t('autoContinueControllerRatio', { n: attempt, max })}</span>
-          </>
-        )
-        : (
-          <>
-            <Glyph className="bre-ac-tick"><circle cx="12" cy="12" r="8.2" /><path d="M12 7.6V12l3 1.9" /></Glyph>
-            <span className="bre-ac-text">{exhaustion ?? t('autoContinueControllerExhausted')}</span>
-            <span className="bre-ac-ratio">{t('autoContinueControllerRatio', { n: attempt, max })}</span>
-          </>
-        )
+      ? (
+        <>
+          <Glyph className="bre-ac-tick"><path d="M4.8 12.5 9.6 17.3 19.2 6.9" /></Glyph>
+          <span className="bre-ac-text">{t('autoContinueControllerSent')}</span>
+          <span className="bre-ac-ratio">{t('autoContinueControllerRatio', { n: attempt, max })}</span>
+        </>
+      )
+      : (
+        <>
+          <Glyph className="bre-ac-tick"><circle cx="12" cy="12" r="8.2" /><path d="M12 7.6V12l3 1.9" /></Glyph>
+          <span className="bre-ac-text">{exhaustion ?? t('autoContinueControllerExhausted')}</span>
+          <span className="bre-ac-ratio">{t('autoContinueControllerRatio', { n: attempt, max })}</span>
+        </>
+      )
 
-  const description = providerRetrying ? t('autoContinueControllerProviderRetryDesc')
-    : exhaustion ?? (status.phase === 'sent' ? t('autoContinueControllerSentDesc')
-      : status.phase === 'exhausted' ? t('autoContinueControllerExhausted')
-        : t('autoContinueControllerPopDesc', { seconds, max }))
+  const description = exhaustion ?? (status.phase === 'sent' ? t('autoContinueControllerSentDesc')
+    : status.phase === 'exhausted' ? t('autoContinueControllerExhausted')
+      : t('autoContinueControllerPopDesc', { seconds, max }))
   const accessibleStatus = [t('autoContinueControllerAria'),
-    providerRetrying ? t('autoContinueControllerProviderRetry') : status.phase === 'waiting' ? t('autoContinueControllerWaiting') : status.phase === 'sent' ? t('autoContinueControllerSent') : exhaustion ?? t('autoContinueControllerExhausted'),
-    (providerRetrying || status.phase === 'waiting') && remaining > 0 ? t('autoContinueControllerSeconds', { seconds }) : '',
-    providerRetrying ? t('autoContinueControllerProviderAttempt', { n: status.providerRetry ?? 1 }) : t('autoContinueControllerRatio', { n: attempt, max }),
+    status.phase === 'waiting' ? t('autoContinueControllerWaiting') : status.phase === 'sent' ? t('autoContinueControllerSent') : exhaustion ?? t('autoContinueControllerExhausted'),
+    status.phase === 'waiting' && remaining > 0 ? t('autoContinueControllerSeconds', { seconds }) : '',
+    t('autoContinueControllerRatio', { n: attempt, max }),
   ].filter(Boolean).join(' · ')
   const pop = open
     ? (
-      <div className="bre-ac-pop" role="dialog" aria-modal="false" aria-label={t(providerRetrying ? 'autoContinueControllerProviderRetry' : 'autoContinueControllerPopTitle')} id={popId} ref={popRef}>
+      <div className="bre-ac-pop" role="dialog" aria-modal="false" aria-label={t('autoContinueControllerPopTitle')} id={popId} ref={popRef}>
         <div className="bre-ac-pop-head">
-          <span className="bre-ac-pop-title">{t(providerRetrying ? 'autoContinueControllerProviderRetry' : 'autoContinueControllerPopTitle')}</span>
-          <span className="bre-ac-pop-badge">{providerRetrying
-            ? t('autoContinueControllerProviderAttempt', { n: status.providerRetry ?? 1 })
-            : t('autoContinueControllerPopBadge', { n: attempt, max })}</span>
+          <span className="bre-ac-pop-title">{t('autoContinueControllerPopTitle')}</span>
+          <span className="bre-ac-pop-badge">{t('autoContinueControllerPopBadge', { n: attempt, max })}</span>
         </div>
         <p className="bre-ac-pop-desc">
           {description}
         </p>
         {(status.requestCount ?? 0) > 0 && <p className="bre-ac-pop-desc">{t('autoContinueControllerRequestCount', { count: status.requestCount })}</p>}
-        {providerRetrying && exhaustion && <p className="bre-ac-pop-desc">{exhaustion}</p>}
-        {!providerRetrying && <p className="bre-ac-pop-desc">{t('autoContinueControllerOfficialRetryHint')}</p>}
         {actions.length > 0
           ? <div className="bre-ac-pop-actions">{actions}</div>
           : undefined}

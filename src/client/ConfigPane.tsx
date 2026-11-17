@@ -686,8 +686,6 @@ export function AutoContinueCard(props: { t: (key: string, params?: Record<strin
       ),
       createElement('p', { className: 'bre-config-card-hint' }, t('autoContinueBackoffHint')),
       createElement('p', { className: 'bre-config-card-hint' }, t('autoContinueRequestsHint')),
-      createElement('p', { className: 'bre-config-card-hint' }, t('autoContinueControllerProviderRetryDesc')),
-      createElement('p', { className: 'bre-config-card-hint' }, t('autoContinueControllerOfficialRetryHint')),
       createElement('div', { className: 'bre-config-trigger-field' },
         createElement('span', { className: 'bre-config-auto-label' }, t('autoContinueTriggers')),
         createElement(TriggerSelect, {

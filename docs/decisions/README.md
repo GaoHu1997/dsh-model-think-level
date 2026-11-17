@@ -12,6 +12,8 @@
 - [0006 — 自动继续的状态行改版与后台链条](0006-auto-continue-chip-and-background-chain.md) — 已接受；chip 改为「动词 + 倒计时环 + 弱化次数」；链条改为按会话持有，切走会话/最小化不再取消已决定的那一发，后台失败也会继续接管，空闲链按会话回收
 - [0007 — 会话页两条轮询的「无事可做」快路径](0007-dom-poll-cost-guards.md) — 已接受；失败列表为空时 `decorate()` 不扫文档，单 dock 且 chip 已就位时 `ensure()` 不重新解析锚点，消除打字路径上的全文档扫描与强制布局
 - [0008 — 自动继续显式持有会话引用，后台巡检不依赖当前页面](0008-auto-continue-owns-session-references.md) — 已接受；正式 retain 保活、运行会话发现、全链巡检、代际守卫与全局取消
-- [0009 — 自动继续与供应商重试分层、限额与隐藏入口](0009-auto-continue-retry-boundaries.md) — 已接受；区分官方重试与轮后自动继续、指数退避与有限预算，仅隐藏官方入口而保留底层行为
+- [0009 — 自动继续与供应商重试分层、限额与隐藏入口](0009-auto-continue-retry-boundaries.md) — 已接受；区分官方重试与轮后自动继续、指数退避与有限预算。观察官方重试与隐藏入口部分已被 0012 取代，预算与退避决策继续有效
 - [0010 — 切换 Wire 协议时协议专属 compat 随同一次写入自动清理](0010-protocol-switch-compat-cleanup-in-write.md) — 已接受；在 `ctx.remote.settings` 上加可拆卸写 seam，把 `stripForeignCompat` 并入卡片自己那次 mutate，避免内核 `resolveModelCompat` 在保存时拒绝整条路由
+- [0011 — 自动继续的累计时限不跨会话恢复复活](0011-auto-continue-duration-restore.md) — 已接受；冷恢复时作废超过 `maxChainMinutes` 的 `startedAt`，仍保留次数与请求预算防绕过，停止/开关语义不变
+- [0012 — 自动继续不观察、不改写官方重试](0012-auto-continue-ignores-official-retry.md) — 已接受；删除 `provider-retrying` 与官方重试计数、移除官方 `retryPolicy` 入口隐藏，判定只看 `turn/end`，我们发的「继续」才算我们的
 

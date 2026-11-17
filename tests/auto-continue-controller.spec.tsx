@@ -19,31 +19,20 @@ function render(status: Partial<AutoContinueStatus>) {
   return runner
 }
 describe('auto-continue status feedback', () => {
-  it('shows provider retry without an auto-continue action or fake exhaustion', () => {
-    render({ phase: 'provider-retrying', providerRetry: 3, requestCount: 4, exhaustedReason: 'requests' })
-    expect(host.textContent).toContain('autoContinueControllerProviderRetry')
-    expect(host.textContent).not.toContain('autoContinueControllerExhausted')
-    act(() => (host.querySelector('button') as HTMLButtonElement).click())
-    expect(host.textContent).toContain('autoContinueControllerProviderRetryDesc')
-    expect(host.textContent).toContain('autoContinueControllerRequestCount')
-    expect(host.textContent).toContain('autoContinueControllerExhaustedRequests')
-    expect(host.textContent).not.toContain('autoContinueControllerResume')
-    expect(host.textContent).not.toContain('autoContinueControllerStop')
-  })
   it('does not claim five automatic sends when request budget exhausted at one', () => {
     render({ phase: 'exhausted', exhaustedReason: 'requests' })
     expect(host.textContent).toContain('autoContinueControllerExhaustedRequests')
     expect(host.textContent).toContain('"n":1,"max":5')
     expect(host.textContent).not.toContain('"n":5,"max":5')
   })
-  it('exposes the provider phase to screen readers and closes with Escape', () => {
-    render({ phase: 'provider-retrying', providerRetry: 2 })
+  it('exposes the waiting phase to screen readers and closes with Escape', () => {
+    render({ phase: 'waiting', consecutive: 1 })
     const toggle = host.querySelector('button')!
-    expect(toggle.getAttribute('aria-label')).toContain('autoContinueControllerProviderRetry')
+    expect(toggle.getAttribute('aria-label')).toContain('autoContinueControllerWaiting')
     expect(toggle.getAttribute('aria-label')).toContain('autoContinueControllerSeconds')
     act(() => toggle.click())
     expect(host.querySelector('[role="dialog"]')).not.toBeNull()
-    expect(document.activeElement).toBe(host.querySelector('.bre-ac-link'))
+    expect(document.activeElement).toBe(host.querySelector('.bre-ac-action'))
     act(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
     expect(host.querySelector('[role="dialog"]')).toBeNull()
     expect(document.activeElement).toBe(toggle)
@@ -58,11 +47,11 @@ describe('auto-continue status feedback', () => {
     render({ phase: 'exhausted', exhaustedReason: 'duration' })
     expect(host.textContent).toContain('autoContinueControllerExhaustedDuration')
   })
-  it('keeps auto-continue manual controls and explains the two retry layers', () => {
+  it('keeps auto-continue manual controls and reports the observed request count', () => {
     render({ requestCount: 7 })
     act(() => (host.querySelector('button') as HTMLButtonElement).click())
     expect(host.textContent).toContain('autoContinueControllerResume')
     expect(host.textContent).toContain('autoContinueControllerStop')
-    expect(host.textContent).toContain('autoContinueControllerOfficialRetryHint')
+    expect(host.textContent).toContain('autoContinueControllerRequestCount')
   })
 })

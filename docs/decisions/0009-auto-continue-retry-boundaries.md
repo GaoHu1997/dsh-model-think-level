@@ -1,6 +1,6 @@
 # 0009 — 自动继续与供应商重试分层、限额与隐藏入口
 
-状态：已接受
+状态：已接受（其中「观察官方重试 / `provider-retrying` / 隐藏官方 `retryPolicy` 入口」的部分已被 [0012](0012-auto-continue-ignores-official-retry.md) 取代，其余预算与退避决策继续有效）
 
 ## 背景
 
